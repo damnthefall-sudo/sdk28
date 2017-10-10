@@ -16,7 +16,8 @@
 
 package com.android.systemui.pip.phone;
 
-import static android.app.ActivityManager.StackId.PINNED_STACK_ID;
+import static android.app.WindowConfiguration.ACTIVITY_TYPE_UNDEFINED;
+import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED;
 import static android.view.Display.DEFAULT_DISPLAY;
 
 import android.app.ActivityManager;
@@ -30,6 +31,7 @@ import android.graphics.Rect;
 import android.os.Handler;
 import android.os.RemoteException;
 import android.util.Log;
+import android.util.Pair;
 import android.view.IPinnedStackController;
 import android.view.IPinnedStackListener;
 import android.view.IWindowManager;
@@ -70,11 +72,11 @@ public class PipManager implements BasePipManager {
      */
     TaskStackListener mTaskStackListener = new TaskStackListener() {
         @Override
-        public void onActivityPinned(String packageName, int taskId) {
+        public void onActivityPinned(String packageName, int userId, int taskId, int stackId) {
             mTouchHandler.onActivityPinned();
             mMediaController.onActivityPinned();
             mMenuController.onActivityPinned();
-            mNotificationController.onActivityPinned(packageName,
+            mNotificationController.onActivityPinned(packageName, userId,
                     true /* deferUntilAnimationEnds */);
 
             SystemServicesProxy.getInstance(mContext).setPipVisibility(true);
@@ -82,13 +84,15 @@ public class PipManager implements BasePipManager {
 
         @Override
         public void onActivityUnpinned() {
-            ComponentName topPipActivity = PipUtils.getTopPinnedActivity(mContext,
-                    mActivityManager);
-            mMenuController.onActivityUnpinned(topPipActivity);
-            mTouchHandler.onActivityUnpinned(topPipActivity);
-            mNotificationController.onActivityUnpinned(topPipActivity);
+            final Pair<ComponentName, Integer> topPipActivityInfo = PipUtils.getTopPinnedActivity(
+                    mContext, mActivityManager);
+            final ComponentName topActivity = topPipActivityInfo.first;
+            final int userId = topActivity != null ? topPipActivityInfo.second : 0;
+            mMenuController.onActivityUnpinned();
+            mTouchHandler.onActivityUnpinned(topActivity);
+            mNotificationController.onActivityUnpinned(topActivity, userId);
 
-            SystemServicesProxy.getInstance(mContext).setPipVisibility(topPipActivity != null);
+            SystemServicesProxy.getInstance(mContext).setPipVisibility(topActivity != null);
         }
 
         @Override
@@ -196,7 +200,8 @@ public class PipManager implements BasePipManager {
     public final void onBusEvent(ExpandPipEvent event) {
         if (event.clearThumbnailWindows) {
             try {
-                StackInfo stackInfo = mActivityManager.getStackInfo(PINNED_STACK_ID);
+                StackInfo stackInfo = mActivityManager.getStackInfo(
+                        WINDOWING_MODE_PINNED, ACTIVITY_TYPE_UNDEFINED);
                 if (stackInfo != null && stackInfo.taskIds != null) {
                     SystemServicesProxy ssp = SystemServicesProxy.getInstance(mContext);
                     for (int taskId : stackInfo.taskIds) {

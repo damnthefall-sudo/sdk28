@@ -47,6 +47,7 @@ import java.util.Arrays;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import libcore.icu.ICU;
+import libcore.util.TimeZoneFinder;
 import libcore.util.ZoneInfoDB;
 
 import static android.app.timezone.RulesState.DISTRO_STATUS_INSTALLED;
@@ -69,18 +70,22 @@ public final class RulesManagerService extends IRulesManager.Stub {
                     DistroVersion.CURRENT_FORMAT_MINOR_VERSION);
 
     public static class Lifecycle extends SystemService {
-        private RulesManagerService mService;
-
         public Lifecycle(Context context) {
             super(context);
         }
 
         @Override
         public void onStart() {
-            mService = RulesManagerService.create(getContext());
-            mService.start();
+            RulesManagerService service = RulesManagerService.create(getContext());
+            service.start();
 
-            publishBinderService(Context.TIME_ZONE_RULES_MANAGER_SERVICE, mService);
+            // Publish the binder service so it can be accessed from other (appropriately
+            // permissioned) processes.
+            publishBinderService(Context.TIME_ZONE_RULES_MANAGER_SERVICE, service);
+
+            // Publish the service instance locally so we can use it directly from within the system
+            // server from TimeZoneUpdateIdler.
+            publishLocalService(RulesManagerService.class, service);
         }
     }
 
@@ -475,9 +480,10 @@ public final class RulesManagerService extends IRulesManager.Stub {
                         case 'a': {
                             // Report the active rules version (i.e. the rules in use by the current
                             // process).
-                            pw.println("Active rules version (ICU, libcore): "
+                            pw.println("Active rules version (ICU, ZoneInfoDB, TimeZoneFinder): "
                                     + ICU.getTZDataVersion() + ","
-                                    + ZoneInfoDB.getInstance().getVersion());
+                                    + ZoneInfoDB.getInstance().getVersion() + ","
+                                    + TimeZoneFinder.getInstance().getIanaVersion());
                             break;
                         }
                         default: {
@@ -490,10 +496,22 @@ public final class RulesManagerService extends IRulesManager.Stub {
         }
 
         pw.println("RulesManagerService state: " + toString());
-        pw.println("Active rules version (ICU, libcore): " + ICU.getTZDataVersion() + ","
-                + ZoneInfoDB.getInstance().getVersion());
+        pw.println("Active rules version (ICU, ZoneInfoDB, TimeZoneFinder): "
+                + ICU.getTZDataVersion() + ","
+                + ZoneInfoDB.getInstance().getVersion() + ","
+                + TimeZoneFinder.getInstance().getIanaVersion());
         pw.println("Distro state: " + rulesState.toString());
         mPackageTracker.dump(pw);
+    }
+
+    /**
+     * Called when the device is considered idle.
+     */
+    void notifyIdle() {
+        // No package has changed: we are just triggering because the device is idle and there
+        // *might* be work to do.
+        final boolean packageChanged = false;
+        mPackageTracker.triggerUpdateIfNeeded(packageChanged);
     }
 
     @Override

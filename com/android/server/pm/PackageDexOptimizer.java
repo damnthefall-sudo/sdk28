@@ -23,6 +23,7 @@ import android.content.pm.PackageParser;
 import android.os.FileUtils;
 import android.os.PowerManager;
 import android.os.SystemClock;
+import android.os.SystemProperties;
 import android.os.UserHandle;
 import android.os.WorkSource;
 import android.util.Log;
@@ -103,7 +104,17 @@ public class PackageDexOptimizer {
     }
 
     static boolean canOptimizePackage(PackageParser.Package pkg) {
-        return (pkg.applicationInfo.flags & ApplicationInfo.FLAG_HAS_CODE) != 0;
+        // We do not dexopt a package with no code.
+        if ((pkg.applicationInfo.flags & ApplicationInfo.FLAG_HAS_CODE) == 0) {
+            return false;
+        }
+
+        // We do not dexopt a priv-app package when pm.dexopt.priv-apps is false.
+        if (pkg.isPrivilegedApp()) {
+            return SystemProperties.getBoolean("pm.dexopt.priv-apps", true);
+        }
+
+        return true;
     }
 
     /**
@@ -354,18 +365,13 @@ public class PackageDexOptimizer {
                 + " dexoptFlags=" + printDexoptFlags(dexoptFlags)
                 + " target-filter=" + compilerFilter);
 
-        String classLoaderContext;
-        if (dexUseInfo.isUnknownClassLoaderContext() ||
-                dexUseInfo.isUnsupportedClassLoaderContext() ||
-                dexUseInfo.isVariableClassLoaderContext()) {
-            // If we have an unknown (not yet set), unsupported (custom class loaders), or a
-            // variable class loader chain, compile without a context and mark the oat file with
-            // SKIP_SHARED_LIBRARY_CHECK. Note that his might lead to a incorrect compilation.
-            // TODO(calin): We should just extract in this case.
-            classLoaderContext = SKIP_SHARED_LIBRARY_CHECK;
-        } else {
-            classLoaderContext = dexUseInfo.getClassLoaderContext();
-        }
+        // TODO(calin): b/64530081 b/66984396. Use SKIP_SHARED_LIBRARY_CHECK for the context
+        // (instead of dexUseInfo.getClassLoaderContext()) in order to compile secondary dex files
+        // in isolation (and avoid to extract/verify the main apk if it's in the class path).
+        // Note this trades correctness for performance since the resulting slow down is
+        // unacceptable in some cases until b/64530081 is fixed.
+        String classLoaderContext = SKIP_SHARED_LIBRARY_CHECK;
+
         try {
             for (String isa : dexUseInfo.getLoaderIsas()) {
                 // Reuse the same dexopt path as for the primary apks. We don't need all the
@@ -425,7 +431,7 @@ public class PackageDexOptimizer {
             }
 
             if (useInfo.isUsedByOtherApps(path)) {
-                pw.println("used be other apps: " + useInfo.getLoadingPackages(path));
+                pw.println("used by other apps: " + useInfo.getLoadingPackages(path));
             }
 
             Map<String, PackageDexUsage.DexUseInfo> dexUseInfoMap = useInfo.getDexUseInfoMap();
@@ -438,19 +444,10 @@ public class PackageDexOptimizer {
                     PackageDexUsage.DexUseInfo dexUseInfo = e.getValue();
                     pw.println(dex);
                     pw.increaseIndent();
-                    for (String isa : dexUseInfo.getLoaderIsas()) {
-                        String status = null;
-                        try {
-                            status = DexFile.getDexFileStatus(path, isa);
-                        } catch (IOException ioe) {
-                             status = "[Exception]: " + ioe.getMessage();
-                        }
-                        pw.println(isa + ": " + status);
-                    }
-
+                    // TODO(calin): get the status of the oat file (needs installd call)
                     pw.println("class loader context: " + dexUseInfo.getClassLoaderContext());
                     if (dexUseInfo.isUsedByOtherApps()) {
-                        pw.println("used be other apps: " + dexUseInfo.getLoadingPackages());
+                        pw.println("used by other apps: " + dexUseInfo.getLoadingPackages());
                     }
                     pw.decreaseIndent();
                 }
@@ -474,8 +471,9 @@ public class PackageDexOptimizer {
         }
 
         if (isProfileGuidedCompilerFilter(targetCompilerFilter) && isUsedByOtherApps) {
-            // If the dex files is used by other apps, we cannot use profile-guided compilation.
-            return getNonProfileGuidedCompilerFilter(targetCompilerFilter);
+            // If the dex files is used by other apps, apply the shared filter.
+            return PackageManagerServiceCompilerMapping.getCompilerFilterForReason(
+                    PackageManagerService.REASON_SHARED);
         }
 
         return targetCompilerFilter;

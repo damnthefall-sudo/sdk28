@@ -17,6 +17,9 @@
 package android.app;
 
 import static android.app.ActivityThread.isSystem;
+import static android.app.WindowConfigurationProto.ACTIVITY_TYPE;
+import static android.app.WindowConfigurationProto.APP_BOUNDS;
+import static android.app.WindowConfigurationProto.WINDOWING_MODE;
 
 import android.annotation.IntDef;
 import android.annotation.NonNull;
@@ -25,6 +28,7 @@ import android.content.res.Configuration;
 import android.graphics.Rect;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.util.proto.ProtoOutputStream;
 import android.view.DisplayInfo;
 
 /**
@@ -48,26 +52,33 @@ public class WindowConfiguration implements Parcelable, Comparable<WindowConfigu
     /** The current windowing mode of the configuration. */
     private @WindowingMode int mWindowingMode;
 
-    /** Windowing mode is currently not defined.
-     * @hide */
+    /** Windowing mode is currently not defined. */
     public static final int WINDOWING_MODE_UNDEFINED = 0;
-    /** Occupies the full area of the screen or the parent container.
-     * @hide */
+    /** Occupies the full area of the screen or the parent container. */
     public static final int WINDOWING_MODE_FULLSCREEN = 1;
-    /** Always on-top (always visible). of other siblings in its parent container.
-     * @hide */
+    /** Always on-top (always visible). of other siblings in its parent container. */
     public static final int WINDOWING_MODE_PINNED = 2;
-    /** The primary container driving the screen to be in split-screen mode.
-     * @hide */
+    /** The primary container driving the screen to be in split-screen mode. */
     public static final int WINDOWING_MODE_SPLIT_SCREEN_PRIMARY = 3;
     /**
      * The containers adjacent to the {@link #WINDOWING_MODE_SPLIT_SCREEN_PRIMARY} container in
      * split-screen mode.
-     * @hide
+     * NOTE: Containers launched with the windowing mode with APIs like
+     * {@link ActivityOptions#setLaunchWindowingMode(int)} will be launched in
+     * {@link #WINDOWING_MODE_FULLSCREEN} if the display isn't currently in split-screen windowing
+     * mode
+     * @see #WINDOWING_MODE_FULLSCREEN_OR_SPLIT_SCREEN_SECONDARY
      */
     public static final int WINDOWING_MODE_SPLIT_SCREEN_SECONDARY = 4;
-    /** Can be freely resized within its parent container.
-     * @hide */
+    /**
+     * Alias for {@link #WINDOWING_MODE_SPLIT_SCREEN_SECONDARY} that makes it clear that the usage
+     * points for APIs like {@link ActivityOptions#setLaunchWindowingMode(int)} that the container
+     * will launch into fullscreen or split-screen secondary depending on if the device is currently
+     * in fullscreen mode or split-screen mode.
+     */
+    public static final int WINDOWING_MODE_FULLSCREEN_OR_SPLIT_SCREEN_SECONDARY =
+            WINDOWING_MODE_SPLIT_SCREEN_SECONDARY;
+    /** Can be freely resized within its parent container. */
     public static final int WINDOWING_MODE_FREEFORM = 5;
 
     /** @hide */
@@ -77,6 +88,7 @@ public class WindowConfiguration implements Parcelable, Comparable<WindowConfigu
             WINDOWING_MODE_PINNED,
             WINDOWING_MODE_SPLIT_SCREEN_PRIMARY,
             WINDOWING_MODE_SPLIT_SCREEN_SECONDARY,
+            WINDOWING_MODE_FULLSCREEN_OR_SPLIT_SCREEN_SECONDARY,
             WINDOWING_MODE_FREEFORM,
     })
     public @interface WindowingMode {}
@@ -84,18 +96,15 @@ public class WindowConfiguration implements Parcelable, Comparable<WindowConfigu
     /** The current activity type of the configuration. */
     private @ActivityType int mActivityType;
 
-    /** Activity type is currently not defined.
-     * @hide */
+    /** Activity type is currently not defined. */
     public static final int ACTIVITY_TYPE_UNDEFINED = 0;
-    /** Standard activity type. Nothing special about the activity...
-     * @hide */
+    /** Standard activity type. Nothing special about the activity... */
     public static final int ACTIVITY_TYPE_STANDARD = 1;
     /** Home/Launcher activity type. */
     public static final int ACTIVITY_TYPE_HOME = 2;
     /** Recents/Overview activity type. */
     public static final int ACTIVITY_TYPE_RECENTS = 3;
-    /** Assistant activity type.
-     * @hide */
+    /** Assistant activity type. */
     public static final int ACTIVITY_TYPE_ASSISTANT = 4;
 
     /** @hide */
@@ -127,7 +136,6 @@ public class WindowConfiguration implements Parcelable, Comparable<WindowConfigu
             })
     public @interface WindowConfig {}
 
-    /** @hide */
     public WindowConfiguration() {
         unset();
     }
@@ -176,7 +184,6 @@ public class WindowConfiguration implements Parcelable, Comparable<WindowConfigu
      * Set {@link #mAppBounds} to the input Rect.
      * @param rect The rect value to set {@link #mAppBounds} to.
      * @see #getAppBounds()
-     * @hide
      */
     public void setAppBounds(Rect rect) {
         if (rect == null) {
@@ -200,26 +207,20 @@ public class WindowConfiguration implements Parcelable, Comparable<WindowConfigu
         mAppBounds.set(left, top, right, bottom);
     }
 
-    /**
-     * @see #setAppBounds(Rect)
-     * @hide
-     */
+    /** @see #setAppBounds(Rect) */
     public Rect getAppBounds() {
         return mAppBounds;
     }
 
-    /** @hide */
     public void setWindowingMode(@WindowingMode int windowingMode) {
         mWindowingMode = windowingMode;
     }
 
-    /** @hide */
     @WindowingMode
     public int getWindowingMode() {
         return mWindowingMode;
     }
 
-    /** @hide */
     public void setActivityType(@ActivityType int activityType) {
         if (mActivityType == activityType) {
             return;
@@ -237,13 +238,11 @@ public class WindowConfiguration implements Parcelable, Comparable<WindowConfigu
         mActivityType = activityType;
     }
 
-    /** @hide */
     @ActivityType
     public int getActivityType() {
         return mActivityType;
     }
 
-    /** @hide */
     public void setTo(WindowConfiguration other) {
         setAppBounds(other.mAppBounds);
         setWindowingMode(other.mWindowingMode);
@@ -382,6 +381,24 @@ public class WindowConfiguration implements Parcelable, Comparable<WindowConfigu
     }
 
     /**
+     * Write to a protocol buffer output stream.
+     * Protocol buffer message definition at {@link android.app.WindowConfigurationProto}
+     *
+     * @param protoOutputStream Stream to write the WindowConfiguration object to.
+     * @param fieldId           Field Id of the WindowConfiguration as defined in the parent message
+     * @hide
+     */
+    public void writeToProto(ProtoOutputStream protoOutputStream, long fieldId) {
+        final long token = protoOutputStream.start(fieldId);
+        if (mAppBounds != null) {
+            mAppBounds.writeToProto(protoOutputStream, APP_BOUNDS);
+        }
+        protoOutputStream.write(WINDOWING_MODE, mWindowingMode);
+        protoOutputStream.write(ACTIVITY_TYPE, mActivityType);
+        protoOutputStream.end(token);
+    }
+
+    /**
      * Returns true if the activities associated with this window configuration display a shadow
      * around their border.
      * @hide
@@ -483,10 +500,15 @@ public class WindowConfiguration implements Parcelable, Comparable<WindowConfigu
      * @hide
      */
     public boolean supportSplitScreenWindowingMode() {
-        if (mActivityType == ACTIVITY_TYPE_ASSISTANT) {
+        return supportSplitScreenWindowingMode(mWindowingMode, mActivityType);
+    }
+
+    /** @hide */
+    public static boolean supportSplitScreenWindowingMode(int windowingMode, int activityType) {
+        if (activityType == ACTIVITY_TYPE_ASSISTANT) {
             return false;
         }
-        return mWindowingMode != WINDOWING_MODE_FREEFORM && mWindowingMode != WINDOWING_MODE_PINNED;
+        return windowingMode != WINDOWING_MODE_FREEFORM && windowingMode != WINDOWING_MODE_PINNED;
     }
 
     private static String windowingModeToString(@WindowingMode int windowingMode) {

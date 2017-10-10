@@ -16,9 +16,11 @@
 
 package android.widget;
 
+import static android.app.WindowConfiguration.WINDOWING_MODE_UNDEFINED;
+
 import android.annotation.ColorInt;
 import android.annotation.DimenRes;
-import android.app.ActivityManager.StackId;
+import android.annotation.NonNull;
 import android.app.ActivityOptions;
 import android.app.ActivityThread;
 import android.app.Application;
@@ -107,9 +109,9 @@ public class RemoteViews implements Parcelable, Filter {
     // The unique identifiers for each custom {@link Action}.
     private static final int SET_ON_CLICK_PENDING_INTENT_TAG = 1;
     private static final int REFLECTION_ACTION_TAG = 2;
-    private static final int SET_DRAWABLE_PARAMETERS_TAG = 3;
+    private static final int SET_DRAWABLE_TINT_TAG = 3;
     private static final int VIEW_GROUP_ACTION_ADD_TAG = 4;
-    private static final int SET_REFLECTION_ACTION_WITHOUT_PARAMS_TAG = 5;
+    private static final int VIEW_CONTENT_NAVIGATION_TAG = 5;
     private static final int SET_EMPTY_VIEW_ACTION_TAG = 6;
     private static final int VIEW_GROUP_ACTION_REMOVE_TAG = 7;
     private static final int SET_PENDING_INTENT_TEMPLATE_TAG = 8;
@@ -120,7 +122,6 @@ public class RemoteViews implements Parcelable, Filter {
     private static final int TEXT_VIEW_SIZE_ACTION_TAG = 13;
     private static final int VIEW_PADDING_ACTION_TAG = 14;
     private static final int SET_REMOTE_VIEW_ADAPTER_LIST_TAG = 15;
-    private static final int TEXT_VIEW_DRAWABLE_COLOR_FILTER_ACTION_TAG = 17;
     private static final int SET_REMOTE_INPUTS_ACTION_TAG = 18;
     private static final int LAYOUT_PARAM_ACTION_TAG = 19;
     private static final int OVERRIDE_TEXT_COLORS_TAG = 20;
@@ -324,11 +325,11 @@ public class RemoteViews implements Parcelable, Filter {
 
         public boolean onClickHandler(View view, PendingIntent pendingIntent,
                 Intent fillInIntent) {
-            return onClickHandler(view, pendingIntent, fillInIntent, StackId.INVALID_STACK_ID);
+            return onClickHandler(view, pendingIntent, fillInIntent, WINDOWING_MODE_UNDEFINED);
         }
 
         public boolean onClickHandler(View view, PendingIntent pendingIntent,
-                Intent fillInIntent, int launchStackId) {
+                Intent fillInIntent, int windowingMode) {
             try {
                 // TODO: Unregister this handler if PendingIntent.FLAG_ONE_SHOT?
                 Context context = view.getContext();
@@ -339,8 +340,8 @@ public class RemoteViews implements Parcelable, Filter {
                     opts = ActivityOptions.makeBasic();
                 }
 
-                if (launchStackId != StackId.INVALID_STACK_ID) {
-                    opts.setLaunchStackId(launchStackId);
+                if (windowingMode != WINDOWING_MODE_UNDEFINED) {
+                    opts.setLaunchWindowingMode(windowingMode);
                 }
                 context.startIntentSender(
                         pendingIntent.getIntentSender(), fillInIntent,
@@ -388,10 +389,10 @@ public class RemoteViews implements Parcelable, Filter {
             return MERGE_REPLACE;
         }
 
-        public abstract String getActionName();
+        public abstract int getActionTag();
 
         public String getUniqueKey() {
-            return (getActionName() + viewId);
+            return (getActionTag() + "_" + viewId);
         }
 
         /**
@@ -423,8 +424,8 @@ public class RemoteViews implements Parcelable, Filter {
      */
     private static abstract class RuntimeAction extends Action {
         @Override
-        public final String getActionName() {
-            return "RuntimeAction";
+        public final int getActionTag() {
+            return 0;
         }
 
         @Override
@@ -513,7 +514,6 @@ public class RemoteViews implements Parcelable, Filter {
     }
 
     private class SetEmptyView extends Action {
-        int viewId;
         int emptyViewId;
 
         SetEmptyView(int viewId, int emptyViewId) {
@@ -527,7 +527,6 @@ public class RemoteViews implements Parcelable, Filter {
         }
 
         public void writeToParcel(Parcel out, int flags) {
-            out.writeInt(SET_EMPTY_VIEW_ACTION_TAG);
             out.writeInt(this.viewId);
             out.writeInt(this.emptyViewId);
         }
@@ -545,8 +544,9 @@ public class RemoteViews implements Parcelable, Filter {
             adapterView.setEmptyView(emptyView);
         }
 
-        public String getActionName() {
-            return "SetEmptyView";
+        @Override
+        public int getActionTag() {
+            return SET_EMPTY_VIEW_ACTION_TAG;
         }
     }
 
@@ -558,13 +558,12 @@ public class RemoteViews implements Parcelable, Filter {
 
         public SetOnClickFillInIntent(Parcel parcel) {
             viewId = parcel.readInt();
-            fillInIntent = Intent.CREATOR.createFromParcel(parcel);
+            fillInIntent = parcel.readTypedObject(Intent.CREATOR);
         }
 
         public void writeToParcel(Parcel dest, int flags) {
-            dest.writeInt(SET_ON_CLICK_FILL_IN_INTENT_TAG);
             dest.writeInt(viewId);
-            fillInIntent.writeToParcel(dest, 0 /* no flags */);
+            dest.writeTypedObject(fillInIntent, 0 /* no flags */);
         }
 
         @Override
@@ -623,8 +622,9 @@ public class RemoteViews implements Parcelable, Filter {
             }
         }
 
-        public String getActionName() {
-            return "SetOnClickFillInIntent";
+        @Override
+        public int getActionTag() {
+            return SET_ON_CLICK_FILL_IN_INTENT_TAG;
         }
 
         Intent fillInIntent;
@@ -642,9 +642,8 @@ public class RemoteViews implements Parcelable, Filter {
         }
 
         public void writeToParcel(Parcel dest, int flags) {
-            dest.writeInt(SET_PENDING_INTENT_TEMPLATE_TAG);
             dest.writeInt(viewId);
-            pendingIntentTemplate.writeToParcel(dest, 0 /* no flags */);
+            PendingIntent.writePendingIntentOrNullToParcel(pendingIntentTemplate, dest);
         }
 
         @Override
@@ -698,8 +697,9 @@ public class RemoteViews implements Parcelable, Filter {
             }
         }
 
-        public String getActionName() {
-            return "SetPendingIntentTemplate";
+        @Override
+        public int getActionTag() {
+            return SET_PENDING_INTENT_TEMPLATE_TAG;
         }
 
         PendingIntent pendingIntentTemplate;
@@ -715,30 +715,13 @@ public class RemoteViews implements Parcelable, Filter {
         public SetRemoteViewsAdapterList(Parcel parcel) {
             viewId = parcel.readInt();
             viewTypeCount = parcel.readInt();
-            int count = parcel.readInt();
-            list = new ArrayList<RemoteViews>();
-
-            for (int i = 0; i < count; i++) {
-                RemoteViews rv = RemoteViews.CREATOR.createFromParcel(parcel);
-                list.add(rv);
-            }
+            list = parcel.createTypedArrayList(RemoteViews.CREATOR);
         }
 
         public void writeToParcel(Parcel dest, int flags) {
-            dest.writeInt(SET_REMOTE_VIEW_ADAPTER_LIST_TAG);
             dest.writeInt(viewId);
             dest.writeInt(viewTypeCount);
-
-            if (list == null || list.size() == 0) {
-                dest.writeInt(0);
-            } else {
-                int count = list.size();
-                dest.writeInt(count);
-                for (int i = 0; i < count; i++) {
-                    RemoteViews rv = list.get(i);
-                    rv.writeToParcel(dest, flags);
-                }
-            }
+            dest.writeTypedList(list, flags);
         }
 
         @Override
@@ -778,8 +761,9 @@ public class RemoteViews implements Parcelable, Filter {
             }
         }
 
-        public String getActionName() {
-            return "SetRemoteViewsAdapterList";
+        @Override
+        public int getActionTag() {
+            return SET_REMOTE_VIEW_ADAPTER_LIST_TAG;
         }
 
         int viewTypeCount;
@@ -794,13 +778,12 @@ public class RemoteViews implements Parcelable, Filter {
 
         public SetRemoteViewsAdapterIntent(Parcel parcel) {
             viewId = parcel.readInt();
-            intent = Intent.CREATOR.createFromParcel(parcel);
+            intent = parcel.readTypedObject(Intent.CREATOR);
         }
 
         public void writeToParcel(Parcel dest, int flags) {
-            dest.writeInt(SET_REMOTE_VIEW_ADAPTER_INTENT_TAG);
             dest.writeInt(viewId);
-            intent.writeToParcel(dest, flags);
+            dest.writeTypedObject(intent, flags);
         }
 
         @Override
@@ -844,8 +827,9 @@ public class RemoteViews implements Parcelable, Filter {
             return copy;
         }
 
-        public String getActionName() {
-            return "SetRemoteViewsAdapterIntent";
+        @Override
+        public int getActionTag() {
+            return SET_REMOTE_VIEW_ADAPTER_INTENT_TAG;
         }
 
         Intent intent;
@@ -865,22 +849,12 @@ public class RemoteViews implements Parcelable, Filter {
 
         public SetOnClickPendingIntent(Parcel parcel) {
             viewId = parcel.readInt();
-
-            // We check a flag to determine if the parcel contains a PendingIntent.
-            if (parcel.readInt() != 0) {
-                pendingIntent = PendingIntent.readPendingIntentOrNullFromParcel(parcel);
-            }
+            pendingIntent = PendingIntent.readPendingIntentOrNullFromParcel(parcel);
         }
 
         public void writeToParcel(Parcel dest, int flags) {
-            dest.writeInt(SET_ON_CLICK_PENDING_INTENT_TAG);
             dest.writeInt(viewId);
-
-            // We use a flag to indicate whether the parcel contains a valid object.
-            dest.writeInt(pendingIntent != null ? 1 : 0);
-            if (pendingIntent != null) {
-                pendingIntent.writeToParcel(dest, 0 /* no flags */);
-            }
+            PendingIntent.writePendingIntentOrNullToParcel(pendingIntent, dest);
         }
 
         @Override
@@ -921,8 +895,9 @@ public class RemoteViews implements Parcelable, Filter {
             target.setOnClickListener(listener);
         }
 
-        public String getActionName() {
-            return "SetOnClickPendingIntent";
+        @Override
+        public int getActionTag() {
+            return SET_ON_CLICK_PENDING_INTENT_TAG;
         }
 
         PendingIntent pendingIntent;
@@ -1011,55 +986,37 @@ public class RemoteViews implements Parcelable, Filter {
     }
 
     /**
-     * Equivalent to calling a combination of {@link Drawable#setAlpha(int)},
+     * Equivalent to calling
      * {@link Drawable#setColorFilter(int, android.graphics.PorterDuff.Mode)},
-     * and/or {@link Drawable#setLevel(int)} on the {@link Drawable} of a given view.
+     * on the {@link Drawable} of a given view.
      * <p>
-     * These operations will be performed on the {@link Drawable} returned by the
+     * The operation will be performed on the {@link Drawable} returned by the
      * target {@link View#getBackground()} by default.  If targetBackground is false,
      * we assume the target is an {@link ImageView} and try applying the operations
      * to {@link ImageView#getDrawable()}.
      * <p>
-     * You can omit specific calls by marking their values with null or -1.
      */
-    private class SetDrawableParameters extends Action {
-        public SetDrawableParameters(int id, boolean targetBackground, int alpha,
-                int colorFilter, PorterDuff.Mode mode, int level) {
+    private class SetDrawableTint extends Action {
+        SetDrawableTint(int id, boolean targetBackground,
+                int colorFilter, @NonNull PorterDuff.Mode mode) {
             this.viewId = id;
             this.targetBackground = targetBackground;
-            this.alpha = alpha;
             this.colorFilter = colorFilter;
             this.filterMode = mode;
-            this.level = level;
         }
 
-        public SetDrawableParameters(Parcel parcel) {
+        SetDrawableTint(Parcel parcel) {
             viewId = parcel.readInt();
             targetBackground = parcel.readInt() != 0;
-            alpha = parcel.readInt();
             colorFilter = parcel.readInt();
-            boolean hasMode = parcel.readInt() != 0;
-            if (hasMode) {
-                filterMode = PorterDuff.Mode.valueOf(parcel.readString());
-            } else {
-                filterMode = null;
-            }
-            level = parcel.readInt();
+            filterMode = PorterDuff.intToMode(parcel.readInt());
         }
 
         public void writeToParcel(Parcel dest, int flags) {
-            dest.writeInt(SET_DRAWABLE_PARAMETERS_TAG);
             dest.writeInt(viewId);
             dest.writeInt(targetBackground ? 1 : 0);
-            dest.writeInt(alpha);
             dest.writeInt(colorFilter);
-            if (filterMode != null) {
-                dest.writeInt(1);
-                dest.writeString(filterMode.toString());
-            } else {
-                dest.writeInt(0);
-            }
-            dest.writeInt(level);
+            dest.writeInt(PorterDuff.modeToInt(filterMode));
         }
 
         @Override
@@ -1077,47 +1034,36 @@ public class RemoteViews implements Parcelable, Filter {
             }
 
             if (targetDrawable != null) {
-                // Perform modifications only if values are set correctly
-                if (alpha != -1) {
-                    targetDrawable.mutate().setAlpha(alpha);
-                }
-                if (filterMode != null) {
-                    targetDrawable.mutate().setColorFilter(colorFilter, filterMode);
-                }
-                if (level != -1) {
-                    targetDrawable.mutate().setLevel(level);
-                }
+                targetDrawable.mutate().setColorFilter(colorFilter, filterMode);
             }
         }
 
-        public String getActionName() {
-            return "SetDrawableParameters";
+        @Override
+        public int getActionTag() {
+            return SET_DRAWABLE_TINT_TAG;
         }
 
         boolean targetBackground;
-        int alpha;
         int colorFilter;
         PorterDuff.Mode filterMode;
-        int level;
     }
 
-    private final class ReflectionActionWithoutParams extends Action {
-        final String methodName;
+    private final class ViewContentNavigation extends Action {
+        final boolean mNext;
 
-        ReflectionActionWithoutParams(int viewId, String methodName) {
+        ViewContentNavigation(int viewId, boolean next) {
             this.viewId = viewId;
-            this.methodName = methodName;
+            this.mNext = next;
         }
 
-        ReflectionActionWithoutParams(Parcel in) {
+        ViewContentNavigation(Parcel in) {
             this.viewId = in.readInt();
-            this.methodName = in.readString();
+            this.mNext = in.readBoolean();
         }
 
         public void writeToParcel(Parcel out, int flags) {
-            out.writeInt(SET_REFLECTION_ACTION_WITHOUT_PARAMS_TAG);
             out.writeInt(this.viewId);
-            out.writeString(this.methodName);
+            out.writeBoolean(this.mNext);
         }
 
         @Override
@@ -1126,23 +1072,20 @@ public class RemoteViews implements Parcelable, Filter {
             if (view == null) return;
 
             try {
-                getMethod(view, this.methodName, null, false /* async */).invoke(view);
+                getMethod(view,
+                        mNext ? "showNext" : "showPrevious", null, false /* async */).invoke(view);
             } catch (Throwable ex) {
                 throw new ActionException(ex);
             }
         }
 
         public int mergeBehavior() {
-            // we don't need to build up showNext or showPrevious calls
-            if (methodName.equals("showNext") || methodName.equals("showPrevious")) {
-                return MERGE_IGNORE;
-            } else {
-                return MERGE_REPLACE;
-            }
+            return MERGE_IGNORE;
         }
 
-        public String getActionName() {
-            return "ReflectionActionWithoutParams";
+        @Override
+        public int getActionTag() {
+            return VIEW_CONTENT_NAVIGATION_TAG;
         }
     }
 
@@ -1156,12 +1099,7 @@ public class RemoteViews implements Parcelable, Filter {
         }
 
         public BitmapCache(Parcel source) {
-            int count = source.readInt();
-            mBitmaps = new ArrayList<>(count);
-            for (int i = 0; i < count; i++) {
-                Bitmap b = Bitmap.CREATOR.createFromParcel(source);
-                mBitmaps.add(b);
-            }
+            mBitmaps = source.createTypedArrayList(Bitmap.CREATOR);
         }
 
         public int getBitmapId(Bitmap b) {
@@ -1187,11 +1125,7 @@ public class RemoteViews implements Parcelable, Filter {
         }
 
         public void writeBitmapsToParcel(Parcel dest, int flags) {
-            int count = mBitmaps.size();
-            dest.writeInt(count);
-            for (int i = 0; i < count; i++) {
-                mBitmaps.get(i).writeToParcel(dest, flags);
-            }
+            dest.writeTypedList(mBitmaps, flags);
         }
 
         public int getBitmapMemory() {
@@ -1227,7 +1161,6 @@ public class RemoteViews implements Parcelable, Filter {
 
         @Override
         public void writeToParcel(Parcel dest, int flags) {
-            dest.writeInt(BITMAP_REFLECTION_ACTION_TAG);
             dest.writeInt(viewId);
             dest.writeString(methodName);
             dest.writeInt(bitmapId);
@@ -1246,8 +1179,9 @@ public class RemoteViews implements Parcelable, Filter {
             bitmapId = bitmapCache.getBitmapId(bitmap);
         }
 
-        public String getActionName() {
-            return "BitmapReflectionAction";
+        @Override
+        public int getActionTag() {
+            return BITMAP_REFLECTION_ACTION_TAG;
         }
     }
 
@@ -1299,7 +1233,7 @@ public class RemoteViews implements Parcelable, Filter {
             // written to the parcel.
             switch (this.type) {
                 case BOOLEAN:
-                    this.value = in.readInt() != 0;
+                    this.value = in.readBoolean();
                     break;
                 case BYTE:
                     this.value = in.readByte();
@@ -1329,39 +1263,28 @@ public class RemoteViews implements Parcelable, Filter {
                     this.value = TextUtils.CHAR_SEQUENCE_CREATOR.createFromParcel(in);
                     break;
                 case URI:
-                    if (in.readInt() != 0) {
-                        this.value = Uri.CREATOR.createFromParcel(in);
-                    }
+                    this.value = in.readTypedObject(Uri.CREATOR);
                     break;
                 case BITMAP:
-                    if (in.readInt() != 0) {
-                        this.value = Bitmap.CREATOR.createFromParcel(in);
-                    }
+                    this.value = in.readTypedObject(Bitmap.CREATOR);
                     break;
                 case BUNDLE:
                     this.value = in.readBundle();
                     break;
                 case INTENT:
-                    if (in.readInt() != 0) {
-                        this.value = Intent.CREATOR.createFromParcel(in);
-                    }
+                    this.value = in.readTypedObject(Intent.CREATOR);
                     break;
                 case COLOR_STATE_LIST:
-                    if (in.readInt() != 0) {
-                        this.value = ColorStateList.CREATOR.createFromParcel(in);
-                    }
+                    this.value = in.readTypedObject(ColorStateList.CREATOR);
                     break;
                 case ICON:
-                    if (in.readInt() != 0) {
-                        this.value = Icon.CREATOR.createFromParcel(in);
-                    }
+                    this.value = in.readTypedObject(Icon.CREATOR);
                 default:
                     break;
             }
         }
 
         public void writeToParcel(Parcel out, int flags) {
-            out.writeInt(REFLECTION_ACTION_TAG);
             out.writeInt(this.viewId);
             out.writeString(this.methodName);
             out.writeInt(this.type);
@@ -1375,7 +1298,7 @@ public class RemoteViews implements Parcelable, Filter {
             // we have written a valid value to the parcel.
             switch (this.type) {
                 case BOOLEAN:
-                    out.writeInt((Boolean) this.value ? 1 : 0);
+                    out.writeBoolean((Boolean) this.value);
                     break;
                 case BYTE:
                     out.writeByte((Byte) this.value);
@@ -1412,10 +1335,7 @@ public class RemoteViews implements Parcelable, Filter {
                 case INTENT:
                 case COLOR_STATE_LIST:
                 case ICON:
-                    out.writeInt(this.value != null ? 1 : 0);
-                    if (this.value != null) {
-                        ((Parcelable) this.value).writeToParcel(out, flags);
-                    }
+                    out.writeTypedObject((Parcelable) this.value, flags);
                     break;
                 default:
                     break;
@@ -1521,10 +1441,16 @@ public class RemoteViews implements Parcelable, Filter {
             }
         }
 
-        public String getActionName() {
+        @Override
+        public int getActionTag() {
+            return REFLECTION_ACTION_TAG;
+        }
+
+        @Override
+        public String getUniqueKey() {
             // Each type of reflection action corresponds to a setter, so each should be seen as
             // unique from the standpoint of merging.
-            return "ReflectionAction" + this.methodName + this.type;
+            return super.getUniqueKey() + this.methodName + this.type;
         }
 
         @Override
@@ -1586,7 +1512,6 @@ public class RemoteViews implements Parcelable, Filter {
         }
 
         public void writeToParcel(Parcel dest, int flags) {
-            dest.writeInt(VIEW_GROUP_ACTION_ADD_TAG);
             dest.writeInt(viewId);
             dest.writeInt(mIndex);
             mNestedViews.writeToParcel(dest, flags);
@@ -1661,10 +1586,9 @@ public class RemoteViews implements Parcelable, Filter {
             return mNestedViews.prefersAsyncApply();
         }
 
-
         @Override
-        public String getActionName() {
-            return "ViewGroupActionAdd";
+        public int getActionTag() {
+            return VIEW_GROUP_ACTION_ADD_TAG;
         }
     }
 
@@ -1696,7 +1620,6 @@ public class RemoteViews implements Parcelable, Filter {
         }
 
         public void writeToParcel(Parcel dest, int flags) {
-            dest.writeInt(VIEW_GROUP_ACTION_REMOVE_TAG);
             dest.writeInt(viewId);
             dest.writeInt(mViewIdToKeep);
         }
@@ -1762,8 +1685,8 @@ public class RemoteViews implements Parcelable, Filter {
         }
 
         @Override
-        public String getActionName() {
-            return "ViewGroupActionRemove";
+        public int getActionTag() {
+            return VIEW_GROUP_ACTION_REMOVE_TAG;
         }
 
         @Override
@@ -1803,18 +1726,10 @@ public class RemoteViews implements Parcelable, Filter {
             isRelative = (parcel.readInt() != 0);
             useIcons = (parcel.readInt() != 0);
             if (useIcons) {
-                if (parcel.readInt() != 0) {
-                    i1 = Icon.CREATOR.createFromParcel(parcel);
-                }
-                if (parcel.readInt() != 0) {
-                    i2 = Icon.CREATOR.createFromParcel(parcel);
-                }
-                if (parcel.readInt() != 0) {
-                    i3 = Icon.CREATOR.createFromParcel(parcel);
-                }
-                if (parcel.readInt() != 0) {
-                    i4 = Icon.CREATOR.createFromParcel(parcel);
-                }
+                i1 = parcel.readTypedObject(Icon.CREATOR);
+                i2 = parcel.readTypedObject(Icon.CREATOR);
+                i3 = parcel.readTypedObject(Icon.CREATOR);
+                i4 = parcel.readTypedObject(Icon.CREATOR);
             } else {
                 d1 = parcel.readInt();
                 d2 = parcel.readInt();
@@ -1824,35 +1739,14 @@ public class RemoteViews implements Parcelable, Filter {
         }
 
         public void writeToParcel(Parcel dest, int flags) {
-            dest.writeInt(TEXT_VIEW_DRAWABLE_ACTION_TAG);
             dest.writeInt(viewId);
             dest.writeInt(isRelative ? 1 : 0);
             dest.writeInt(useIcons ? 1 : 0);
             if (useIcons) {
-                if (i1 != null) {
-                    dest.writeInt(1);
-                    i1.writeToParcel(dest, 0);
-                } else {
-                    dest.writeInt(0);
-                }
-                if (i2 != null) {
-                    dest.writeInt(1);
-                    i2.writeToParcel(dest, 0);
-                } else {
-                    dest.writeInt(0);
-                }
-                if (i3 != null) {
-                    dest.writeInt(1);
-                    i3.writeToParcel(dest, 0);
-                } else {
-                    dest.writeInt(0);
-                }
-                if (i4 != null) {
-                    dest.writeInt(1);
-                    i4.writeToParcel(dest, 0);
-                } else {
-                    dest.writeInt(0);
-                }
+                dest.writeTypedObject(i1, 0);
+                dest.writeTypedObject(i2, 0);
+                dest.writeTypedObject(i3, 0);
+                dest.writeTypedObject(i4, 0);
             } else {
                 dest.writeInt(d1);
                 dest.writeInt(d2);
@@ -1923,8 +1817,9 @@ public class RemoteViews implements Parcelable, Filter {
             return useIcons;
         }
 
-        public String getActionName() {
-            return "TextViewDrawableAction";
+        @Override
+        public int getActionTag() {
+            return TEXT_VIEW_DRAWABLE_ACTION_TAG;
         }
 
         boolean isRelative = false;
@@ -1953,7 +1848,6 @@ public class RemoteViews implements Parcelable, Filter {
         }
 
         public void writeToParcel(Parcel dest, int flags) {
-            dest.writeInt(TEXT_VIEW_SIZE_ACTION_TAG);
             dest.writeInt(viewId);
             dest.writeInt(units);
             dest.writeFloat(size);
@@ -1966,8 +1860,9 @@ public class RemoteViews implements Parcelable, Filter {
             target.setTextSize(units, size);
         }
 
-        public String getActionName() {
-            return "TextViewSizeAction";
+        @Override
+        public int getActionTag() {
+            return TEXT_VIEW_SIZE_ACTION_TAG;
         }
 
         int units;
@@ -1995,7 +1890,6 @@ public class RemoteViews implements Parcelable, Filter {
         }
 
         public void writeToParcel(Parcel dest, int flags) {
-            dest.writeInt(VIEW_PADDING_ACTION_TAG);
             dest.writeInt(viewId);
             dest.writeInt(left);
             dest.writeInt(top);
@@ -2010,8 +1904,9 @@ public class RemoteViews implements Parcelable, Filter {
             target.setPadding(left, top, right, bottom);
         }
 
-        public String getActionName() {
-            return "ViewPaddingAction";
+        @Override
+        public int getActionTag() {
+            return VIEW_PADDING_ACTION_TAG;
         }
 
         int left, top, right, bottom;
@@ -2028,6 +1923,9 @@ public class RemoteViews implements Parcelable, Filter {
         public static final int LAYOUT_WIDTH = 2;
         public static final int LAYOUT_MARGIN_BOTTOM_DIMEN = 3;
 
+        final int mProperty;
+        final int mValue;
+
         /**
          * @param viewId ID of the view alter
          * @param property which layout parameter to alter
@@ -2035,21 +1933,20 @@ public class RemoteViews implements Parcelable, Filter {
          */
         public LayoutParamAction(int viewId, int property, int value) {
             this.viewId = viewId;
-            this.property = property;
-            this.value = value;
+            this.mProperty = property;
+            this.mValue = value;
         }
 
         public LayoutParamAction(Parcel parcel) {
             viewId = parcel.readInt();
-            property = parcel.readInt();
-            value = parcel.readInt();
+            mProperty = parcel.readInt();
+            mValue = parcel.readInt();
         }
 
         public void writeToParcel(Parcel dest, int flags) {
-            dest.writeInt(LAYOUT_PARAM_ACTION_TAG);
             dest.writeInt(viewId);
-            dest.writeInt(property);
-            dest.writeInt(value);
+            dest.writeInt(mProperty);
+            dest.writeInt(mValue);
         }
 
         @Override
@@ -2062,27 +1959,27 @@ public class RemoteViews implements Parcelable, Filter {
             if (layoutParams == null) {
                 return;
             }
-            switch (property) {
+            switch (mProperty) {
                 case LAYOUT_MARGIN_END_DIMEN:
                     if (layoutParams instanceof ViewGroup.MarginLayoutParams) {
-                        int resolved = resolveDimenPixelOffset(target, value);
+                        int resolved = resolveDimenPixelOffset(target, mValue);
                         ((ViewGroup.MarginLayoutParams) layoutParams).setMarginEnd(resolved);
                         target.setLayoutParams(layoutParams);
                     }
                     break;
                 case LAYOUT_MARGIN_BOTTOM_DIMEN:
                     if (layoutParams instanceof ViewGroup.MarginLayoutParams) {
-                        int resolved = resolveDimenPixelOffset(target, value);
+                        int resolved = resolveDimenPixelOffset(target, mValue);
                         ((ViewGroup.MarginLayoutParams) layoutParams).bottomMargin = resolved;
                         target.setLayoutParams(layoutParams);
                     }
                     break;
                 case LAYOUT_WIDTH:
-                    layoutParams.width = value;
+                    layoutParams.width = mValue;
                     target.setLayoutParams(layoutParams);
                     break;
                 default:
-                    throw new IllegalArgumentException("Unknown property " + property);
+                    throw new IllegalArgumentException("Unknown property " + mProperty);
             }
         }
 
@@ -2093,79 +1990,15 @@ public class RemoteViews implements Parcelable, Filter {
             return target.getContext().getResources().getDimensionPixelOffset(value);
         }
 
-        public String getActionName() {
-            return "LayoutParamAction" + property + ".";
-        }
-
-        int property;
-        int value;
-    }
-
-    /**
-     * Helper action to set a color filter on a compound drawable on a TextView. Supports relative
-     * (s/t/e/b) or cardinal (l/t/r/b) arrangement.
-     */
-    private class TextViewDrawableColorFilterAction extends Action {
-        public TextViewDrawableColorFilterAction(int viewId, boolean isRelative, int index,
-                int color, PorterDuff.Mode mode) {
-            this.viewId = viewId;
-            this.isRelative = isRelative;
-            this.index = index;
-            this.color = color;
-            this.mode = mode;
-        }
-
-        public TextViewDrawableColorFilterAction(Parcel parcel) {
-            viewId = parcel.readInt();
-            isRelative = (parcel.readInt() != 0);
-            index = parcel.readInt();
-            color = parcel.readInt();
-            mode = readPorterDuffMode(parcel);
-        }
-
-        private PorterDuff.Mode readPorterDuffMode(Parcel parcel) {
-            int mode = parcel.readInt();
-            if (mode >= 0 && mode < PorterDuff.Mode.values().length) {
-                return PorterDuff.Mode.values()[mode];
-            } else {
-                return PorterDuff.Mode.CLEAR;
-            }
-        }
-
-        public void writeToParcel(Parcel dest, int flags) {
-            dest.writeInt(TEXT_VIEW_DRAWABLE_COLOR_FILTER_ACTION_TAG);
-            dest.writeInt(viewId);
-            dest.writeInt(isRelative ? 1 : 0);
-            dest.writeInt(index);
-            dest.writeInt(color);
-            dest.writeInt(mode.ordinal());
+        @Override
+        public int getActionTag() {
+            return LAYOUT_PARAM_ACTION_TAG;
         }
 
         @Override
-        public void apply(View root, ViewGroup rootParent, OnClickHandler handler) {
-            final TextView target = root.findViewById(viewId);
-            if (target == null) return;
-            Drawable[] drawables = isRelative
-                    ? target.getCompoundDrawablesRelative()
-                    : target.getCompoundDrawables();
-            if (index < 0 || index >= 4) {
-                throw new IllegalStateException("index must be in range [0, 3].");
-            }
-            Drawable d = drawables[index];
-            if (d != null) {
-                d.mutate();
-                d.setColorFilter(color, mode);
-            }
+        public String getUniqueKey() {
+            return super.getUniqueKey() + mProperty;
         }
-
-        public String getActionName() {
-            return "TextViewDrawableColorFilterAction";
-        }
-
-        final boolean isRelative;
-        final int index;
-        final int color;
-        final PorterDuff.Mode mode;
     }
 
     /**
@@ -2184,7 +2017,6 @@ public class RemoteViews implements Parcelable, Filter {
         }
 
         public void writeToParcel(Parcel dest, int flags) {
-            dest.writeInt(SET_REMOTE_INPUTS_ACTION_TAG);
             dest.writeInt(viewId);
             dest.writeTypedArray(remoteInputs, flags);
         }
@@ -2197,8 +2029,9 @@ public class RemoteViews implements Parcelable, Filter {
             target.setTagInternal(R.id.remote_input_tag, remoteInputs);
         }
 
-        public String getActionName() {
-            return "SetRemoteInputsAction";
+        @Override
+        public int getActionTag() {
+            return SET_REMOTE_INPUTS_ACTION_TAG;
         }
 
         final Parcelable[] remoteInputs;
@@ -2220,7 +2053,6 @@ public class RemoteViews implements Parcelable, Filter {
         }
 
         public void writeToParcel(Parcel dest, int flags) {
-            dest.writeInt(OVERRIDE_TEXT_COLORS_TAG);
             dest.writeInt(textColor);
         }
 
@@ -2245,8 +2077,9 @@ public class RemoteViews implements Parcelable, Filter {
             }
         }
 
-        public String getActionName() {
-            return "OverrideTextColorsAction";
+        @Override
+        public int getActionTag() {
+            return OVERRIDE_TEXT_COLORS_TAG;
         }
     }
 
@@ -2338,20 +2171,12 @@ public class RemoteViews implements Parcelable, Filter {
         }
 
         if (src.mActions != null) {
-            mActions = new ArrayList<>();
-
             Parcel p = Parcel.obtain();
-            int count = src.mActions.size();
-            for (int i = 0; i < count; i++) {
-                p.setDataPosition(0);
-                Action a = src.mActions.get(i);
-                a.writeToParcel(
-                        p, a.hasSameAppInfo(mApplication) ? PARCELABLE_ELIDE_DUPLICATES : 0);
-                p.setDataPosition(0);
-                // Since src is already in memory, we do not care about stack overflow as it has
-                // already been read once.
-                mActions.add(getActionFromParcel(p, 0));
-            }
+            src.writeActionsToParcel(p);
+            p.setDataPosition(0);
+            // Since src is already in memory, we do not care about stack overflow as it has
+            // already been read once.
+            readActionsFromParcel(p, 0);
             p.recycle();
         }
 
@@ -2392,13 +2217,7 @@ public class RemoteViews implements Parcelable, Filter {
             mLayoutId = parcel.readInt();
             mIsWidgetCollectionChild = parcel.readInt() == 1;
 
-            int count = parcel.readInt();
-            if (count > 0) {
-                mActions = new ArrayList<>(count);
-                for (int i = 0; i < count; i++) {
-                    mActions.add(getActionFromParcel(parcel, depth));
-                }
-            }
+            readActionsFromParcel(parcel, depth);
         } else {
             // MODE_HAS_LANDSCAPE_AND_PORTRAIT
             mLandscape = new RemoteViews(parcel, mBitmapCache, info, depth);
@@ -2409,21 +2228,31 @@ public class RemoteViews implements Parcelable, Filter {
         mReapplyDisallowed = parcel.readInt() == 0;
     }
 
+    private void readActionsFromParcel(Parcel parcel, int depth) {
+        int count = parcel.readInt();
+        if (count > 0) {
+            mActions = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) {
+                mActions.add(getActionFromParcel(parcel, depth));
+            }
+        }
+    }
+
     private Action getActionFromParcel(Parcel parcel, int depth) {
         int tag = parcel.readInt();
         switch (tag) {
             case SET_ON_CLICK_PENDING_INTENT_TAG:
                 return new SetOnClickPendingIntent(parcel);
-            case SET_DRAWABLE_PARAMETERS_TAG:
-                return new SetDrawableParameters(parcel);
+            case SET_DRAWABLE_TINT_TAG:
+                return new SetDrawableTint(parcel);
             case REFLECTION_ACTION_TAG:
                 return new ReflectionAction(parcel);
             case VIEW_GROUP_ACTION_ADD_TAG:
                 return new ViewGroupActionAdd(parcel, mBitmapCache, mApplication, depth);
             case VIEW_GROUP_ACTION_REMOVE_TAG:
                 return new ViewGroupActionRemove(parcel);
-            case SET_REFLECTION_ACTION_WITHOUT_PARAMS_TAG:
-                return new ReflectionActionWithoutParams(parcel);
+            case VIEW_CONTENT_NAVIGATION_TAG:
+                return new ViewContentNavigation(parcel);
             case SET_EMPTY_VIEW_ACTION_TAG:
                 return new SetEmptyView(parcel);
             case SET_PENDING_INTENT_TEMPLATE_TAG:
@@ -2442,8 +2271,6 @@ public class RemoteViews implements Parcelable, Filter {
                 return new BitmapReflectionAction(parcel);
             case SET_REMOTE_VIEW_ADAPTER_LIST_TAG:
                 return new SetRemoteViewsAdapterList(parcel);
-            case TEXT_VIEW_DRAWABLE_COLOR_FILTER_ACTION_TAG:
-                return new TextViewDrawableColorFilterAction(parcel);
             case SET_REMOTE_INPUTS_ACTION_TAG:
                 return new SetRemoteInputsAction(parcel);
             case LAYOUT_PARAM_ACTION_TAG:
@@ -2600,7 +2427,7 @@ public class RemoteViews implements Parcelable, Filter {
      * @param viewId The id of the view on which to call {@link AdapterViewAnimator#showNext()}
      */
     public void showNext(int viewId) {
-        addAction(new ReflectionActionWithoutParams(viewId, "showNext"));
+        addAction(new ViewContentNavigation(viewId, true /* next */));
     }
 
     /**
@@ -2609,7 +2436,7 @@ public class RemoteViews implements Parcelable, Filter {
      * @param viewId The id of the view on which to call {@link AdapterViewAnimator#showPrevious()}
      */
     public void showPrevious(int viewId) {
-        addAction(new ReflectionActionWithoutParams(viewId, "showPrevious"));
+        addAction(new ViewContentNavigation(viewId, false /* next */));
     }
 
     /**
@@ -2680,28 +2507,6 @@ public class RemoteViews implements Parcelable, Filter {
      */
     public void setTextViewCompoundDrawablesRelative(int viewId, int start, int top, int end, int bottom) {
         addAction(new TextViewDrawableAction(viewId, true, start, top, end, bottom));
-    }
-
-    /**
-     * Equivalent to applying a color filter on one of the drawables in
-     * {@link android.widget.TextView#getCompoundDrawablesRelative()}.
-     *
-     * @param viewId The id of the view whose text should change.
-     * @param index  The index of the drawable in the array of
-     *               {@link android.widget.TextView#getCompoundDrawablesRelative()} to set the color
-     *               filter on. Must be in [0, 3].
-     * @param color  The color of the color filter. See
-     *               {@link Drawable#setColorFilter(int, android.graphics.PorterDuff.Mode)}.
-     * @param mode   The mode of the color filter. See
-     *               {@link Drawable#setColorFilter(int, android.graphics.PorterDuff.Mode)}.
-     * @hide
-     */
-    public void setTextViewCompoundDrawablesRelativeColorFilter(int viewId,
-            int index, int color, PorterDuff.Mode mode) {
-        if (index < 0 || index >= 4) {
-            throw new IllegalArgumentException("index must be in range [0, 3].");
-        }
-        addAction(new TextViewDrawableColorFilterAction(viewId, true, index, color, mode));
     }
 
     /**
@@ -2901,12 +2706,10 @@ public class RemoteViews implements Parcelable, Filter {
 
     /**
      * @hide
-     * Equivalent to calling a combination of {@link Drawable#setAlpha(int)},
+     * Equivalent to calling
      * {@link Drawable#setColorFilter(int, android.graphics.PorterDuff.Mode)},
-     * and/or {@link Drawable#setLevel(int)} on the {@link Drawable} of a given
-     * view.
+     * on the {@link Drawable} of a given view.
      * <p>
-     * You can omit specific calls by marking their values with null or -1.
      *
      * @param viewId The id of the view that contains the target
      *            {@link Drawable}
@@ -2915,20 +2718,15 @@ public class RemoteViews implements Parcelable, Filter {
      *            {@link android.view.View#getBackground()}. Otherwise, assume
      *            the target view is an {@link ImageView} and apply them to
      *            {@link ImageView#getDrawable()}.
-     * @param alpha Specify an alpha value for the drawable, or -1 to leave
-     *            unchanged.
      * @param colorFilter Specify a color for a
      *            {@link android.graphics.ColorFilter} for this drawable. This will be ignored if
      *            {@code mode} is {@code null}.
      * @param mode Specify a PorterDuff mode for this drawable, or null to leave
      *            unchanged.
-     * @param level Specify the level for the drawable, or -1 to leave
-     *            unchanged.
      */
-    public void setDrawableParameters(int viewId, boolean targetBackground, int alpha,
-            int colorFilter, PorterDuff.Mode mode, int level) {
-        addAction(new SetDrawableParameters(viewId, targetBackground, alpha,
-                colorFilter, mode, level));
+    public void setDrawableTint(int viewId, boolean targetBackground,
+            int colorFilter, @NonNull PorterDuff.Mode mode) {
+        addAction(new SetDrawableTint(viewId, targetBackground, colorFilter, mode));
     }
 
     /**
@@ -3695,18 +3493,7 @@ public class RemoteViews implements Parcelable, Filter {
             }
             dest.writeInt(mLayoutId);
             dest.writeInt(mIsWidgetCollectionChild ? 1 : 0);
-            int count;
-            if (mActions != null) {
-                count = mActions.size();
-            } else {
-                count = 0;
-            }
-            dest.writeInt(count);
-            for (int i=0; i<count; i++) {
-                Action a = mActions.get(i);
-                a.writeToParcel(dest, a.hasSameAppInfo(mApplication)
-                        ? PARCELABLE_ELIDE_DUPLICATES : 0);
-            }
+            writeActionsToParcel(dest);
         } else {
             dest.writeInt(MODE_HAS_LANDSCAPE_AND_PORTRAIT);
             // We only write the bitmap cache if we are the root RemoteViews, as this cache
@@ -3719,6 +3506,22 @@ public class RemoteViews implements Parcelable, Filter {
             mPortrait.writeToParcel(dest, flags | PARCELABLE_ELIDE_DUPLICATES);
         }
         dest.writeInt(mReapplyDisallowed ? 1 : 0);
+    }
+
+    private void writeActionsToParcel(Parcel parcel) {
+        int count;
+        if (mActions != null) {
+            count = mActions.size();
+        } else {
+            count = 0;
+        }
+        parcel.writeInt(count);
+        for (int i = 0; i < count; i++) {
+            Action a = mActions.get(i);
+            parcel.writeInt(a.getActionTag());
+            a.writeToParcel(parcel, a.hasSameAppInfo(mApplication)
+                    ? PARCELABLE_ELIDE_DUPLICATES : 0);
+        }
     }
 
     private static ApplicationInfo getApplicationInfo(String packageName, int userId) {

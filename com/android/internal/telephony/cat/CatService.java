@@ -16,15 +16,21 @@
 
 package com.android.internal.telephony.cat;
 
+import android.app.ActivityManagerNative;
+import android.app.IActivityManager;
+import android.app.backup.BackupManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.content.res.Configuration;
 import android.content.res.Resources.NotFoundException;
 import android.os.AsyncResult;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.LocaleList;
 import android.os.Message;
+import android.os.RemoteException;
 import android.os.SystemProperties;
 import android.telephony.SubscriptionManager;
 import android.telephony.TelephonyManager;
@@ -450,6 +456,18 @@ public class CatService extends Handler implements AppInterface {
                     ((CallSetupParams) cmdParams).mConfirmMsg.text = message.toString();
                 }
                 break;
+            case LANGUAGE_NOTIFICATION:
+                String language = ((LanguageParams) cmdParams).mLanguage;
+                ResultCode result = ResultCode.OK;
+                if (language != null && language.length() > 0) {
+                    try {
+                        changeLanguage(language);
+                    } catch (RemoteException e) {
+                        result = ResultCode.TERMINAL_CRNTLY_UNABLE_TO_PROCESS;
+                    }
+                }
+                sendTerminalResponse(cmdParams.mCmdDet, result, false, 0, null);
+                return;
             case OPEN_CHANNEL:
             case CLOSE_CHANNEL:
             case RECEIVE_DATA:
@@ -881,8 +899,9 @@ public class CatService extends Handler implements AppInterface {
         // This sends an intent with CARD_ABSENT (0 - false) /CARD_PRESENT (1 - true).
         intent.putExtra(AppInterface.CARD_STATUS, cardPresent);
         intent.setComponent(AppInterface.getDefaultSTKApplication());
+        intent.putExtra("SLOT_ID", mSlotId);
         CatLog.d(this, "Sending Card Status: "
-                + cardState + " " + "cardPresent: " + cardPresent);
+                + cardState + " " + "cardPresent: " + cardPresent +  "SLOT_ID: " +  mSlotId);
         mContext.sendBroadcast(intent, AppInterface.STK_PERMISSION);
     }
 
@@ -1006,6 +1025,13 @@ public class CatService extends Handler implements AppInterface {
                 }
                 break;
             case LAUNCH_BROWSER:
+                if (resMsg.mResCode == ResultCode.LAUNCH_BROWSER_ERROR) {
+                    // Additional info for Default URL unavailable.
+                    resMsg.setAdditionalInfo(0x04);
+                } else {
+                    resMsg.mIncludeAdditionalInfo = false;
+                    resMsg.mAdditionalInfo = 0;
+                }
                 break;
             // 3GPP TS.102.223: Open Channel alpha confirmation should not send TR
             case OPEN_CHANNEL:
@@ -1120,5 +1146,14 @@ public class CatService extends Handler implements AppInterface {
             // Card moved to PRESENT STATE.
             mCmdIf.reportStkServiceIsRunning(null);
         }
+    }
+
+    private void changeLanguage(String language) throws RemoteException {
+        IActivityManager am = ActivityManagerNative.getDefault();
+        Configuration config = am.getConfiguration();
+        config.setLocales(new LocaleList(new Locale(language), LocaleList.getDefault()));
+        config.userSetLocale = true;
+        am.updatePersistentConfiguration(config);
+        BackupManager.dataChanged("com.android.providers.settings");
     }
 }

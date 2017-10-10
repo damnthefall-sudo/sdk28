@@ -15,8 +15,11 @@
  */
 package android.app;
 
+import android.annotation.Nullable;
 import android.annotation.SystemApi;
 import android.app.NotificationManager.Importance;
+import android.content.ContentResolver;
+import android.content.Context;
 import android.content.Intent;
 import android.media.AudioAttributes;
 import android.net.Uri;
@@ -25,6 +28,9 @@ import android.os.Parcelable;
 import android.provider.Settings;
 import android.service.notification.NotificationListenerService;
 import android.text.TextUtils;
+import android.util.proto.ProtoOutputStream;
+
+import com.android.internal.util.Preconditions;
 
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -135,12 +141,15 @@ public final class NotificationChannel implements Parcelable {
     private boolean mLights;
     private int mLightColor = DEFAULT_LIGHT_COLOR;
     private long[] mVibration;
+    // Bitwise representation of fields that have been changed by the user, preventing the app from
+    // making changes to these fields.
     private int mUserLockedFields;
     private boolean mVibrationEnabled;
     private boolean mShowBadge = DEFAULT_SHOW_BADGE;
     private boolean mDeleted = DEFAULT_DELETED;
     private String mGroup;
     private AudioAttributes mAudioAttributes = Notification.AUDIO_ATTRIBUTES_DEFAULT;
+    // If this is a blockable system notification channel.
     private boolean mBlockableSystem = false;
 
     /**
@@ -565,14 +574,35 @@ public final class NotificationChannel implements Parcelable {
     /**
      * @hide
      */
+    public void populateFromXmlForRestore(XmlPullParser parser, Context context) {
+        populateFromXml(parser, true, context);
+    }
+
+    /**
+     * @hide
+     */
     @SystemApi
     public void populateFromXml(XmlPullParser parser) {
+        populateFromXml(parser, false, null);
+    }
+
+    /**
+     * If {@param forRestore} is true, {@param Context} MUST be non-null.
+     */
+    private void populateFromXml(XmlPullParser parser, boolean forRestore,
+            @Nullable Context context) {
+        Preconditions.checkArgument(!forRestore || context != null,
+                "forRestore is true but got null context");
+
         // Name, id, and importance are set in the constructor.
         setDescription(parser.getAttributeValue(null, ATT_DESC));
         setBypassDnd(Notification.PRIORITY_DEFAULT
                 != safeInt(parser, ATT_PRIORITY, Notification.PRIORITY_DEFAULT));
         setLockscreenVisibility(safeInt(parser, ATT_VISIBILITY, DEFAULT_VISIBILITY));
-        setSound(safeUri(parser, ATT_SOUND), safeAudioAttributes(parser));
+
+        Uri sound = safeUri(parser, ATT_SOUND);
+        setSound(forRestore ? restoreSoundUri(context, sound) : sound, safeAudioAttributes(parser));
+
         enableLights(safeBool(parser, ATT_LIGHTS, false));
         setLightColor(safeInt(parser, ATT_LIGHT_COLOR, DEFAULT_LIGHT_COLOR));
         setVibrationPattern(safeLongArray(parser, ATT_VIBRATION, null));
@@ -584,11 +614,62 @@ public final class NotificationChannel implements Parcelable {
         setBlockableSystem(safeBool(parser, ATT_BLOCKABLE_SYSTEM, false));
     }
 
+    @Nullable
+    private Uri restoreSoundUri(Context context, @Nullable Uri uri) {
+        if (uri == null) {
+            return null;
+        }
+        ContentResolver contentResolver = context.getContentResolver();
+        // There are backups out there with uncanonical uris (because we fixed this after
+        // shipping). If uncanonical uris are given to MediaProvider.uncanonicalize it won't
+        // verify the uri against device storage and we'll possibly end up with a broken uri.
+        // We then canonicalize the uri to uncanonicalize it back, which means we properly check
+        // the uri and in the case of not having the resource we end up with the default - better
+        // than broken. As a side effect we'll canonicalize already canonicalized uris, this is fine
+        // according to the docs because canonicalize method has to handle canonical uris as well.
+        Uri canonicalizedUri = contentResolver.canonicalize(uri);
+        if (canonicalizedUri == null) {
+            // We got a null because the uri in the backup does not exist here, so we return default
+            return Settings.System.DEFAULT_NOTIFICATION_URI;
+        }
+        return contentResolver.uncanonicalize(canonicalizedUri);
+    }
+
     /**
      * @hide
      */
     @SystemApi
     public void writeXml(XmlSerializer out) throws IOException {
+        writeXml(out, false, null);
+    }
+
+    /**
+     * @hide
+     */
+    public void writeXmlForBackup(XmlSerializer out, Context context) throws IOException {
+        writeXml(out, true, context);
+    }
+
+    private Uri getSoundForBackup(Context context) {
+        Uri sound = getSound();
+        if (sound == null) {
+            return null;
+        }
+        Uri canonicalSound = context.getContentResolver().canonicalize(sound);
+        if (canonicalSound == null) {
+            // The content provider does not support canonical uris so we backup the default
+            return Settings.System.DEFAULT_NOTIFICATION_URI;
+        }
+        return canonicalSound;
+    }
+
+    /**
+     * If {@param forBackup} is true, {@param Context} MUST be non-null.
+     */
+    private void writeXml(XmlSerializer out, boolean forBackup, @Nullable Context context)
+            throws IOException {
+        Preconditions.checkArgument(!forBackup || context != null,
+                "forBackup is true but got null context");
         out.startTag(null, TAG_CHANNEL);
         out.attribute(null, ATT_ID, getId());
         if (getName() != null) {
@@ -609,8 +690,9 @@ public final class NotificationChannel implements Parcelable {
             out.attribute(null, ATT_VISIBILITY,
                     Integer.toString(getLockscreenVisibility()));
         }
-        if (getSound() != null) {
-            out.attribute(null, ATT_SOUND, getSound().toString());
+        Uri sound = forBackup ? getSoundForBackup(context) : getSound();
+        if (sound != null) {
+            out.attribute(null, ATT_SOUND, sound.toString());
         }
         if (getAudioAttributes() != null) {
             out.attribute(null, ATT_USAGE, Integer.toString(getAudioAttributes().getUsage()));
@@ -849,5 +931,36 @@ public final class NotificationChannel implements Parcelable {
                 + ", mAudioAttributes=" + mAudioAttributes
                 + ", mBlockableSystem=" + mBlockableSystem
                 + '}';
+    }
+
+    /** @hide */
+    public void toProto(ProtoOutputStream proto) {
+        proto.write(NotificationChannelProto.ID, mId);
+        proto.write(NotificationChannelProto.NAME, mName);
+        proto.write(NotificationChannelProto.DESCRIPTION, mDesc);
+        proto.write(NotificationChannelProto.IMPORTANCE, mImportance);
+        proto.write(NotificationChannelProto.CAN_BYPASS_DND, mBypassDnd);
+        proto.write(NotificationChannelProto.LOCKSCREEN_VISIBILITY, mLockscreenVisibility);
+        if (mSound != null) {
+            proto.write(NotificationChannelProto.SOUND, mSound.toString());
+        }
+        proto.write(NotificationChannelProto.USE_LIGHTS, mLights);
+        proto.write(NotificationChannelProto.LIGHT_COLOR, mLightColor);
+        if (mVibration != null) {
+            for (long v : mVibration) {
+                proto.write(NotificationChannelProto.VIBRATION, v);
+            }
+        }
+        proto.write(NotificationChannelProto.USER_LOCKED_FIELDS, mUserLockedFields);
+        proto.write(NotificationChannelProto.IS_VIBRATION_ENABLED, mVibrationEnabled);
+        proto.write(NotificationChannelProto.SHOW_BADGE, mShowBadge);
+        proto.write(NotificationChannelProto.IS_DELETED, mDeleted);
+        proto.write(NotificationChannelProto.GROUP, mGroup);
+        if (mAudioAttributes != null) {
+            long aToken = proto.start(NotificationChannelProto.AUDIO_ATTRIBUTES);
+            mAudioAttributes.toProto(proto);
+            proto.end(aToken);
+        }
+        proto.write(NotificationChannelProto.IS_BLOCKABLE_SYSTEM, mBlockableSystem);
     }
 }

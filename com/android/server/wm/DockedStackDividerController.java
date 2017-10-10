@@ -17,8 +17,10 @@
 package com.android.server.wm;
 
 import static android.app.ActivityManager.StackId.DOCKED_STACK_ID;
-import static android.app.ActivityManager.StackId.FULLSCREEN_WORKSPACE_STACK_ID;
 import static android.app.ActivityManager.StackId.INVALID_STACK_ID;
+import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_PRIMARY;
+import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_SECONDARY;
+import static android.app.WindowConfiguration.WINDOWING_MODE_UNDEFINED;
 import static android.content.res.Configuration.ORIENTATION_LANDSCAPE;
 import static android.content.res.Configuration.ORIENTATION_PORTRAIT;
 import static android.view.Surface.ROTATION_270;
@@ -330,7 +332,7 @@ public class DockedStackDividerController implements DimLayerUser {
         mLastVisibility = visible;
         notifyDockedDividerVisibilityChanged(visible);
         if (!visible) {
-            setResizeDimLayer(false, INVALID_STACK_ID, 0f);
+            setResizeDimLayer(false, WINDOWING_MODE_UNDEFINED, 0f);
         }
     }
 
@@ -456,7 +458,8 @@ public class DockedStackDividerController implements DimLayerUser {
             boolean isHomeStackResizable) {
         long animDuration = 0;
         if (animate) {
-            final TaskStack stack = mDisplayContent.getStackById(DOCKED_STACK_ID);
+            final TaskStack stack =
+                    mDisplayContent.getStack(WINDOWING_MODE_SPLIT_SCREEN_PRIMARY);
             final long transitionDuration = isAnimationMaximizing()
                     ? mService.mAppTransition.getLastClipRevealTransitionDuration()
                     : DEFAULT_APP_TRANSITION_DURATION;
@@ -517,9 +520,18 @@ public class DockedStackDividerController implements DimLayerUser {
 
     }
 
-    void setResizeDimLayer(boolean visible, int targetStackId, float alpha) {
+    /**
+     * Shows a dim layer with {@param alpha} if {@param visible} is true and
+     * {@param targetWindowingMode} isn't
+     * {@link android.app.WindowConfiguration#WINDOWING_MODE_UNDEFINED} and there is a stack on the
+     * display in that windowing mode.
+     */
+    void setResizeDimLayer(boolean visible, int targetWindowingMode, float alpha) {
         mService.openSurfaceTransaction();
-        final TaskStack stack = mDisplayContent.getStackById(targetStackId);
+        // TODO: Maybe only allow split-screen windowing modes?
+        final TaskStack stack = targetWindowingMode != WINDOWING_MODE_UNDEFINED
+                ? mDisplayContent.getStack(targetWindowingMode)
+                : null;
         final TaskStack dockedStack = mDisplayContent.getDockedStackLocked();
         boolean visibleAndValid = visible && stack != null && dockedStack != null;
         if (visibleAndValid) {
@@ -605,8 +617,8 @@ public class DockedStackDividerController implements DimLayerUser {
         if (mMinimizedDock && mService.mPolicy.isKeyguardShowingAndNotOccluded()) {
             return;
         }
-        final TaskStack fullscreenStack =
-                mDisplayContent.getStackById(FULLSCREEN_WORKSPACE_STACK_ID);
+        final TaskStack fullscreenStack = mDisplayContent.getStack(
+                WINDOWING_MODE_SPLIT_SCREEN_SECONDARY);
         final boolean homeVisible = homeTask.getTopVisibleAppToken() != null;
         final boolean homeBehind = fullscreenStack != null && fullscreenStack.isVisible();
         setMinimizedDockedStack(homeVisible && !homeBehind, animate);
@@ -801,7 +813,8 @@ public class DockedStackDividerController implements DimLayerUser {
     }
 
     private boolean animateForMinimizedDockedStack(long now) {
-        final TaskStack stack = mDisplayContent.getStackById(DOCKED_STACK_ID);
+        final TaskStack stack =
+                mDisplayContent.getStack(WINDOWING_MODE_SPLIT_SCREEN_PRIMARY);
         if (!mAnimationStarted) {
             mAnimationStarted = true;
             mAnimationStartTime = now;

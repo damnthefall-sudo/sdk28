@@ -33,6 +33,7 @@ import android.util.Slog;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.Preconditions;
 import com.android.internal.util.XmlUtils;
+import com.android.server.pm.ShortcutService.DumpFilter;
 import com.android.server.pm.ShortcutService.ShortcutOperation;
 import com.android.server.pm.ShortcutService.Stats;
 
@@ -1144,7 +1145,7 @@ class ShortcutPackage extends ShortcutPackageItem {
         return false;
     }
 
-    public void dump(@NonNull PrintWriter pw, @NonNull String prefix) {
+    public void dump(@NonNull PrintWriter pw, @NonNull String prefix, DumpFilter filter) {
         pw.println();
 
         pw.print(prefix);
@@ -1186,9 +1187,7 @@ class ShortcutPackage extends ShortcutPackageItem {
         final int size = shortcuts.size();
         for (int i = 0; i < size; i++) {
             final ShortcutInfo si = shortcuts.valueAt(i);
-            pw.print(prefix);
-            pw.print("    ");
-            pw.println(si.toInsecureString());
+            pw.println(si.toDumpString(prefix + "    "));
             if (si.getBitmapPath() != null) {
                 final long len = new File(si.getBitmapPath()).length();
                 pw.print(prefix);

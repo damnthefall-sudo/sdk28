@@ -116,6 +116,7 @@ public class WifiInjector {
     private final PasspointManager mPasspointManager;
     private final SIMAccessor mSimAccessor;
     private HandlerThread mWifiAwareHandlerThread;
+    private HandlerThread mRttHandlerThread;
     private HalDeviceManager mHalDeviceManager;
     private final IBatteryStats mBatteryStats;
     private final WifiStateTracker mWifiStateTracker;
@@ -197,7 +198,7 @@ public class WifiInjector {
         mWifiConfigManager = new WifiConfigManager(mContext, mClock,
                 UserManager.get(mContext), TelephonyManager.from(mContext),
                 mWifiKeyStore, mWifiConfigStore, mWifiPermissionsUtil,
-                mWifiPermissionsWrapper, new NetworkListStoreData(),
+                mWifiPermissionsWrapper, new NetworkListStoreData(mContext),
                 new DeletedEphemeralSsidsStoreData());
         mWifiMetrics.setWifiConfigManager(mWifiConfigManager);
         mWifiConnectivityHelper = new WifiConnectivityHelper(mWifiNative);
@@ -225,7 +226,7 @@ public class WifiInjector {
                 new WrongPasswordNotifier(mContext, mFrameworkFacade));
         mCertManager = new WifiCertManager(mContext);
         mOpenNetworkNotifier = new OpenNetworkNotifier(mContext,
-                mWifiStateMachineHandlerThread.getLooper(), mFrameworkFacade, mClock,
+                mWifiStateMachineHandlerThread.getLooper(), mFrameworkFacade, mClock, mWifiMetrics,
                 mWifiConfigManager, mWifiConfigStore, mWifiStateMachine,
                 new OpenNetworkRecommender(),
                 new ConnectToNetworkNotificationBuilder(mContext, mFrameworkFacade));
@@ -452,6 +453,19 @@ public class WifiInjector {
             mWifiAwareHandlerThread.start();
         }
         return mWifiAwareHandlerThread;
+    }
+
+    /**
+     * Returns a singleton instance of a HandlerThread for injection. Uses lazy initialization.
+     *
+     * TODO: share worker thread with other Wi-Fi handlers (b/27924886)
+     */
+    public HandlerThread getRttHandlerThread() {
+        if (mRttHandlerThread == null) { // lazy initialization
+            mRttHandlerThread = new HandlerThread("wifiRttService");
+            mRttHandlerThread.start();
+        }
+        return mRttHandlerThread;
     }
 
     /**

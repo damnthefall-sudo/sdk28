@@ -140,10 +140,10 @@ public class PerformFullTransportBackupTask extends FullBackupTask implements Ba
 
         for (String pkg : whichPackages) {
             try {
-                PackageInfo info = backupManagerService.getPackageManager().getPackageInfo(pkg,
-                        PackageManager.GET_SIGNATURES);
+                PackageManager pm = backupManagerService.getPackageManager();
+                PackageInfo info = pm.getPackageInfo(pkg, PackageManager.GET_SIGNATURES);
                 mCurrentPackage = info;
-                if (!AppBackupUtils.appIsEligibleForBackup(info.applicationInfo)) {
+                if (!AppBackupUtils.appIsEligibleForBackup(info.applicationInfo, pm)) {
                     // Cull any packages that have indicated that backups are not permitted,
                     // that run as system-domain uids but do not define their own backup agents,
                     // as well as any explicit mention of the 'special' shared-storage agent
@@ -306,6 +306,7 @@ public class PerformFullTransportBackupTask extends FullBackupTask implements Ba
             final int N = mPackages.size();
             final byte[] buffer = new byte[8192];
             for (int i = 0; i < N; i++) {
+                mBackupRunner = null;
                 PackageInfo currentPackage = mPackages.get(i);
                 String packageName = currentPackage.packageName;
                 if (DEBUG) {
@@ -491,7 +492,13 @@ public class PerformFullTransportBackupTask extends FullBackupTask implements Ba
                     }
                     EventLog.writeEvent(EventLogTags.FULL_BACKUP_AGENT_FAILURE, packageName,
                             "transport rejected");
-                    // Do nothing, clean up, and continue looping.
+                    // This failure state can come either a-priori from the transport, or
+                    // from the preflight pass.  If we got as far as preflight, we now need
+                    // to tear down the target process.
+                    if (mBackupRunner != null) {
+                        backupManagerService.tearDownAgentAndKill(currentPackage.applicationInfo);
+                    }
+                    // ... and continue looping.
                 } else if (backupPackageStatus == BackupTransport.TRANSPORT_QUOTA_EXCEEDED) {
                     BackupObserverUtils
                             .sendBackupOnPackageResult(mBackupObserver, packageName,
@@ -501,6 +508,7 @@ public class PerformFullTransportBackupTask extends FullBackupTask implements Ba
                         EventLog.writeEvent(EventLogTags.FULL_BACKUP_QUOTA_EXCEEDED,
                                 packageName);
                     }
+                    backupManagerService.tearDownAgentAndKill(currentPackage.applicationInfo);
                     // Do nothing, clean up, and continue looping.
                 } else if (backupPackageStatus == BackupTransport.AGENT_ERROR) {
                     BackupObserverUtils
@@ -527,6 +535,7 @@ public class PerformFullTransportBackupTask extends FullBackupTask implements Ba
                     EventLog.writeEvent(EventLogTags.FULL_BACKUP_TRANSPORT_FAILURE);
                     // Abort entire backup pass.
                     backupRunStatus = BackupManager.ERROR_TRANSPORT_ABORTED;
+                    backupManagerService.tearDownAgentAndKill(currentPackage.applicationInfo);
                     return;
                 } else {
                     // Success!

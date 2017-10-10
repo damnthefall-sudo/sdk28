@@ -127,6 +127,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Calendar;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -1078,6 +1079,29 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * <a href="#attr_android:autofillHint"> {@code android:autofillHint}</a> (in which case the
      * value should be <code>{@value #AUTOFILL_HINT_CREDIT_CARD_EXPIRATION_DATE}</code>).
      *
+     * <p>When annotating a view with this hint, it's recommended to use a date autofill value to
+     * avoid ambiguity when the autofill service provides a value for it. To understand why a
+     * value can be ambiguous, consider "April of 2020", which could be represented as either of
+     * the following options:
+     *
+     * <ul>
+     *   <li>{@code "04/2020"}
+     *   <li>{@code "4/2020"}
+     *   <li>{@code "2020/04"}
+     *   <li>{@code "2020/4"}
+     *   <li>{@code "April/2020"}
+     *   <li>{@code "Apr/2020"}
+     * </ul>
+     *
+     * <p>You define a date autofill value for the view by overriding the following methods:
+     *
+     * <ol>
+     *   <li>{@link #getAutofillType()} to return {@link #AUTOFILL_TYPE_DATE}.
+     *   <li>{@link #getAutofillValue()} to return a
+     *       {@link AutofillValue#forDate(long) date autofillvalue}.
+     *   <li>{@link #autofill(AutofillValue)} to expect a data autofillvalue.
+     * </ol>
+     *
      * <p>See {@link #setAutofillHints(String...)} for more info about autofill hints.
      */
     public static final String AUTOFILL_HINT_CREDIT_CARD_EXPIRATION_DATE =
@@ -1089,6 +1113,22 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * <p>Can be used with either {@link #setAutofillHints(String[])} or
      * <a href="#attr_android:autofillHint"> {@code android:autofillHint}</a> (in which case the
      * value should be <code>{@value #AUTOFILL_HINT_CREDIT_CARD_EXPIRATION_MONTH}</code>).
+     *
+     * <p>When annotating a view with this hint, it's recommended to use a text autofill value
+     * whose value is the numerical representation of the month, starting on {@code 1} to avoid
+     * ambiguity when the autofill service provides a value for it. To understand why a
+     * value can be ambiguous, consider "January", which could be represented as either of
+     *
+     * <ul>
+     *   <li>{@code "1"}: recommended way.
+     *   <li>{@code "0"}: if following the {@link Calendar#MONTH} convention.
+     *   <li>{@code "January"}: full name, in English.
+     *   <li>{@code "jan"}: abbreviated name, in English.
+     *   <li>{@code "Janeiro"}: full name, in another language.
+     * </ul>
+     *
+     * <p>Another recommended approach is to use a date autofill value - see
+     * {@link #AUTOFILL_HINT_CREDIT_CARD_EXPIRATION_DATE} for more details.
      *
      * <p>See {@link #setAutofillHints(String...)} for more info about autofill hints.
      */
@@ -3702,15 +3742,90 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * @hide
      */
     @ViewDebug.ExportedProperty(flagMapping = {
-        @ViewDebug.FlagToString(mask = SYSTEM_UI_FLAG_LOW_PROFILE,
-                                equals = SYSTEM_UI_FLAG_LOW_PROFILE,
-                                name = "SYSTEM_UI_FLAG_LOW_PROFILE", outputIf = true),
-        @ViewDebug.FlagToString(mask = SYSTEM_UI_FLAG_HIDE_NAVIGATION,
-                                equals = SYSTEM_UI_FLAG_HIDE_NAVIGATION,
-                                name = "SYSTEM_UI_FLAG_HIDE_NAVIGATION", outputIf = true),
-        @ViewDebug.FlagToString(mask = PUBLIC_STATUS_BAR_VISIBILITY_MASK,
-                                equals = SYSTEM_UI_FLAG_VISIBLE,
-                                name = "SYSTEM_UI_FLAG_VISIBLE", outputIf = true)
+            @ViewDebug.FlagToString(mask = SYSTEM_UI_FLAG_LOW_PROFILE,
+                    equals = SYSTEM_UI_FLAG_LOW_PROFILE,
+                    name = "LOW_PROFILE"),
+            @ViewDebug.FlagToString(mask = SYSTEM_UI_FLAG_HIDE_NAVIGATION,
+                    equals = SYSTEM_UI_FLAG_HIDE_NAVIGATION,
+                    name = "HIDE_NAVIGATION"),
+            @ViewDebug.FlagToString(mask = SYSTEM_UI_FLAG_FULLSCREEN,
+                    equals = SYSTEM_UI_FLAG_FULLSCREEN,
+                    name = "FULLSCREEN"),
+            @ViewDebug.FlagToString(mask = SYSTEM_UI_FLAG_LAYOUT_STABLE,
+                    equals = SYSTEM_UI_FLAG_LAYOUT_STABLE,
+                    name = "LAYOUT_STABLE"),
+            @ViewDebug.FlagToString(mask = SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION,
+                    equals = SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION,
+                    name = "LAYOUT_HIDE_NAVIGATION"),
+            @ViewDebug.FlagToString(mask = SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN,
+                    equals = SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN,
+                    name = "LAYOUT_FULLSCREEN"),
+            @ViewDebug.FlagToString(mask = SYSTEM_UI_FLAG_IMMERSIVE,
+                    equals = SYSTEM_UI_FLAG_IMMERSIVE,
+                    name = "IMMERSIVE"),
+            @ViewDebug.FlagToString(mask = SYSTEM_UI_FLAG_IMMERSIVE_STICKY,
+                    equals = SYSTEM_UI_FLAG_IMMERSIVE_STICKY,
+                    name = "IMMERSIVE_STICKY"),
+            @ViewDebug.FlagToString(mask = SYSTEM_UI_FLAG_LIGHT_STATUS_BAR,
+                    equals = SYSTEM_UI_FLAG_LIGHT_STATUS_BAR,
+                    name = "LIGHT_STATUS_BAR"),
+            @ViewDebug.FlagToString(mask = SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR,
+                    equals = SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR,
+                    name = "LIGHT_NAVIGATION_BAR"),
+            @ViewDebug.FlagToString(mask = STATUS_BAR_DISABLE_EXPAND,
+                    equals = STATUS_BAR_DISABLE_EXPAND,
+                    name = "STATUS_BAR_DISABLE_EXPAND"),
+            @ViewDebug.FlagToString(mask = STATUS_BAR_DISABLE_NOTIFICATION_ICONS,
+                    equals = STATUS_BAR_DISABLE_NOTIFICATION_ICONS,
+                    name = "STATUS_BAR_DISABLE_NOTIFICATION_ICONS"),
+            @ViewDebug.FlagToString(mask = STATUS_BAR_DISABLE_NOTIFICATION_ALERTS,
+                    equals = STATUS_BAR_DISABLE_NOTIFICATION_ALERTS,
+                    name = "STATUS_BAR_DISABLE_NOTIFICATION_ALERTS"),
+            @ViewDebug.FlagToString(mask = STATUS_BAR_DISABLE_NOTIFICATION_TICKER,
+                    equals = STATUS_BAR_DISABLE_NOTIFICATION_TICKER,
+                    name = "STATUS_BAR_DISABLE_NOTIFICATION_TICKER"),
+            @ViewDebug.FlagToString(mask = STATUS_BAR_DISABLE_SYSTEM_INFO,
+                    equals = STATUS_BAR_DISABLE_SYSTEM_INFO,
+                    name = "STATUS_BAR_DISABLE_SYSTEM_INFO"),
+            @ViewDebug.FlagToString(mask = STATUS_BAR_DISABLE_HOME,
+                    equals = STATUS_BAR_DISABLE_HOME,
+                    name = "STATUS_BAR_DISABLE_HOME"),
+            @ViewDebug.FlagToString(mask = STATUS_BAR_DISABLE_BACK,
+                    equals = STATUS_BAR_DISABLE_BACK,
+                    name = "STATUS_BAR_DISABLE_BACK"),
+            @ViewDebug.FlagToString(mask = STATUS_BAR_DISABLE_CLOCK,
+                    equals = STATUS_BAR_DISABLE_CLOCK,
+                    name = "STATUS_BAR_DISABLE_CLOCK"),
+            @ViewDebug.FlagToString(mask = STATUS_BAR_DISABLE_RECENT,
+                    equals = STATUS_BAR_DISABLE_RECENT,
+                    name = "STATUS_BAR_DISABLE_RECENT"),
+            @ViewDebug.FlagToString(mask = STATUS_BAR_DISABLE_SEARCH,
+                    equals = STATUS_BAR_DISABLE_SEARCH,
+                    name = "STATUS_BAR_DISABLE_SEARCH"),
+            @ViewDebug.FlagToString(mask = STATUS_BAR_TRANSIENT,
+                    equals = STATUS_BAR_TRANSIENT,
+                    name = "STATUS_BAR_TRANSIENT"),
+            @ViewDebug.FlagToString(mask = NAVIGATION_BAR_TRANSIENT,
+                    equals = NAVIGATION_BAR_TRANSIENT,
+                    name = "NAVIGATION_BAR_TRANSIENT"),
+            @ViewDebug.FlagToString(mask = STATUS_BAR_UNHIDE,
+                    equals = STATUS_BAR_UNHIDE,
+                    name = "STATUS_BAR_UNHIDE"),
+            @ViewDebug.FlagToString(mask = NAVIGATION_BAR_UNHIDE,
+                    equals = NAVIGATION_BAR_UNHIDE,
+                    name = "NAVIGATION_BAR_UNHIDE"),
+            @ViewDebug.FlagToString(mask = STATUS_BAR_TRANSLUCENT,
+                    equals = STATUS_BAR_TRANSLUCENT,
+                    name = "STATUS_BAR_TRANSLUCENT"),
+            @ViewDebug.FlagToString(mask = NAVIGATION_BAR_TRANSLUCENT,
+                    equals = NAVIGATION_BAR_TRANSLUCENT,
+                    name = "NAVIGATION_BAR_TRANSLUCENT"),
+            @ViewDebug.FlagToString(mask = NAVIGATION_BAR_TRANSPARENT,
+                    equals = NAVIGATION_BAR_TRANSPARENT,
+                    name = "NAVIGATION_BAR_TRANSPARENT"),
+            @ViewDebug.FlagToString(mask = STATUS_BAR_TRANSPARENT,
+                    equals = STATUS_BAR_TRANSPARENT,
+                    name = "STATUS_BAR_TRANSPARENT")
     }, formatToHexString = true)
     int mSystemUiVisibility;
 
@@ -15414,7 +15529,13 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * {@code dirty}.
      *
      * @param dirty the rectangle representing the bounds of the dirty region
+     *
+     * @deprecated The switch to hardware accelerated rendering in API 14 reduced
+     * the importance of the dirty rectangle. In API 21 the given rectangle is
+     * ignored entirely in favor of an internally-calculated area instead.
+     * Because of this, clients are encouraged to just call {@link #invalidate()}.
      */
+    @Deprecated
     public void invalidate(Rect dirty) {
         final int scrollX = mScrollX;
         final int scrollY = mScrollY;
@@ -15435,7 +15556,13 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * @param t the top position of the dirty region
      * @param r the right position of the dirty region
      * @param b the bottom position of the dirty region
+     *
+     * @deprecated The switch to hardware accelerated rendering in API 14 reduced
+     * the importance of the dirty rectangle. In API 21 the given rectangle is
+     * ignored entirely in favor of an internally-calculated area instead.
+     * Because of this, clients are encouraged to just call {@link #invalidate()}.
      */
+    @Deprecated
     public void invalidate(int l, int t, int r, int b) {
         final int scrollX = mScrollX;
         final int scrollY = mScrollY;

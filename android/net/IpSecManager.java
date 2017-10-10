@@ -25,7 +25,11 @@ import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
 import android.util.AndroidException;
 import android.util.Log;
+
+import com.android.internal.annotations.VisibleForTesting;
+
 import dalvik.system.CloseGuard;
+
 import java.io.FileDescriptor;
 import java.io.IOException;
 import java.net.DatagramSocket;
@@ -36,7 +40,9 @@ import java.net.Socket;
  * This class contains methods for managing IPsec sessions, which will perform kernel-space
  * encryption and decryption of socket or Network traffic.
  *
- * @hide
+ * <p>An IpSecManager may be obtained by calling {@link
+ * android.content.Context#getSystemService(String) Context#getSystemService(String)} with {@link
+ * android.content.Context#IPSEC_SERVICE Context#IPSEC_SERVICE}
  */
 @SystemService(Context.IPSEC_SERVICE)
 public final class IpSecManager {
@@ -184,7 +190,8 @@ public final class IpSecManager {
         }
 
         /** @hide */
-        int getResourceId() {
+        @VisibleForTesting
+        public int getResourceId() {
             return mResourceId;
         }
     }
@@ -485,7 +492,8 @@ public final class IpSecManager {
         }
 
         /** @hide */
-        int getResourceId() {
+        @VisibleForTesting
+        public int getResourceId() {
             return mResourceId;
         }
     };

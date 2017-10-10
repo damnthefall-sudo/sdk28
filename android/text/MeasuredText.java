@@ -90,10 +90,6 @@ class MeasuredText {
         }
     }
 
-    void setPos(int pos) {
-        mPos = pos - mTextStart;
-    }
-
     /**
      * Analyzes text for bidirectional runs.  Allocates working buffers.
      */
@@ -160,47 +156,43 @@ class MeasuredText {
         }
     }
 
+    /**
+     * Apply the style.
+     *
+     * If StaticLyaout.Builder is not provided in setPara() method, this method measures the styled
+     * text width.
+     * If StaticLayout.Builder is provided in setPara() method, this method just passes the style
+     * information to native code by calling StaticLayout.Builder.addstyleRun() and returns 0.
+     */
     float addStyleRun(TextPaint paint, int len, Paint.FontMetricsInt fm) {
         if (fm != null) {
             paint.getFontMetricsInt(fm);
         }
 
-        int p = mPos;
+        final int p = mPos;
         mPos = p + len;
 
-        // try to do widths measurement in native code, but use Java if paint has been subclassed
-        // FIXME: may want to eliminate special case for subclass
-        float[] widths = null;
-        if (mBuilder == null || paint.getClass() != TextPaint.class) {
-            widths = mWidths;
-        }
         if (mEasy) {
-            boolean isRtl = mDir != Layout.DIR_LEFT_TO_RIGHT;
-            float width = 0;
-            if (widths != null) {
-                width = paint.getTextRunAdvances(mChars, p, len, p, len, isRtl, widths, p);
-                if (mBuilder != null) {
-                    mBuilder.addMeasuredRun(p, p + len, widths);
-                }
+            final boolean isRtl = mDir != Layout.DIR_LEFT_TO_RIGHT;
+            if (mBuilder == null) {
+                return paint.getTextRunAdvances(mChars, p, len, p, len, isRtl, mWidths, p);
             } else {
-                width = mBuilder.addStyleRun(paint, p, p + len, isRtl);
+                mBuilder.addStyleRun(paint, p, p + len, isRtl);
+                return 0.0f;  // Builder.addStyleRun doesn't return the width.
             }
-            return width;
         }
 
         float totalAdvance = 0;
         int level = mLevels[p];
         for (int q = p, i = p + 1, e = p + len;; ++i) {
             if (i == e || mLevels[i] != level) {
-                boolean isRtl = (level & 0x1) != 0;
-                if (widths != null) {
+                final boolean isRtl = (level & 0x1) != 0;
+                if (mBuilder == null) {
                     totalAdvance +=
-                            paint.getTextRunAdvances(mChars, q, i - q, q, i - q, isRtl, widths, q);
-                    if (mBuilder != null) {
-                        mBuilder.addMeasuredRun(q, i, widths);
-                    }
+                            paint.getTextRunAdvances(mChars, q, i - q, q, i - q, isRtl, mWidths, q);
                 } else {
-                    totalAdvance += mBuilder.addStyleRun(paint, q, i, isRtl);
+                    // Builder.addStyleRun doesn't return the width.
+                    mBuilder.addStyleRun(paint, q, i, isRtl);
                 }
                 if (i == e) {
                     break;
@@ -209,7 +201,7 @@ class MeasuredText {
                 level = mLevels[i];
             }
         }
-        return totalAdvance;
+        return totalAdvance;  // If mBuilder is null, the result is zero.
     }
 
     float addStyleRun(TextPaint paint, MetricAffectingSpan[] spans, int len,
@@ -243,7 +235,7 @@ class MeasuredText {
                 for (int i = mPos + 1, e = mPos + len; i < e; i++)
                     w[i] = 0;
             } else {
-                mBuilder.addReplacementRun(mPos, mPos + len, wid);
+                mBuilder.addReplacementRun(paint, mPos, mPos + len, wid);
             }
             mPos += len;
         }

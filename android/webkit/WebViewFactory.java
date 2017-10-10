@@ -51,9 +51,6 @@ public final class WebViewFactory {
 
     private static final String CHROMIUM_WEBVIEW_FACTORY_METHOD = "create";
 
-    private static final String NULL_WEBVIEW_FACTORY =
-            "com.android.webview.nullwebview.NullWebViewFactoryProvider";
-
     public static final String CHROMIUM_WEBVIEW_VMSIZE_SIZE_PROPERTY =
             "persist.sys.webview.vmsize";
 
@@ -66,6 +63,7 @@ public final class WebViewFactory {
     private static WebViewFactoryProvider sProviderInstance;
     private static final Object sProviderLock = new Object();
     private static PackageInfo sPackageInfo;
+    private static Boolean sWebViewSupported;
 
     // Error codes for loadWebViewNativeLibraryFromPackage
     public static final int LIBLOAD_SUCCESS = 0;
@@ -105,6 +103,16 @@ public final class WebViewFactory {
         public MissingWebViewPackageException(Exception e) { super(e); }
     }
 
+    private static boolean isWebViewSupported() {
+        // No lock; this is a benign race as Boolean's state is final and the PackageManager call
+        // will always return the same value.
+        if (sWebViewSupported == null) {
+            sWebViewSupported = AppGlobals.getInitialApplication().getPackageManager()
+                    .hasSystemFeature(PackageManager.FEATURE_WEBVIEW);
+        }
+        return sWebViewSupported;
+    }
+
     /**
      * @hide
      */
@@ -135,6 +143,10 @@ public final class WebViewFactory {
      */
     public static int loadWebViewNativeLibraryFromPackage(String packageName,
                                                           ClassLoader clazzLoader) {
+        if (!isWebViewSupported()) {
+            return LIBLOAD_WRONG_PACKAGE_NAME;
+        }
+
         WebViewProviderResponse response = null;
         try {
             response = getUpdateService().waitForAndGetProvider();
@@ -186,6 +198,11 @@ public final class WebViewFactory {
                     || uid == android.os.Process.BLUETOOTH_UID) {
                 throw new UnsupportedOperationException(
                         "For security reasons, WebView is not allowed in privileged processes");
+            }
+
+            if (!isWebViewSupported()) {
+                // Device doesn't support WebView; don't try to load it, just throw.
+                throw new UnsupportedOperationException();
             }
 
             StrictMode.ThreadPolicy oldPolicy = StrictMode.allowThreadDiskReads();
@@ -410,15 +427,6 @@ public final class WebViewFactory {
                 Trace.traceEnd(Trace.TRACE_TAG_WEBVIEW);
             }
         } catch (MissingWebViewPackageException e) {
-            // If the package doesn't exist, then try loading the null WebView instead.
-            // If that succeeds, then this is a device without WebView support; if it fails then
-            // swallow the failure, complain that the real WebView is missing and rethrow the
-            // original exception.
-            try {
-                return (Class<WebViewFactoryProvider>) Class.forName(NULL_WEBVIEW_FACTORY);
-            } catch (ClassNotFoundException e2) {
-                // Ignore.
-            }
             Log.e(LOGTAG, "Chromium WebView package does not exist", e);
             throw new AndroidRuntimeException(e);
         }
@@ -446,13 +454,13 @@ public final class WebViewFactory {
         // waiting on relro creation.
         if (Build.SUPPORTED_32_BIT_ABIS.length > 0) {
             if (DEBUG) Log.v(LOGTAG, "Create 32 bit relro");
-            WebViewLibraryLoader.createRelroFile(false /* is64Bit */, nativeLibraryPaths);
+            WebViewLibraryLoader.createRelroFile(false /* is64Bit */, nativeLibraryPaths[0]);
             numRelros++;
         }
 
         if (Build.SUPPORTED_64_BIT_ABIS.length > 0) {
             if (DEBUG) Log.v(LOGTAG, "Create 64 bit relro");
-            WebViewLibraryLoader.createRelroFile(true /* is64Bit */, nativeLibraryPaths);
+            WebViewLibraryLoader.createRelroFile(true /* is64Bit */, nativeLibraryPaths[1]);
             numRelros++;
         }
         return numRelros;
@@ -463,7 +471,7 @@ public final class WebViewFactory {
      */
     public static int onWebViewProviderChanged(PackageInfo packageInfo) {
         String[] nativeLibs = null;
-        String originalSourceDir = packageInfo.applicationInfo.sourceDir;
+        ApplicationInfo originalAppInfo = new ApplicationInfo(packageInfo.applicationInfo);
         try {
             fixupStubApplicationInfo(packageInfo.applicationInfo,
                                      AppGlobals.getInitialApplication().getPackageManager());
@@ -474,7 +482,7 @@ public final class WebViewFactory {
             Log.e(LOGTAG, "error preparing webview native library", t);
         }
 
-        WebViewZygote.onWebViewProviderChanged(packageInfo, originalSourceDir);
+        WebViewZygote.onWebViewProviderChanged(packageInfo, originalAppInfo);
 
         return prepareWebViewInSystemServer(nativeLibs);
     }
@@ -483,6 +491,15 @@ public final class WebViewFactory {
 
     /** @hide */
     public static IWebViewUpdateService getUpdateService() {
+        if (isWebViewSupported()) {
+            return getUpdateServiceUnchecked();
+        } else {
+            return null;
+        }
+    }
+
+    /** @hide */
+    static IWebViewUpdateService getUpdateServiceUnchecked() {
         return IWebViewUpdateService.Stub.asInterface(
                 ServiceManager.getService(WEBVIEW_UPDATE_SERVICE_NAME));
     }

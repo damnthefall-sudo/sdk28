@@ -28,12 +28,12 @@ import android.text.style.LineHeightSpan;
 import android.text.style.MetricAffectingSpan;
 import android.text.style.TabStopSpan;
 import android.util.Log;
+import android.util.Pair;
 import android.util.Pools.SynchronizedPool;
 
 import com.android.internal.util.ArrayUtils;
 import com.android.internal.util.GrowingArrayUtils;
 
-import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Locale;
 
@@ -101,6 +101,7 @@ public class StaticLayout extends Layout {
             b.mBreakStrategy = Layout.BREAK_STRATEGY_SIMPLE;
             b.mHyphenationFrequency = Layout.HYPHENATION_FREQUENCY_NONE;
             b.mJustificationMode = Layout.JUSTIFICATION_MODE_NONE;
+            b.mLocales = null;
 
             b.mMeasuredText = MeasuredText.obtain();
             return b;
@@ -117,6 +118,9 @@ public class StaticLayout extends Layout {
             b.mMeasuredText = null;
             b.mLeftIndents = null;
             b.mRightIndents = null;
+            b.mLocales = null;
+            b.mLeftPaddings = null;
+            b.mRightPaddings = null;
             nFinishBuilder(b.mNativePtr);
             sPool.release(b);
         }
@@ -128,6 +132,8 @@ public class StaticLayout extends Layout {
             mPaint = null;
             mLeftIndents = null;
             mRightIndents = null;
+            mLeftPaddings = null;
+            mRightPaddings = null;
             mMeasuredText.finish();
         }
 
@@ -356,6 +362,28 @@ public class StaticLayout extends Layout {
         }
 
         /**
+         * Set available paddings to draw overhanging text on. Arguments are arrays holding the
+         * amount of padding available, one per line, measured in pixels. For lines past the last
+         * element in the array, the last element repeats.
+         *
+         * The individual padding amounts should be non-negative. The result of passing negative
+         * paddings is undefined.
+         *
+         * @param leftPaddings array of amounts of available padding for left margin, in pixels
+         * @param rightPaddings array of amounts of available padding for right margin, in pixels
+         * @return this builder, useful for chaining
+         *
+         * @hide
+         */
+        @NonNull
+        public Builder setAvailablePaddings(@Nullable int[] leftPaddings,
+                @Nullable int[] rightPaddings) {
+            mLeftPaddings = leftPaddings;
+            mRightPaddings = rightPaddings;
+            return this;
+        }
+
+        /**
          * Set paragraph justification mode. The default value is
          * {@link Layout#JUSTIFICATION_MODE_NONE}. If the last line is too short for justification,
          * the last line will be displayed with the alignment set by {@link #setAlignment}.
@@ -401,10 +429,8 @@ public class StaticLayout extends Layout {
          * future).
          *
          * Then, for each run within the paragraph:
-         *  - setLocales (this must be done at least for the first run, optional afterwards)
          *  - one of the following, depending on the type of run:
          *    + addStyleRun (a text run, to be measured in native code)
-         *    + addMeasuredRun (a run already measured in Java, passed into native code)
          *    + addReplacementRun (a replacement run, width is given)
          *
          * After measurement, nGetWidths() is valid if the widths are needed (eg for ellipsis).
@@ -413,24 +439,29 @@ public class StaticLayout extends Layout {
          * After all paragraphs, call finish() to release expensive buffers.
          */
 
-        private void setLocales(LocaleList locales) {
+        private Pair<String, long[]> getLocaleAndHyphenatorIfChanged(TextPaint paint) {
+            final LocaleList locales = paint.getTextLocales();
+            final String languageTags;
+            long[] hyphenators;
             if (!locales.equals(mLocales)) {
-                nSetLocales(mNativePtr, locales.toLanguageTags(), getHyphenators(locales));
                 mLocales = locales;
+                return new Pair(locales.toLanguageTags(), getHyphenators(locales));
+            } else {
+                // passing null means keep current locale.
+                // TODO: move locale change detection to native.
+                return new Pair(null, null);
             }
         }
 
-        /* package */ float addStyleRun(TextPaint paint, int start, int end, boolean isRtl) {
-            setLocales(paint.getTextLocales());
-            return nAddStyleRun(mNativePtr, paint.getNativeInstance(), start, end, isRtl);
+        /* package */ void addStyleRun(TextPaint paint, int start, int end, boolean isRtl) {
+            Pair<String, long[]> locHyph = getLocaleAndHyphenatorIfChanged(paint);
+            nAddStyleRun(mNativePtr, paint.getNativeInstance(), start, end, isRtl, locHyph.first,
+                    locHyph.second);
         }
 
-        /* package */ void addMeasuredRun(int start, int end, float[] widths) {
-            nAddMeasuredRun(mNativePtr, start, end, widths);
-        }
-
-        /* package */ void addReplacementRun(int start, int end, float width) {
-            nAddReplacementRun(mNativePtr, start, end, width);
+        /* package */ void addReplacementRun(TextPaint paint, int start, int end, float width) {
+            Pair<String, long[]> locHyph = getLocaleAndHyphenatorIfChanged(paint);
+            nAddReplacementRun(mNativePtr, start, end, width, locHyph.first, locHyph.second);
         }
 
         /**
@@ -478,6 +509,8 @@ public class StaticLayout extends Layout {
         private int mHyphenationFrequency;
         @Nullable private int[] mLeftIndents;
         @Nullable private int[] mRightIndents;
+        @Nullable private int[] mLeftPaddings;
+        @Nullable private int[] mRightPaddings;
         private int mJustificationMode;
         private boolean mAddLastLineLineSpacing;
 
@@ -616,7 +649,7 @@ public class StaticLayout extends Layout {
                 : (b.mText instanceof Spanned)
                     ? new SpannedEllipsizer(b.mText)
                     : new Ellipsizer(b.mText),
-                b.mPaint, b.mWidth, b.mAlignment, b.mSpacingMult, b.mSpacingAdd);
+                b.mPaint, b.mWidth, b.mAlignment, b.mTextDir, b.mSpacingMult, b.mSpacingAdd);
 
         if (b.mEllipsize != null) {
             Ellipsizer e = (Ellipsizer) getText();
@@ -638,6 +671,8 @@ public class StaticLayout extends Layout {
 
         mLeftIndents = b.mLeftIndents;
         mRightIndents = b.mRightIndents;
+        mLeftPaddings = b.mLeftPaddings;
+        mRightPaddings = b.mRightPaddings;
         setJustificationMode(b.mJustificationMode);
 
         generate(b, b.mIncludePad, b.mIncludePad);
@@ -662,7 +697,6 @@ public class StaticLayout extends Layout {
         // store fontMetrics per span range
         // must be a multiple of 4 (and > 0) (store top, bottom, ascent, and descent per range)
         int[] fmCache = new int[4 * 4];
-        b.setLocales(paint.getTextLocales());
 
         mLineCount = 0;
         mEllipsized = false;
@@ -776,11 +810,17 @@ public class StaticLayout extends Layout {
                 }
             }
 
+            // TODO: Move locale tracking code to native.
+            b.mLocales = null;  // Reset the locale tracking.
+
             nSetupParagraph(b.mNativePtr, chs, paraEnd - paraStart,
                     firstWidth, firstWidthLineCount, restWidth,
                     variableTabStops, TAB_INCREMENT, b.mBreakStrategy, b.mHyphenationFrequency,
                     // TODO: Support more justification mode, e.g. letter spacing, stretching.
-                    b.mJustificationMode != Layout.JUSTIFICATION_MODE_NONE, indents, mLineCount);
+                    b.mJustificationMode != Layout.JUSTIFICATION_MODE_NONE,
+                    // TODO: indents and paddings don't need to get passed to native code for every
+                    // paragraph. Pass them to native code just once.
+                    indents, mLeftPaddings, mRightPaddings, mLineCount);
 
             // measurement has to be done before performing line breaking
             // but we don't want to recompute fontmetrics or span ranges the
@@ -1491,28 +1531,25 @@ public class StaticLayout extends Layout {
     private static native void nFreeBuilder(long nativePtr);
     private static native void nFinishBuilder(long nativePtr);
 
-    /* package */ static native long nLoadHyphenator(ByteBuffer buf, int offset,
-            int minPrefix, int minSuffix);
-
-    private static native void nSetLocales(long nativePtr, String locales,
-            long[] nativeHyphenators);
-
     // Set up paragraph text and settings; done as one big method to minimize jni crossings
     private static native void nSetupParagraph(
-            @NonNull long nativePtr, @NonNull char[] text, @IntRange(from = 0) int length,
+            /* non zero */ long nativePtr, @NonNull char[] text, @IntRange(from = 0) int length,
             @FloatRange(from = 0.0f) float firstWidth, @IntRange(from = 0) int firstWidthLineCount,
             @FloatRange(from = 0.0f) float restWidth, @Nullable int[] variableTabStops,
             int defaultTabStop, @BreakStrategy int breakStrategy,
             @HyphenationFrequency int hyphenationFrequency, boolean isJustified,
-            @Nullable int[] indents, @IntRange(from = 0) int indentsOffset);
+            @Nullable int[] indents, @Nullable int[] leftPaddings, @Nullable int[] rightPaddings,
+            @IntRange(from = 0) int indentsOffset);
 
-    private static native float nAddStyleRun(long nativePtr, long nativePaint, int start, int end,
-            boolean isRtl);
+    private static native void nAddStyleRun(
+            /* non-zero */ long nativePtr, /* non-zero */ long nativePaint,
+            @IntRange(from = 0) int start, @IntRange(from = 0) int end, boolean isRtl,
+            @Nullable String languageTags, @Nullable long[] hyphenators);
 
-    private static native void nAddMeasuredRun(long nativePtr,
-            int start, int end, float[] widths);
-
-    private static native void nAddReplacementRun(long nativePtr, int start, int end, float width);
+    private static native void nAddReplacementRun(/* non-zero */ long nativePtr,
+            @IntRange(from = 0) int start, @IntRange(from = 0) int end,
+            @FloatRange(from = 0.0f) float width, @Nullable String languageTags,
+            @Nullable long[] hyphenators);
 
     private static native void nGetWidths(long nativePtr, float[] widths);
 
@@ -1590,4 +1627,6 @@ public class StaticLayout extends Layout {
 
     @Nullable private int[] mLeftIndents;
     @Nullable private int[] mRightIndents;
+    @Nullable private int[] mLeftPaddings;
+    @Nullable private int[] mRightPaddings;
 }

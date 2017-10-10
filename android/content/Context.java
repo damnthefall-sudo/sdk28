@@ -64,6 +64,7 @@ import android.view.DisplayAdjustments;
 import android.view.View;
 import android.view.ViewDebug;
 import android.view.WindowManager;
+import android.view.autofill.AutofillManager.AutofillClient;
 import android.view.textclassifier.TextClassificationManager;
 
 import java.io.File;
@@ -2991,6 +2992,7 @@ public abstract class Context {
             //@hide: CONTEXTHUB_SERVICE,
             SYSTEM_HEALTH_SERVICE,
             //@hide: INCIDENT_SERVICE,
+            //@hide: STATS_COMPANION_SERVICE,
             COMPANION_DEVICE_SERVICE
     })
     @Retention(RetentionPolicy.SOURCE)
@@ -3033,6 +3035,9 @@ public abstract class Context {
      *  <dt> {@link #CONNECTIVITY_SERVICE} ("connection")
      *  <dd> A {@link android.net.ConnectivityManager ConnectivityManager} for
      *  handling management of network connections.
+     *  <dt> {@link #IPSEC_SERVICE} ("ipsec")
+     *  <dd> A {@link android.net.IpSecManager IpSecManager} for managing IPSec on
+     *  sockets and networks.
      *  <dt> {@link #WIFI_SERVICE} ("wifi")
      *  <dd> A {@link android.net.wifi.WifiManager WifiManager} for management of Wi-Fi
      *  connectivity.  On releases before NYC, it should only be obtained from an application
@@ -3377,7 +3382,6 @@ public abstract class Context {
      * {@link android.net.IpSecManager} for encrypting Sockets or Networks with
      * IPSec.
      *
-     * @hide
      * @see #getSystemService
      */
     public static final String IPSEC_SERVICE = "ipsec";
@@ -3461,6 +3465,19 @@ public abstract class Context {
      */
     @SystemApi
     public static final String WIFI_RTT_SERVICE = "rttmanager";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a {@link
+     * android.net.wifi.rtt.WifiRttManager} for ranging devices with wifi
+     *
+     * Note: this is a replacement for WIFI_RTT_SERVICE above. It will
+     * be renamed once final implementation in place.
+     *
+     * @see #getSystemService
+     * @see android.net.wifi.rtt.WifiRttManager
+     * @hide
+     */
+    public static final String WIFI_RTT2_SERVICE = "rttmanager2";
 
     /**
      * Use with {@link #getSystemService} to retrieve a {@link
@@ -4018,6 +4035,12 @@ public abstract class Context {
      * @hide
      */
     public static final String INCIDENT_SERVICE = "incident";
+
+    /**
+     * Service to assist statsd in obtaining general stats.
+     * @hide
+     */
+    public static final String STATS_COMPANION_SERVICE = "statscompanion";
 
     /**
      * Use with {@link #getSystemService} to retrieve a {@link
@@ -4762,6 +4785,19 @@ public abstract class Context {
      */
     public Handler getMainThreadHandler() {
         throw new RuntimeException("Not implemented. Must override in a subclass.");
+    }
+
+    /**
+     * @hide
+     */
+    public AutofillClient getAutofillClient() {
+        return null;
+    }
+
+    /**
+     * @hide
+     */
+    public void setAutofillClient(AutofillClient client) {
     }
 
     /**

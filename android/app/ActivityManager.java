@@ -16,14 +16,10 @@
 
 package android.app;
 
-import static android.app.WindowConfiguration.ACTIVITY_TYPE_ASSISTANT;
-import static android.app.WindowConfiguration.ACTIVITY_TYPE_HOME;
-import static android.app.WindowConfiguration.ACTIVITY_TYPE_RECENTS;
-import static android.app.WindowConfiguration.ACTIVITY_TYPE_STANDARD;
-import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_PRIMARY;
 import static android.app.WindowConfiguration.WINDOWING_MODE_FREEFORM;
 import static android.app.WindowConfiguration.WINDOWING_MODE_FULLSCREEN;
 import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED;
+import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_PRIMARY;
 import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_SECONDARY;
 import static android.app.WindowConfiguration.WINDOWING_MODE_UNDEFINED;
 
@@ -46,6 +42,7 @@ import android.content.pm.IPackageDataObserver;
 import android.content.pm.PackageManager;
 import android.content.pm.ParceledListSlice;
 import android.content.pm.UserInfo;
+import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
@@ -675,32 +672,27 @@ public class ActivityManager {
 
         /** First static stack ID.
          * @hide */
-        public static final int FIRST_STATIC_STACK_ID = 0;
+        private  static final int FIRST_STATIC_STACK_ID = 0;
 
-        /** Home activity stack ID. */
-        public static final int HOME_STACK_ID = FIRST_STATIC_STACK_ID;
-
-        /** ID of stack where fullscreen activities are normally launched into. */
+        /** ID of stack where fullscreen activities are normally launched into.
+         * @hide */
         public static final int FULLSCREEN_WORKSPACE_STACK_ID = 1;
 
-        /** ID of stack where freeform/resized activities are normally launched into. */
+        /** ID of stack where freeform/resized activities are normally launched into.
+         * @hide */
         public static final int FREEFORM_WORKSPACE_STACK_ID = FULLSCREEN_WORKSPACE_STACK_ID + 1;
 
-        /** ID of stack that occupies a dedicated region of the screen. */
+        /** ID of stack that occupies a dedicated region of the screen.
+         * @hide */
         public static final int DOCKED_STACK_ID = FREEFORM_WORKSPACE_STACK_ID + 1;
 
-        /** ID of stack that always on top (always visible) when it exist. */
+        /** ID of stack that always on top (always visible) when it exist.
+         * @hide */
         public static final int PINNED_STACK_ID = DOCKED_STACK_ID + 1;
-
-        /** ID of stack that contains the Recents activity. */
-        public static final int RECENTS_STACK_ID = PINNED_STACK_ID + 1;
-
-        /** ID of stack that contains activities launched by the assistant. */
-        public static final int ASSISTANT_STACK_ID = RECENTS_STACK_ID + 1;
 
         /** Last static stack stack ID.
          * @hide */
-        public static final int LAST_STATIC_STACK_ID = ASSISTANT_STACK_ID;
+        private static final int LAST_STATIC_STACK_ID = PINNED_STACK_ID;
 
         /** Start of ID range used by stacks that are created dynamically.
          * @hide */
@@ -720,15 +712,6 @@ public class ActivityManager {
         }
 
         /**
-         * Returns true if dynamic stacks are allowed to be visible behind the input stack.
-         * @hide
-         */
-        // TODO: Figure-out a way to remove.
-        public static boolean isDynamicStacksVisibleBehindAllowed(int stackId) {
-            return stackId == PINNED_STACK_ID || stackId == ASSISTANT_STACK_ID;
-        }
-
-        /**
          * Returns true if we try to maintain focus in the current stack when the top activity
          * finishes.
          * @hide
@@ -740,15 +723,6 @@ public class ActivityManager {
         }
 
         /**
-         * Returns true if the input stack is affected by drag resizing.
-         * @hide
-         */
-        public static boolean isStackAffectedByDragResizing(int stackId) {
-            return isStaticStack(stackId) && stackId != PINNED_STACK_ID
-                    && stackId != ASSISTANT_STACK_ID;
-        }
-
-        /**
          * Returns true if the windows of tasks being moved to the target stack from the source
          * stack should be replaced, meaning that window manager will keep the old window around
          * until the new is ready.
@@ -757,41 +731,6 @@ public class ActivityManager {
         public static boolean replaceWindowsOnTaskMove(int sourceStackId, int targetStackId) {
             return sourceStackId == FREEFORM_WORKSPACE_STACK_ID
                     || targetStackId == FREEFORM_WORKSPACE_STACK_ID;
-        }
-
-        /**
-         * Return whether a stackId is a stack that be a backdrop to a translucent activity.  These
-         * are generally fullscreen stacks.
-         * @hide
-         */
-        public static boolean isBackdropToTranslucentActivity(int stackId) {
-            return stackId == FULLSCREEN_WORKSPACE_STACK_ID
-                    || stackId == ASSISTANT_STACK_ID;
-        }
-
-        /**
-         * Returns true if animation specs should be constructed for app transition that moves
-         * the task to the specified stack.
-         * @hide
-         */
-        public static boolean useAnimationSpecForAppTransition(int stackId) {
-            // TODO: INVALID_STACK_ID is also animated because we don't persist stack id's across
-            // reboots.
-            return stackId == FREEFORM_WORKSPACE_STACK_ID
-                    || stackId == FULLSCREEN_WORKSPACE_STACK_ID
-                    || stackId == ASSISTANT_STACK_ID
-                    || stackId == DOCKED_STACK_ID
-                    || stackId == INVALID_STACK_ID;
-        }
-
-        /**
-         * Returns true if activities from stasks in the given {@param stackId} are allowed to
-         * enter picture-in-picture.
-         * @hide
-         */
-        public static boolean isAllowedToEnterPictureInPicture(int stackId) {
-            return stackId != HOME_STACK_ID && stackId != ASSISTANT_STACK_ID &&
-                    stackId != RECENTS_STACK_ID;
         }
 
         /**
@@ -825,34 +764,18 @@ public class ActivityManager {
                     && stackId != DOCKED_STACK_ID;
         }
 
-        /**
-         * Returns true if the input stack id should only be present on a device that supports
-         * multi-window mode.
-         * @see android.app.ActivityManager#supportsMultiWindow
-         * @hide
-         */
-        // TODO: What about the other side of docked stack if we move this to WindowConfiguration?
-        public static boolean isMultiWindowStack(int stackId) {
-            return stackId == PINNED_STACK_ID || stackId == FREEFORM_WORKSPACE_STACK_ID
-                    || stackId == DOCKED_STACK_ID;
-        }
-
-        /**
-         * Returns true if the input {@param stackId} is HOME_STACK_ID or RECENTS_STACK_ID
-         * @hide
-         */
-        public static boolean isHomeOrRecentsStack(int stackId) {
-            return stackId == HOME_STACK_ID || stackId == RECENTS_STACK_ID;
-        }
-
-        /** Returns true if the input stack and its content can affect the device orientation.
+        /** Returns the stack id for the input windowing mode.
          * @hide */
-        public static boolean canSpecifyOrientation(int stackId) {
-            return stackId == HOME_STACK_ID
-                    || stackId == RECENTS_STACK_ID
-                    || stackId == FULLSCREEN_WORKSPACE_STACK_ID
-                    || stackId == ASSISTANT_STACK_ID
-                    || isDynamicStack(stackId);
+        // TODO: To be removed once we are not using stack id for stuff...
+        public static int getStackIdForWindowingMode(int windowingMode) {
+            switch (windowingMode) {
+                case WINDOWING_MODE_PINNED: return PINNED_STACK_ID;
+                case WINDOWING_MODE_FREEFORM: return FREEFORM_WORKSPACE_STACK_ID;
+                case WINDOWING_MODE_SPLIT_SCREEN_PRIMARY: return DOCKED_STACK_ID;
+                case WINDOWING_MODE_SPLIT_SCREEN_SECONDARY: return FULLSCREEN_WORKSPACE_STACK_ID;
+                case WINDOWING_MODE_FULLSCREEN: return FULLSCREEN_WORKSPACE_STACK_ID;
+                default: return INVALID_STACK_ID;
+            }
         }
 
         /** Returns the windowing mode that should be used for this input stack id.
@@ -862,13 +785,8 @@ public class ActivityManager {
             final int windowingMode;
             switch (stackId) {
                 case FULLSCREEN_WORKSPACE_STACK_ID:
-                case HOME_STACK_ID:
-                case RECENTS_STACK_ID:
                     windowingMode = inSplitScreenMode
                             ? WINDOWING_MODE_SPLIT_SCREEN_SECONDARY : WINDOWING_MODE_FULLSCREEN;
-                    break;
-                case ASSISTANT_STACK_ID:
-                    windowingMode = WINDOWING_MODE_FULLSCREEN;
                     break;
                 case PINNED_STACK_ID:
                     windowingMode = WINDOWING_MODE_PINNED;
@@ -883,27 +801,6 @@ public class ActivityManager {
                     windowingMode = WINDOWING_MODE_UNDEFINED;
             }
             return windowingMode;
-        }
-
-        /** Returns the activity type that should be used for this input stack id.
-         * @hide */
-        // TODO: To be removed once we are not using stack id for stuff...
-        public static int getActivityTypeForStackId(int stackId) {
-            final int activityType;
-            switch (stackId) {
-                case HOME_STACK_ID:
-                    activityType = ACTIVITY_TYPE_HOME;
-                    break;
-                case RECENTS_STACK_ID:
-                    activityType = ACTIVITY_TYPE_RECENTS;
-                    break;
-                case ASSISTANT_STACK_ID:
-                    activityType = ACTIVITY_TYPE_ASSISTANT;
-                    break;
-                default :
-                    activityType = ACTIVITY_TYPE_STANDARD;
-            }
-            return activityType;
         }
     }
 
@@ -1143,6 +1040,7 @@ public class ActivityManager {
      * E.g. freeform, split-screen, picture-in-picture.
      * @hide
      */
+    @TestApi
     static public boolean supportsMultiWindow(Context context) {
         // On watches, multi-window is used to present essential system UI, and thus it must be
         // supported regardless of device memory characteristics.
@@ -1157,6 +1055,7 @@ public class ActivityManager {
      * Returns true if the system supports split screen multi-window.
      * @hide
      */
+    @TestApi
     static public boolean supportsSplitScreenMultiWindow(Context context) {
         return supportsMultiWindow(context)
                 && Resources.getSystem().getBoolean(
@@ -1636,6 +1535,12 @@ public class ActivityManager {
          */
         public int resizeMode;
 
+        /**
+         * The current configuration this task is in.
+         * @hide
+         */
+        final public Configuration configuration = new Configuration();
+
         public RecentTaskInfo() {
         }
 
@@ -1681,6 +1586,7 @@ public class ActivityManager {
             }
             dest.writeInt(supportsSplitScreenMultiWindow ? 1 : 0);
             dest.writeInt(resizeMode);
+            configuration.writeToParcel(dest, flags);
         }
 
         public void readFromParcel(Parcel source) {
@@ -1705,6 +1611,7 @@ public class ActivityManager {
                     Rect.CREATOR.createFromParcel(source) : null;
             supportsSplitScreenMultiWindow = source.readInt() == 1;
             resizeMode = source.readInt();
+            configuration.readFromParcel(source);
         }
 
         public static final Creator<RecentTaskInfo> CREATOR
@@ -1899,6 +1806,12 @@ public class ActivityManager {
          */
         public int resizeMode;
 
+        /**
+         * The full configuration the task is currently running in.
+         * @hide
+         */
+        final public Configuration configuration = new Configuration();
+
         public RunningTaskInfo() {
         }
 
@@ -1923,6 +1836,7 @@ public class ActivityManager {
             dest.writeInt(numRunning);
             dest.writeInt(supportsSplitScreenMultiWindow ? 1 : 0);
             dest.writeInt(resizeMode);
+            configuration.writeToParcel(dest, flags);
         }
 
         public void readFromParcel(Parcel source) {
@@ -1940,6 +1854,7 @@ public class ActivityManager {
             numRunning = source.readInt();
             supportsSplitScreenMultiWindow = source.readInt() != 0;
             resizeMode = source.readInt();
+            configuration.readFromParcel(source);
         }
 
         public static final Creator<RunningTaskInfo> CREATOR = new Creator<RunningTaskInfo>() {
@@ -2116,6 +2031,73 @@ public class ActivityManager {
     public boolean removeTask(int taskId) throws SecurityException {
         try {
             return getService().removeTask(taskId);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Sets the windowing mode for a specific task. Only works on tasks of type
+     * {@link WindowConfiguration#ACTIVITY_TYPE_STANDARD}
+     * @param taskId The id of the task to set the windowing mode for.
+     * @param windowingMode The windowing mode to set for the task.
+     * @param toTop If the task should be moved to the top once the windowing mode changes.
+     * @hide
+     */
+    @TestApi
+    @RequiresPermission(android.Manifest.permission.MANAGE_ACTIVITY_STACKS)
+    public void setTaskWindowingMode(int taskId, int windowingMode, boolean toTop)
+            throws SecurityException {
+        try {
+            getService().setTaskWindowingMode(taskId, windowingMode, toTop);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Resizes the input stack id to the given bounds.
+     * @param stackId Id of the stack to resize.
+     * @param bounds Bounds to resize the stack to or {@code null} for fullscreen.
+     * @hide
+     */
+    @TestApi
+    @RequiresPermission(android.Manifest.permission.MANAGE_ACTIVITY_STACKS)
+    public void resizeStack(int stackId, Rect bounds) throws SecurityException {
+        try {
+            getService().resizeStack(stackId, bounds, false /* allowResizeInDockedMode */,
+                    false /* preserveWindows */, false /* animate */, -1 /* animationDuration */);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Removes stacks in the windowing modes from the system if they are of activity type
+     * ACTIVITY_TYPE_STANDARD or ACTIVITY_TYPE_UNDEFINED
+     *
+     * @hide
+     */
+    @TestApi
+    @RequiresPermission(android.Manifest.permission.MANAGE_ACTIVITY_STACKS)
+    public void removeStacksInWindowingModes(int[] windowingModes) throws SecurityException {
+        try {
+            getService().removeStacksInWindowingModes(windowingModes);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Removes stack of the activity types from the system.
+     *
+     * @hide
+     */
+    @TestApi
+    @RequiresPermission(android.Manifest.permission.MANAGE_ACTIVITY_STACKS)
+    public void removeStacksWithActivityTypes(int[] activityTypes) throws SecurityException {
+        try {
+            getService().removeStacksWithActivityTypes(activityTypes);
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -2599,6 +2581,11 @@ public class ActivityManager {
         public boolean visible;
         // Index of the stack in the display's stack list, can be used for comparison of stack order
         public int position;
+        /**
+         * The full configuration the stack is currently running in.
+         * @hide
+         */
+        final public Configuration configuration = new Configuration();
 
         @Override
         public int describeContents() {
@@ -2633,6 +2620,7 @@ public class ActivityManager {
             } else {
                 dest.writeInt(0);
             }
+            configuration.writeToParcel(dest, flags);
         }
 
         public void readFromParcel(Parcel source) {
@@ -2660,6 +2648,7 @@ public class ActivityManager {
             if (source.readInt() > 0) {
                 topActivity = ComponentName.readFromParcel(source);
             }
+            configuration.readFromParcel(source);
         }
 
         public static final Creator<StackInfo> CREATOR = new Creator<StackInfo>() {
@@ -2686,6 +2675,8 @@ public class ActivityManager {
                     sb.append(" bounds="); sb.append(bounds.toShortString());
                     sb.append(" displayId="); sb.append(displayId);
                     sb.append(" userId="); sb.append(userId);
+                    sb.append("\n");
+                    sb.append(" configuration="); sb.append(configuration);
                     sb.append("\n");
             prefix = prefix + "  ";
             for (int i = 0; i < taskIds.length; ++i) {

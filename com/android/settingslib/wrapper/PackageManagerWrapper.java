@@ -60,6 +60,13 @@ public class PackageManagerWrapper {
     }
 
     /**
+     * Calls {@code PackageManager.getInstalledPackagesAsUser}
+     */
+    public List<PackageInfo> getInstalledPackagesAsUser(int flags, int userId) {
+        return mPm.getInstalledPackagesAsUser(flags, userId);
+    }
+
+    /**
      * Calls {@code PackageManager.hasSystemFeature()}.
      *
      * @see android.content.pm.PackageManager#hasSystemFeature
@@ -132,11 +139,11 @@ public class PackageManagerWrapper {
 
     /**
      * Gets information about a particular package from the package manager.
+     *
      * @param packageName The name of the package we would like information about.
-     * @param i additional options flags. see javadoc for
-     * {@link PackageManager#getPackageInfo(String, int)}
+     * @param i           additional options flags. see javadoc for
+     *                    {@link PackageManager#getPackageInfo(String, int)}
      * @return The PackageInfo for the requested package
-     * @throws NameNotFoundException
      */
     public PackageInfo getPackageInfo(String packageName, int i) throws NameNotFoundException {
         return mPm.getPackageInfo(packageName, i);
@@ -144,6 +151,7 @@ public class PackageManagerWrapper {
 
     /**
      * Retrieves the icon associated with this particular set of ApplicationInfo
+     *
      * @param info The ApplicationInfo to retrieve the icon for
      * @return The icon as a drawable.
      */
@@ -154,6 +162,7 @@ public class PackageManagerWrapper {
 
     /**
      * Retrieves the label associated with the particular set of ApplicationInfo
+     *
      * @param app The ApplicationInfo to retrieve the label for
      * @return the label as a CharSequence
      */
@@ -190,4 +199,48 @@ public class PackageManagerWrapper {
             throws PackageManager.NameNotFoundException {
         return mPm.getPackageUidAsUser(pkg, userId);
     }
+
+    /**
+     * Calls {@code PackageManager.setApplicationEnabledSetting}
+     */
+    public void setApplicationEnabledSetting(String packageName, int newState, int flags) {
+        mPm.setApplicationEnabledSetting(packageName, newState, flags);
+    }
+
+    /**
+     * Calls {@code PackageManager.getApplicationEnabledSetting}
+     */
+    public int getApplicationEnabledSetting(String packageName) {
+        return mPm.getApplicationEnabledSetting(packageName);
+    }
+
+    /**
+     * Calls {@code PackageManager.setComponentEnabledSetting}
+     */
+    public void setComponentEnabledSetting(ComponentName componentName, int newState, int flags) {
+        mPm.setComponentEnabledSetting(componentName, newState, flags);
+    }
+
+    /**
+     * Calls {@code PackageManager.getApplicationInfo}
+     */
+    public ApplicationInfo getApplicationInfo(String packageName, int flags)
+            throws NameNotFoundException {
+        return mPm.getApplicationInfo(packageName, flags);
+    }
+
+    /**
+     * Calls {@code PackageManager.getApplicationLabel}
+     */
+    public CharSequence getApplicationLabel(ApplicationInfo info) {
+        return mPm.getApplicationLabel(info);
+    }
+
+    /**
+     * Calls {@code PackageManager.queryBroadcastReceivers}
+     */
+    public List<ResolveInfo> queryBroadcastReceivers(Intent intent, int flags) {
+        return mPm.queryBroadcastReceivers(intent, flags);
+    }
 }
+

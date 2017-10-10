@@ -16,15 +16,16 @@
 
 package com.android.server.wifi.aware;
 
+import android.Manifest;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.hardware.wifi.V1_0.NanStatusType;
-import android.net.wifi.RttManager;
 import android.net.wifi.aware.Characteristics;
 import android.net.wifi.aware.ConfigRequest;
 import android.net.wifi.aware.DiscoverySession;
 import android.net.wifi.aware.IWifiAwareDiscoverySessionCallback;
 import android.net.wifi.aware.IWifiAwareEventCallback;
+import android.net.wifi.aware.IWifiAwareMacAddressProvider;
 import android.net.wifi.aware.IWifiAwareManager;
 import android.net.wifi.aware.PublishConfig;
 import android.net.wifi.aware.SubscribeConfig;
@@ -42,7 +43,7 @@ import com.android.server.wifi.util.WifiPermissionsWrapper;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
-import java.util.Arrays;
+import java.util.List;
 
 /**
  * Implementation of the IWifiAwareManager AIDL interface. Performs validity
@@ -63,7 +64,6 @@ public class WifiAwareServiceImpl extends IWifiAwareManager.Stub {
     private final SparseArray<IBinder.DeathRecipient> mDeathRecipientsByClientId =
             new SparseArray<>();
     private int mNextClientId = 1;
-    private int mNextRangingId = 1;
     private final SparseIntArray mUidByClientId = new SparseIntArray();
 
     public WifiAwareServiceImpl(Context context) {
@@ -134,7 +134,7 @@ public class WifiAwareServiceImpl extends IWifiAwareManager.Stub {
         }
 
         if (configRequest != null) {
-            enforceConnectivityInternalPermission();
+            enforceNetworkStackPermission();
         } else {
             configRequest = new ConfigRequest.Builder().build();
         }
@@ -326,7 +326,7 @@ public class WifiAwareServiceImpl extends IWifiAwareManager.Stub {
         enforceChangePermission();
 
         if (retryCount != 0) {
-            enforceConnectivityInternalPermission();
+            enforceNetworkStackPermission();
         }
 
         if (message != null
@@ -352,30 +352,10 @@ public class WifiAwareServiceImpl extends IWifiAwareManager.Stub {
     }
 
     @Override
-    public int startRanging(int clientId, int sessionId, RttManager.ParcelableRttParams params) {
-        enforceAccessPermission();
-        enforceLocationPermission();
+    public void requestMacAddresses(int uid, List peerIds, IWifiAwareMacAddressProvider callback) {
+        enforceNetworkStackPermission();
 
-        // TODO: b/35676064 restricts access to this API until decide if will open.
-        enforceConnectivityInternalPermission();
-
-        int uid = getMockableCallingUid();
-        enforceClientValidity(uid, clientId);
-        if (VDBG) {
-            Log.v(TAG, "startRanging: clientId=" + clientId + ", sessionId=" + sessionId + ", "
-                    + ", parms=" + Arrays.toString(params.mParams));
-        }
-
-        if (params.mParams.length == 0) {
-            throw new IllegalArgumentException("Empty ranging parameters");
-        }
-
-        int rangingId;
-        synchronized (mLock) {
-            rangingId = mNextRangingId++;
-        }
-        mStateManager.startRanging(clientId, sessionId, params.mParams, rangingId);
-        return rangingId;
+        mStateManager.requestMacAddresses(uid, peerIds, callback);
     }
 
     @Override
@@ -424,8 +404,7 @@ public class WifiAwareServiceImpl extends IWifiAwareManager.Stub {
                 TAG);
     }
 
-    private void enforceConnectivityInternalPermission() {
-        mContext.enforceCallingOrSelfPermission(android.Manifest.permission.CONNECTIVITY_INTERNAL,
-                TAG);
+    private void enforceNetworkStackPermission() {
+        mContext.enforceCallingOrSelfPermission(Manifest.permission.NETWORK_STACK, TAG);
     }
 }

@@ -53,26 +53,11 @@ public class StaticLayout_Delegate {
     }
 
     @LayoutlibDelegate
-    /*package*/ static long nLoadHyphenator(ByteBuffer buf, int offset, int minPrefix,
-            int minSuffix) {
-        return Hyphenator_Delegate.loadHyphenator(buf, offset, minPrefix, minSuffix);
-    }
-
-    @LayoutlibDelegate
-    /*package*/ static void nSetLocales(long nativeBuilder, String locales,
-            long[] nativeHyphenators) {
-        Builder builder = sBuilderManager.getDelegate(nativeBuilder);
-        if (builder != null) {
-            builder.mLocales = locales;
-            builder.mNativeHyphenators = nativeHyphenators;
-        }
-    }
-
-    @LayoutlibDelegate
     /*package*/ static void nSetupParagraph(long nativeBuilder, char[] text, int length,
             float firstWidth, int firstWidthLineCount, float restWidth,
             int[] variableTabStops, int defaultTabStop, int breakStrategy,
-            int hyphenationFrequency, boolean isJustified, int[] indents, int intentsOffset) {
+            int hyphenationFrequency, boolean isJustified, int[] indents, int[] leftPaddings,
+            int[] rightPaddings, int intentsOffset) {
         // TODO: implement justified alignment
         Builder builder = sBuilderManager.getDelegate(nativeBuilder);
         if (builder == null) {
@@ -86,30 +71,29 @@ public class StaticLayout_Delegate {
     }
 
     @LayoutlibDelegate
-    /*package*/ static float nAddStyleRun(long nativeBuilder, long nativePaint, int start,
-            int end, boolean isRtl) {
-        Builder builder = sBuilderManager.getDelegate(nativeBuilder);
-
-        int bidiFlags = isRtl ? Paint.BIDI_FORCE_RTL : Paint.BIDI_FORCE_LTR;
-        return builder == null ? 0 :
-                measureText(nativePaint, builder.mText, start, end - start, builder.mWidths,
-                        bidiFlags);
-    }
-
-    @LayoutlibDelegate
-    /*package*/ static void nAddMeasuredRun(long nativeBuilder, int start, int end, float[] widths) {
-        Builder builder = sBuilderManager.getDelegate(nativeBuilder);
-        if (builder != null) {
-            System.arraycopy(widths, start, builder.mWidths, start, end - start);
-        }
-    }
-
-    @LayoutlibDelegate
-    /*package*/ static void nAddReplacementRun(long nativeBuilder, int start, int end, float width) {
+    /*package*/ static void nAddStyleRun(long nativeBuilder, long nativePaint, int start,
+            int end, boolean isRtl, String languageTags, long[] hyphenators) {
         Builder builder = sBuilderManager.getDelegate(nativeBuilder);
         if (builder == null) {
             return;
         }
+        builder.mLocales = languageTags;
+        builder.mNativeHyphenators = hyphenators;
+
+        int bidiFlags = isRtl ? Paint.BIDI_FORCE_RTL : Paint.BIDI_FORCE_LTR;
+        measureText(nativePaint, builder.mText, start, end - start, builder.mWidths,
+                bidiFlags);
+    }
+
+    @LayoutlibDelegate
+    /*package*/ static void nAddReplacementRun(long nativeBuilder, int start, int end, float width,
+            String languageTags, long[] hyphenators) {
+        Builder builder = sBuilderManager.getDelegate(nativeBuilder);
+        if (builder == null) {
+            return;
+        }
+        builder.mLocales = languageTags;
+        builder.mNativeHyphenators = hyphenators;
         builder.mWidths[start] = width;
         Arrays.fill(builder.mWidths, start + 1, end, 0.0f);
     }

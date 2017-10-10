@@ -74,6 +74,61 @@ public class ActivityCompat extends ContextCompat {
     }
 
     /**
+     * Customizable delegate that allows delegating permission compatibility methods to a custom
+     * implementation.
+     *
+     * <p>
+     *     To delegate permission compatibility methods to a custom class, implement this interface,
+     *     and call {@code ActivityCompat.setPermissionCompatDelegate(delegate);}. All future calls
+     *     to the permission compatibility methods in this class will first check whether the
+     *     delegate can handle the method call, and invoke the corresponding method if it can.
+     * </p>
+     */
+    public interface PermissionCompatDelegate {
+
+        /**
+         * Determines whether the delegate should handle
+         * {@link ActivityCompat#requestPermissions(Activity, String[], int)}, and request
+         * permissions if applicable. If this method returns true, it means that permission
+         * request is successfully handled by the delegate, and platform should not perform any
+         * further requests for permission.
+         *
+         * @param activity The target activity.
+         * @param permissions The requested permissions. Must me non-null and not empty.
+         * @param requestCode Application specific request code to match with a result reported to
+         *    {@link
+         *    OnRequestPermissionsResultCallback#onRequestPermissionsResult(int, String[], int[])}.
+         *    Should be >= 0.
+         *
+         * @return Whether the delegate has handled the permission request.
+         * @see ActivityCompat#requestPermissions(Activity, String[], int)
+         */
+        boolean requestPermissions(@NonNull Activity activity,
+                @NonNull String[] permissions, @IntRange(from = 0) int requestCode);
+
+        /**
+         * Determines whether the delegate should handle the permission request as part of
+         * {@code FragmentActivity#onActivityResult(int, int, Intent)}. If this method returns true,
+         * it means that activity result is successfully handled by the delegate, and no further
+         * action is needed on this activity result.
+         *
+         * @param activity    The target Activity.
+         * @param requestCode The integer request code originally supplied to
+         *                    {@code startActivityForResult()}, allowing you to identify who this
+         *                    result came from.
+         * @param resultCode  The integer result code returned by the child activity
+         *                    through its {@code }setResult()}.
+         * @param data        An Intent, which can return result data to the caller
+         *                    (various data can be attached to Intent "extras").
+         *
+         * @return Whether the delegate has handled the activity result.
+         * @see ActivityCompat#requestPermissions(Activity, String[], int)
+         */
+        boolean onActivityResult(@NonNull Activity activity,
+                @IntRange(from = 0) int requestCode, int resultCode, @Nullable Intent data);
+    }
+
+    /**
      * @hide
      */
     @RestrictTo(RestrictTo.Scope.LIBRARY_GROUP)
@@ -81,12 +136,33 @@ public class ActivityCompat extends ContextCompat {
         void validateRequestPermissionsRequestCode(int requestCode);
     }
 
+    private static PermissionCompatDelegate sDelegate;
+
     /**
      * This class should not be instantiated, but the constructor must be
      * visible for the class to be extended (as in support-v13).
      */
     protected ActivityCompat() {
         // Not publicly instantiable, but may be extended.
+    }
+
+    /**
+     * Sets the permission delegate for {@code ActivityCompat}. Replaces the previously set
+     * delegate.
+     *
+     * @param delegate The delegate to be set. {@code null} to clear the set delegate.
+     */
+    public static void setPermissionCompatDelegate(
+            @Nullable PermissionCompatDelegate delegate) {
+        sDelegate = delegate;
+    }
+
+    /**
+     * @hide
+     */
+    @RestrictTo(RestrictTo.Scope.LIBRARY_GROUP)
+    public static PermissionCompatDelegate getPermissionCompatDelegate() {
+        return sDelegate;
     }
 
     /**
@@ -120,7 +196,9 @@ public class ActivityCompat extends ContextCompat {
      *
      * @param activity Invalidate the options menu of this activity
      * @return true if this operation was supported and it completed; false if it was not available.
+     * @deprecated Use {@link Activity#invalidateOptionsMenu()} directly.
      */
+    @Deprecated
     public static boolean invalidateOptionsMenu(Activity activity) {
         activity.invalidateOptionsMenu();
         return true;
@@ -146,8 +224,8 @@ public class ActivityCompat extends ContextCompat {
      *                supplied here; there are no supported definitions for
      *                building it manually.
      */
-    public static void startActivityForResult(Activity activity, Intent intent, int requestCode,
-            @Nullable Bundle options) {
+    public static void startActivityForResult(@NonNull Activity activity, @NonNull Intent intent,
+            int requestCode, @Nullable Bundle options) {
         if (Build.VERSION.SDK_INT >= 16) {
             activity.startActivityForResult(intent, requestCode, options);
         } else {
@@ -181,9 +259,10 @@ public class ActivityCompat extends ContextCompat {
      *                supplied here; there are no supported definitions for
      *                building it manually.
      */
-    public static void startIntentSenderForResult(Activity activity, IntentSender intent,
-            int requestCode, Intent fillInIntent, int flagsMask, int flagsValues,
-            int extraFlags, @Nullable Bundle options) throws IntentSender.SendIntentException {
+    public static void startIntentSenderForResult(@NonNull Activity activity,
+            @NonNull IntentSender intent, int requestCode, @Nullable Intent fillInIntent,
+            int flagsMask, int flagsValues, int extraFlags, @Nullable Bundle options)
+            throws IntentSender.SendIntentException {
         if (Build.VERSION.SDK_INT >= 16) {
             activity.startIntentSenderForResult(intent, requestCode, fillInIntent, flagsMask,
                     flagsValues, extraFlags, options);
@@ -200,7 +279,7 @@ public class ActivityCompat extends ContextCompat {
      * <p>On Android 4.1+ calling this method will call through to the native version of this
      * method. For other platforms {@link Activity#finish()} will be called instead.</p>
      */
-    public static void finishAffinity(Activity activity) {
+    public static void finishAffinity(@NonNull Activity activity) {
         if (Build.VERSION.SDK_INT >= 16) {
             activity.finishAffinity();
         } else {
@@ -217,7 +296,7 @@ public class ActivityCompat extends ContextCompat {
      * <p>On Android 4.4 or lower, this method only finishes the Activity with no
      * special exit transition.</p>
      */
-    public static void finishAfterTransition(Activity activity) {
+    public static void finishAfterTransition(@NonNull Activity activity) {
         if (Build.VERSION.SDK_INT >= 21) {
             activity.finishAfterTransition();
         } else {
@@ -242,7 +321,7 @@ public class ActivityCompat extends ContextCompat {
      * referrer information, applications can spoof it.</p>
      */
     @Nullable
-    public static Uri getReferrer(Activity activity) {
+    public static Uri getReferrer(@NonNull Activity activity) {
         if (Build.VERSION.SDK_INT >= 22) {
             return activity.getReferrer();
         }
@@ -266,8 +345,8 @@ public class ActivityCompat extends ContextCompat {
      *
      * @param callback Used to manipulate shared element transitions on the launched Activity.
      */
-    public static void setEnterSharedElementCallback(Activity activity,
-            SharedElementCallback callback) {
+    public static void setEnterSharedElementCallback(@NonNull Activity activity,
+            @Nullable SharedElementCallback callback) {
         if (Build.VERSION.SDK_INT >= 23) {
             android.app.SharedElementCallback frameworkCallback = callback != null
                     ? new SharedElementCallback23Impl(callback)
@@ -290,8 +369,8 @@ public class ActivityCompat extends ContextCompat {
      *
      * @param callback Used to manipulate shared element transitions on the launching Activity.
      */
-    public static void setExitSharedElementCallback(Activity activity,
-            SharedElementCallback callback) {
+    public static void setExitSharedElementCallback(@NonNull Activity activity,
+            @Nullable SharedElementCallback callback) {
         if (Build.VERSION.SDK_INT >= 23) {
             android.app.SharedElementCallback frameworkCallback = callback != null
                     ? new SharedElementCallback23Impl(callback)
@@ -305,13 +384,13 @@ public class ActivityCompat extends ContextCompat {
         }
     }
 
-    public static void postponeEnterTransition(Activity activity) {
+    public static void postponeEnterTransition(@NonNull Activity activity) {
         if (Build.VERSION.SDK_INT >= 21) {
             activity.postponeEnterTransition();
         }
     }
 
-    public static void startPostponedEnterTransition(Activity activity) {
+    public static void startPostponedEnterTransition(@NonNull Activity activity) {
         if (Build.VERSION.SDK_INT >= 21) {
             activity.startPostponedEnterTransition();
         }
@@ -386,6 +465,12 @@ public class ActivityCompat extends ContextCompat {
      */
     public static void requestPermissions(final @NonNull Activity activity,
             final @NonNull String[] permissions, final @IntRange(from = 0) int requestCode) {
+        if (sDelegate != null
+                && sDelegate.requestPermissions(activity, permissions, requestCode)) {
+            // Delegate has handled the permission request.
+            return;
+        }
+
         if (Build.VERSION.SDK_INT >= 23) {
             if (activity instanceof RequestPermissionsRequestCodeValidator) {
                 ((RequestPermissionsRequestCodeValidator) activity)

@@ -6966,8 +6966,9 @@ public final class Settings {
         public static final String NIGHT_DISPLAY_CUSTOM_END_TIME = "night_display_custom_end_time";
 
         /**
-         * Time in milliseconds (since epoch) when Night display was last activated. Use to decide
-         * whether to apply the current activated state after a reboot or user change.
+         * A String representing the LocalDateTime when Night display was last activated. Use to
+         * decide whether to apply the current activated state after a reboot or user change. In
+         * legacy cases, this is represented by the time in milliseconds (since epoch).
          * @hide
          */
         public static final String NIGHT_DISPLAY_LAST_ACTIVATED_TIME =
@@ -9368,16 +9369,6 @@ public final class Settings {
         public static final String DEVICE_IDLE_CONSTANTS = "device_idle_constants";
 
         /**
-         * Device Idle (Doze) specific settings for watches. See {@code #DEVICE_IDLE_CONSTANTS}
-         *
-         * <p>
-         * Type: string
-         * @hide
-         * @see com.android.server.DeviceIdleController.Constants
-         */
-        public static final String DEVICE_IDLE_CONSTANTS_WATCH = "device_idle_constants_watch";
-
-        /**
          * Battery Saver specific settings
          * This is encoded as a key=value list, separated by commas. Ex:
          *
@@ -9403,9 +9394,12 @@ public final class Settings {
 
         /**
          * Battery anomaly detection specific settings
-         * This is encoded as a key=value list, separated by commas. Ex:
+         * This is encoded as a key=value list, separated by commas.
+         * wakeup_blacklisted_tags is a string, encoded as a set of tags, encoded via
+         * {@link Uri#encode(String)}, separated by colons. Ex:
          *
-         * "anomaly_detection_enabled=true,wakelock_threshold=2000"
+         * "anomaly_detection_enabled=true,wakelock_threshold=2000,wakeup_alarm_enabled=true,"
+         * "wakeup_alarm_threshold=10,wakeup_blacklisted_tags=tag1:tag2:with%2Ccomma:with%3Acolon"
          *
          * The following keys are supported:
          *
@@ -9413,6 +9407,11 @@ public final class Settings {
          * anomaly_detection_enabled       (boolean)
          * wakelock_enabled                (boolean)
          * wakelock_threshold              (long)
+         * wakeup_alarm_enabled            (boolean)
+         * wakeup_alarm_threshold          (long)
+         * wakeup_blacklisted_tags         (string)
+         * bluetooth_scan_enabled          (boolean)
+         * bluetooth_scan_threshold        (long)
          * </pre>
          * @hide
          */
@@ -10199,7 +10198,7 @@ public final class Settings {
                 "allow_user_switching_when_system_user_locked";
 
         /**
-         * Boot count since the device starts running APK level 24.
+         * Boot count since the device starts running API level 24.
          * <p>
          * Type: int
          */
@@ -10893,6 +10892,26 @@ public final class Settings {
          */
         public static final String ENABLE_DELETION_HELPER_NO_THRESHOLD_TOGGLE =
                 "enable_deletion_helper_no_threshold_toggle";
+
+        /**
+         * The list of snooze options for notifications
+         * This is encoded as a key=value list, separated by commas. Ex:
+         *
+         * "default=60,options_array=15:30:60:120"
+         *
+         * The following keys are supported:
+         *
+         * <pre>
+         * default               (int)
+         * options_array         (string)
+         * </pre>
+         *
+         * All delays in integer minutes. Array order is respected.
+         * Options will be used in order up to the maximum allowed by the UI.
+         * @hide
+         */
+        public static final String NOTIFICATION_SNOOZE_OPTIONS =
+                "notification_snooze_options";
     }
 
     /**

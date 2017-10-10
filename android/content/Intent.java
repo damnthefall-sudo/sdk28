@@ -9444,7 +9444,7 @@ public class Intent implements Parcelable, Cloneable {
                 for (int i=0; i<N; i++) {
                     char c = data.charAt(i);
                     if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-                            || c == '.' || c == '-') {
+                            || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+') {
                         continue;
                     }
                     if (c == ':' && i > 0) {
@@ -10069,6 +10069,27 @@ public class Intent implements Parcelable, Cloneable {
         }
 
         return false;
+    }
+
+    /**
+     * Convert the dock state to a human readable format.
+     * @hide
+     */
+    public static String dockStateToString(int dock) {
+        switch (dock) {
+            case EXTRA_DOCK_STATE_HE_DESK:
+                return "EXTRA_DOCK_STATE_HE_DESK";
+            case EXTRA_DOCK_STATE_LE_DESK:
+                return "EXTRA_DOCK_STATE_LE_DESK";
+            case EXTRA_DOCK_STATE_CAR:
+                return "EXTRA_DOCK_STATE_CAR";
+            case EXTRA_DOCK_STATE_DESK:
+                return "EXTRA_DOCK_STATE_DESK";
+            case EXTRA_DOCK_STATE_UNDOCKED:
+                return "EXTRA_DOCK_STATE_UNDOCKED";
+            default:
+                return Integer.toString(dock);
+        }
     }
 
     private static ClipData.Item makeClipItem(ArrayList<Uri> streams, ArrayList<CharSequence> texts,

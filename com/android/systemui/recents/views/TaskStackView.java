@@ -16,9 +16,8 @@
 
 package com.android.systemui.recents.views;
 
-import static android.app.ActivityManager.StackId.FREEFORM_WORKSPACE_STACK_ID;
-import static android.app.ActivityManager.StackId.FULLSCREEN_WORKSPACE_STACK_ID;
-import static android.app.ActivityManager.StackId.INVALID_STACK_ID;
+import static android.app.WindowConfiguration.WINDOWING_MODE_FREEFORM;
+import static android.app.WindowConfiguration.WINDOWING_MODE_FULLSCREEN;
 
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
@@ -1487,7 +1486,7 @@ public class TaskStackView extends FrameLayout implements TaskStack.TaskStackCal
             Task frontTask = tasks.get(tasks.size() - 1);
             if (frontTask != null && frontTask.isFreeformTask()) {
                 EventBus.getDefault().send(new LaunchTaskEvent(getChildViewForTask(frontTask),
-                        frontTask, null, INVALID_STACK_ID, false));
+                        frontTask, null, false));
                 return true;
             }
         }
@@ -1768,8 +1767,17 @@ public class TaskStackView extends FrameLayout implements TaskStack.TaskStackCal
         }
 
         // In grid layout, the stack action button always remains visible.
-        if (mEnterAnimationComplete && !useGridLayout() &&
-                !Recents.getConfiguration().isLowRamDevice) {
+        if (mEnterAnimationComplete && !useGridLayout()) {
+            if (Recents.getConfiguration().isLowRamDevice) {
+                // Show stack button when user drags down to show older tasks on low ram devices
+                if (mStack.getTaskCount() > 0 && !mStackActionButtonVisible
+                        && mTouchHandler.mIsScrolling && curScroll - prevScroll < 0) {
+                    // Going up
+                    EventBus.getDefault().send(
+                            new ShowStackActionButtonEvent(true /* translate */));
+                }
+                return;
+            }
             if (prevScroll > SHOW_STACK_ACTION_BUTTON_SCROLL_THRESHOLD &&
                     curScroll <= SHOW_STACK_ACTION_BUTTON_SCROLL_THRESHOLD &&
                     mStack.getTaskCount() > 0) {
@@ -1956,6 +1964,9 @@ public class TaskStackView extends FrameLayout implements TaskStack.TaskStackCal
         // Remove the task from the stack
         mStack.removeTask(event.task, event.animation, false /* fromDockGesture */);
         EventBus.getDefault().send(new DeleteTaskDataEvent(event.task));
+        if (mStack.getTaskCount() > 0 && Recents.getConfiguration().isLowRamDevice) {
+            EventBus.getDefault().send(new ShowStackActionButtonEvent(false /* translate */));
+        }
 
         MetricsLogger.action(getContext(), MetricsEvent.OVERVIEW_DISMISS,
                 event.task.key.getComponent().toString());
@@ -2082,18 +2093,18 @@ public class TaskStackView extends FrameLayout implements TaskStack.TaskStackCal
         }
 
         boolean isFreeformTask = event.task.isFreeformTask();
-        boolean hasChangedStacks =
+        boolean hasChangedWindowingMode =
                 (!isFreeformTask && event.dropTarget == mFreeformWorkspaceDropTarget) ||
                         (isFreeformTask && event.dropTarget == mStackDropTarget);
 
-        if (hasChangedStacks) {
+        if (hasChangedWindowingMode) {
             // Move the task to the right position in the stack (ie. the front of the stack if
             // freeform or the front of the stack if fullscreen). Note, we MUST move the tasks
             // before we update their stack ids, otherwise, the keys will have changed.
             if (event.dropTarget == mFreeformWorkspaceDropTarget) {
-                mStack.moveTaskToStack(event.task, FREEFORM_WORKSPACE_STACK_ID);
+                mStack.setTaskWindowingMode(event.task, WINDOWING_MODE_FREEFORM);
             } else if (event.dropTarget == mStackDropTarget) {
-                mStack.moveTaskToStack(event.task, FULLSCREEN_WORKSPACE_STACK_ID);
+                mStack.setTaskWindowingMode(event.task, WINDOWING_MODE_FULLSCREEN);
             }
             updateLayoutAlgorithm(true /* boundScroll */);
 
@@ -2102,7 +2113,7 @@ public class TaskStackView extends FrameLayout implements TaskStack.TaskStackCal
                 @Override
                 public void run() {
                     SystemServicesProxy ssp = Recents.getSystemServices();
-                    ssp.moveTaskToStack(event.task.key.id, event.task.key.stackId);
+                    ssp.setTaskWindowingMode(event.task.key.id, event.task.key.windowingMode);
                 }
             });
         }
@@ -2369,12 +2380,12 @@ public class TaskStackView extends FrameLayout implements TaskStack.TaskStackCal
                         public void run() {
                             EventBus.getDefault().send(new LaunchTaskEvent(
                                     getChildViewForTask(task), task, null,
-                                    INVALID_STACK_ID, false /* screenPinningRequested */));
+                                    false /* screenPinningRequested */));
                         }
                     });
         } else {
-            EventBus.getDefault().send(new LaunchTaskEvent(getChildViewForTask(task),
-                    task, null, INVALID_STACK_ID, false /* screenPinningRequested */));
+            EventBus.getDefault().send(new LaunchTaskEvent(getChildViewForTask(task), task, null,
+                    false /* screenPinningRequested */));
         }
     }
 

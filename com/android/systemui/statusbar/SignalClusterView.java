@@ -16,14 +16,15 @@
 
 package com.android.systemui.statusbar;
 
+import static android.app.StatusBarManager.DISABLE2_SYSTEM_ICONS;
+import static android.app.StatusBarManager.DISABLE_NONE;
+
 import android.annotation.DrawableRes;
 import android.content.Context;
 import android.content.res.ColorStateList;
 import android.content.res.Resources;
 import android.graphics.Color;
 import android.graphics.Rect;
-import android.graphics.drawable.Animatable;
-import android.graphics.drawable.AnimatedVectorDrawable;
 import android.graphics.drawable.Drawable;
 import android.telephony.SubscriptionInfo;
 import android.util.ArraySet;
@@ -50,14 +51,15 @@ import com.android.systemui.statusbar.policy.NetworkControllerImpl;
 import com.android.systemui.statusbar.policy.SecurityController;
 import com.android.systemui.tuner.TunerService;
 import com.android.systemui.tuner.TunerService.Tunable;
+import com.android.systemui.util.Utils.DisableStateTracker;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 // Intimately tied to the design of res/layout/signal_cluster_view.xml
 public class SignalClusterView extends LinearLayout implements NetworkControllerImpl.SignalCallback,
-        SecurityController.SecurityControllerCallback, Tunable,
-        DarkReceiver {
+        SecurityController.SecurityControllerCallback, Tunable, DarkReceiver {
 
     static final String TAG = "SignalClusterView";
     static final boolean DEBUG = Log.isLoggable(TAG, Log.DEBUG);
@@ -73,6 +75,7 @@ public class SignalClusterView extends LinearLayout implements NetworkController
 
     private boolean mNoSimsVisible = false;
     private boolean mVpnVisible = false;
+    private boolean mSimDetected;
     private int mVpnIconId = 0;
     private int mLastVpnIconId = -1;
     private boolean mEthernetVisible = false;
@@ -148,6 +151,8 @@ public class SignalClusterView extends LinearLayout implements NetworkController
         mIconScaleFactor = typedValue.getFloat();
         mNetworkController = Dependency.get(NetworkController.class);
         mSecurityController = Dependency.get(SecurityController.class);
+        addOnAttachStateChangeListener(
+                new DisableStateTracker(DISABLE_NONE, DISABLE2_SYSTEM_ICONS));
         updateActivityEnabled();
     }
 
@@ -327,8 +332,9 @@ public class SignalClusterView extends LinearLayout implements NetworkController
     }
 
     @Override
-    public void setNoSims(boolean show) {
+    public void setNoSims(boolean show, boolean simDetected) {
         mNoSimsVisible = show && !mBlockMobile;
+        mSimDetected = simDetected;
         apply();
     }
 
@@ -548,6 +554,23 @@ public class SignalClusterView extends LinearLayout implements NetworkController
         if (mNoSimsVisible) {
             mIconLogger.onIconShown(SLOT_MOBILE);
             mNoSimsCombo.setVisibility(View.VISIBLE);
+            if (!Objects.equals(mSimDetected, mNoSimsCombo.getTag())) {
+                mNoSimsCombo.setTag(mSimDetected);
+                if (mSimDetected) {
+                    SignalDrawable d = new SignalDrawable(mNoSims.getContext());
+                    d.setDarkIntensity(0);
+                    mNoSims.setImageDrawable(d);
+                    mNoSims.setImageLevel(SignalDrawable.getEmptyState(4));
+
+                    SignalDrawable dark = new SignalDrawable(mNoSims.getContext());
+                    dark.setDarkIntensity(1);
+                    mNoSimsDark.setImageDrawable(dark);
+                    mNoSimsDark.setImageLevel(SignalDrawable.getEmptyState(4));
+                } else {
+                    mNoSims.setImageResource(R.drawable.stat_sys_no_sims);
+                    mNoSimsDark.setImageResource(R.drawable.stat_sys_no_sims);
+                }
+            }
         } else {
             mIconLogger.onIconHidden(SLOT_MOBILE);
             mNoSimsCombo.setVisibility(View.GONE);

@@ -153,6 +153,13 @@ public class FragmentActivity extends BaseFragmentActivityApi16 implements
             return;
         }
 
+        ActivityCompat.PermissionCompatDelegate delegate =
+                ActivityCompat.getPermissionCompatDelegate();
+        if (delegate != null && delegate.onActivityResult(this, requestCode, resultCode, data)) {
+            // Delegate has handled the activity result
+            return;
+        }
+
         super.onActivityResult(requestCode, resultCode, data);
     }
 
@@ -267,6 +274,16 @@ public class FragmentActivity extends BaseFragmentActivityApi16 implements
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         mFragments.dispatchConfigurationChanged(newConfig);
+    }
+
+    /**
+     * Returns the Lifecycle of the provider.
+     *
+     * @return The lifecycle of the provider.
+     */
+    @Override
+    public Lifecycle getLifecycle() {
+        return super.getLifecycle();
     }
 
     /**
@@ -750,6 +767,7 @@ public class FragmentActivity extends BaseFragmentActivityApi16 implements
     @Override
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
             @NonNull int[] grantResults) {
+        mFragments.noteStateNotSaved();
         int index = (requestCode >> 16) & 0xffff;
         if (index != 0) {
             index--;

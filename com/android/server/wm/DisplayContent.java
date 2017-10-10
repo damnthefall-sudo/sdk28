@@ -18,9 +18,11 @@ package com.android.server.wm;
 
 import static android.app.ActivityManager.StackId.DOCKED_STACK_ID;
 import static android.app.ActivityManager.StackId.FREEFORM_WORKSPACE_STACK_ID;
-import static android.app.ActivityManager.StackId.HOME_STACK_ID;
 import static android.app.ActivityManager.StackId.PINNED_STACK_ID;
+import static android.app.WindowConfiguration.ACTIVITY_TYPE_UNDEFINED;
 import static android.app.WindowConfiguration.WINDOWING_MODE_FULLSCREEN;
+import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED;
+import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_PRIMARY;
 import static android.content.pm.ActivityInfo.SCREEN_ORIENTATION_BEHIND;
 import static android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSET;
 import static android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
@@ -112,10 +114,11 @@ import static com.android.server.wm.proto.DisplayProto.PINNED_STACK_CONTROLLER;
 import static com.android.server.wm.proto.DisplayProto.ROTATION;
 import static com.android.server.wm.proto.DisplayProto.SCREEN_ROTATION_ANIMATION;
 import static com.android.server.wm.proto.DisplayProto.STACKS;
+import static com.android.server.wm.proto.DisplayProto.WINDOW_CONTAINER;
 
+import android.annotation.CallSuper;
 import android.annotation.NonNull;
 import android.app.ActivityManager.StackId;
-import android.app.WindowConfiguration;
 import android.content.res.CompatibilityInfo;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
@@ -389,10 +392,6 @@ class DisplayContent extends WindowContainer<DisplayContent.DisplayChildWindowCo
                     != mTmpWindowAnimator.mAnimTransactionSequence) {
                 appAnimator.thumbnailTransactionSeq =
                         mTmpWindowAnimator.mAnimTransactionSequence;
-                appAnimator.thumbnailLayer = 0;
-            }
-            if (appAnimator.thumbnailLayer < winAnimator.mAnimLayer) {
-                appAnimator.thumbnailLayer = winAnimator.mAnimLayer;
             }
         }
     };
@@ -966,10 +965,10 @@ class DisplayContent extends WindowContainer<DisplayContent.DisplayChildWindowCo
         final int lastOrientation = mLastOrientation;
         final boolean oldAltOrientation = mAltOrientation;
         int rotation = mService.mPolicy.rotationForOrientationLw(lastOrientation, oldRotation);
-        final boolean rotateSeamlessly = mService.mPolicy.shouldRotateSeamlessly(oldRotation,
+        boolean mayRotateSeamlessly = mService.mPolicy.shouldRotateSeamlessly(oldRotation,
                 rotation);
 
-        if (rotateSeamlessly) {
+        if (mayRotateSeamlessly) {
             final WindowState seamlessRotated = getWindow((w) -> w.mSeamlesslyRotated);
             if (seamlessRotated != null) {
                 // We can't rotate (seamlessly or not) while waiting for the last seamless rotation
@@ -978,7 +977,20 @@ class DisplayContent extends WindowContainer<DisplayContent.DisplayChildWindowCo
                 // window-removal.
                 return false;
             }
+
+            // In the presence of the PINNED stack or System Alert
+            // windows we unforuntately can not seamlessly rotate.
+            if (getStackById(PINNED_STACK_ID) != null) {
+                mayRotateSeamlessly = false;
+            }
+            for (int i = 0; i < mService.mSessions.size(); i++) {
+                if (mService.mSessions.valueAt(i).hasAlertWindowSurfaces()) {
+                    mayRotateSeamlessly = false;
+                    break;
+                }
+            }
         }
+        final boolean rotateSeamlessly = mayRotateSeamlessly;
 
         // TODO: Implement forced rotation changes.
         //       Set mAltOrientation to indicate that the application is receiving
@@ -1455,16 +1467,38 @@ class DisplayContent extends WindowContainer<DisplayContent.DisplayChildWindowCo
         return null;
     }
 
+    /**
+     * Returns the topmost stack on the display that is compatible with the input windowing mode.
+     * Null is no compatible stack on the display.
+     */
+    TaskStack getStack(int windowingMode) {
+        return getStack(windowingMode, ACTIVITY_TYPE_UNDEFINED);
+    }
+
+    /**
+     * Returns the topmost stack on the display that is compatible with the input windowing mode and
+     * activity type. Null is no compatible stack on the display.
+     */
+    TaskStack getStack(int windowingMode, int activityType) {
+        for (int i = mTaskStackContainers.size() - 1; i >= 0; --i) {
+            final TaskStack stack = mTaskStackContainers.get(i);
+            if (stack.isCompatible(windowingMode, activityType)) {
+                return stack;
+            }
+        }
+        return null;
+    }
+
     @VisibleForTesting
     int getStackCount() {
         return mTaskStackContainers.size();
     }
 
     @VisibleForTesting
-    int getStackPosById(int stackId) {
+    int getStackPosition(int windowingMode, int activityType) {
         for (int i = mTaskStackContainers.size() - 1; i >= 0; --i) {
             final TaskStack stack = mTaskStackContainers.get(i);
-            if (stack.mStackId == stackId) {
+            if (stack.isCompatible(windowingMode, activityType)) {
                 return i;
             }
         }
@@ -1499,7 +1533,7 @@ class DisplayContent extends WindowContainer<DisplayContent.DisplayChildWindowCo
         // If there was no pinned stack, we still need to notify the controller of the display info
         // update as a result of the config change.  We do this here to consolidate the flow between
         // changes when there is and is not a stack.
-        if (getStackById(PINNED_STACK_ID) == null) {
+        if (getStack(WINDOWING_MODE_PINNED) == null) {
             mPinnedStackControllerLocked.onDisplayInfoChanged();
         }
     }
@@ -1720,21 +1754,22 @@ class DisplayContent extends WindowContainer<DisplayContent.DisplayChildWindowCo
         out.set(mContentRect);
     }
 
-    TaskStack addStackToDisplay(int stackId, boolean onTop) {
+    TaskStack addStackToDisplay(int stackId, boolean onTop, StackWindowController controller) {
         if (DEBUG_STACK) Slog.d(TAG_WM, "Create new stackId=" + stackId + " on displayId="
                 + mDisplayId);
 
         TaskStack stack = getStackById(stackId);
         if (stack != null) {
-            // It's already attached to the display...clear mDeferRemoval and move stack to
-            // appropriate z-order on display as needed.
+            // It's already attached to the display...clear mDeferRemoval, set controller, and move
+            // stack to appropriate z-order on display as needed.
             stack.mDeferRemoval = false;
+            stack.setController(controller);
             // We're not moving the display to front when we're adding stacks, only when
             // requested to change the position of stack explicitly.
             mTaskStackContainers.positionChildAt(onTop ? POSITION_TOP : POSITION_BOTTOM, stack,
                     false /* includingParents */);
         } else {
-            stack = new TaskStack(mService, stackId);
+            stack = new TaskStack(mService, stackId, controller);
             mTaskStackContainers.addStackToDisplay(stack, onTop);
         }
 
@@ -2023,8 +2058,8 @@ class DisplayContent extends WindowContainer<DisplayContent.DisplayChildWindowCo
             for (int i = mTaskStackContainers.size() - 1; i >= 0; --i) {
                 final TaskStack stack = mTaskStackContainers.get(i);
                 final boolean isDockedOnBottom = stack.getDockSide() == DOCKED_BOTTOM;
-                if (stack.isVisible() && (imeOnBottom || isDockedOnBottom) &&
-                        StackId.isStackAffectedByDragResizing(stack.mStackId)) {
+                if (stack.isVisible() && (imeOnBottom || isDockedOnBottom)
+                        && stack.inSplitScreenWindowingMode()) {
                     stack.setAdjustedForIme(imeWin, imeOnBottom && imeHeightChanged);
                 } else {
                     stack.resetAdjustedForIme(false);
@@ -2119,8 +2154,11 @@ class DisplayContent extends WindowContainer<DisplayContent.DisplayChildWindowCo
         }
     }
 
-    void writeToProto(ProtoOutputStream proto, long fieldId) {
+    @CallSuper
+    @Override
+    public void writeToProto(ProtoOutputStream proto, long fieldId) {
         final long token = proto.start(fieldId);
+        super.writeToProto(proto, WINDOW_CONTAINER);
         proto.write(ID, mDisplayId);
         for (int stackNdx = mTaskStackContainers.size() - 1; stackNdx >= 0; --stackNdx) {
             final TaskStack stack = mTaskStackContainers.get(stackNdx);
@@ -2232,7 +2270,7 @@ class DisplayContent extends WindowContainer<DisplayContent.DisplayChildWindowCo
      * @return The docked stack, but only if it is visible, and {@code null} otherwise.
      */
     TaskStack getDockedStackLocked() {
-        final TaskStack stack = getStackById(DOCKED_STACK_ID);
+        final TaskStack stack = getStack(WINDOWING_MODE_SPLIT_SCREEN_PRIMARY);
         return (stack != null && stack.isVisible()) ? stack : null;
     }
 
@@ -2241,7 +2279,7 @@ class DisplayContent extends WindowContainer<DisplayContent.DisplayChildWindowCo
      * visible.
      */
     TaskStack getDockedStackIgnoringVisibility() {
-        return getStackById(DOCKED_STACK_ID);
+        return getStack(WINDOWING_MODE_SPLIT_SCREEN_PRIMARY);
     }
 
     /** Find the visible, touch-deliverable window under the given point */
@@ -3350,7 +3388,7 @@ class DisplayContent extends WindowContainer<DisplayContent.DisplayChildWindowCo
          * @see WindowManagerService#addStackToDisplay(int, int, boolean)
          */
         void addStackToDisplay(TaskStack stack, boolean onTop) {
-            if (stack.mStackId == HOME_STACK_ID) {
+            if (stack.isActivityTypeHome()) {
                 if (mHomeStack != null) {
                     throw new IllegalArgumentException("attachStack: HOME_STACK_ID (0) not first.");
                 }
@@ -3415,11 +3453,11 @@ class DisplayContent extends WindowContainer<DisplayContent.DisplayChildWindowCo
                     : requestedPosition >= topChildPosition;
             int targetPosition = requestedPosition;
 
-            if (toTop && stack.mStackId != PINNED_STACK_ID
-                    && getStackById(PINNED_STACK_ID) != null) {
+            if (toTop && stack.getWindowingMode() != WINDOWING_MODE_PINNED
+                    && getStack(WINDOWING_MODE_PINNED) != null) {
                 // The pinned stack is always the top most stack (always-on-top) when it is present.
                 TaskStack topStack = mChildren.get(topChildPosition);
-                if (topStack.mStackId != PINNED_STACK_ID) {
+                if (topStack.getWindowingMode() != WINDOWING_MODE_PINNED) {
                     throw new IllegalStateException("Pinned stack isn't top stack??? " + mChildren);
                 }
 

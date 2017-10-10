@@ -80,6 +80,8 @@ import com.android.internal.util.FastXmlSerializer;
 import com.android.internal.util.ImageUtils;
 import com.android.internal.util.IndentingPrintWriter;
 import com.android.server.IoThread;
+import com.android.server.LocalServices;
+import com.android.server.pm.permission.PermissionManagerInternal;
 
 import libcore.io.IoUtils;
 
@@ -122,6 +124,7 @@ public class PackageInstallerService extends IPackageInstaller.Stub {
 
     private final Context mContext;
     private final PackageManagerService mPm;
+    private final PermissionManagerInternal mPermissionManager;
 
     private AppOpsManager mAppOps;
 
@@ -177,6 +180,7 @@ public class PackageInstallerService extends IPackageInstaller.Stub {
     public PackageInstallerService(Context context, PackageManagerService pm) {
         mContext = context;
         mPm = pm;
+        mPermissionManager = LocalServices.getService(PermissionManagerInternal.class);
 
         mInstallThread = new HandlerThread(TAG);
         mInstallThread.start();
@@ -240,35 +244,6 @@ public class PackageInstallerService extends IPackageInstaller.Stub {
     public void onPrivateVolumeMounted(String volumeUuid) {
         synchronized (mSessions) {
             reconcileStagesLocked(volumeUuid, false /*isInstant*/);
-        }
-    }
-
-    public void onSecureContainersAvailable() {
-        synchronized (mSessions) {
-            final ArraySet<String> unclaimed = new ArraySet<>();
-            for (String cid : PackageHelper.getSecureContainerList()) {
-                if (isStageName(cid)) {
-                    unclaimed.add(cid);
-                }
-            }
-
-            // Ignore stages claimed by active sessions
-            for (int i = 0; i < mSessions.size(); i++) {
-                final PackageInstallerSession session = mSessions.valueAt(i);
-                final String cid = session.stageCid;
-
-                if (unclaimed.remove(cid)) {
-                    // Claimed by active session, mount it
-                    PackageHelper.mountSdDir(cid, PackageManagerService.getEncryptKey(),
-                            Process.SYSTEM_UID);
-                }
-            }
-
-            // Clean up orphaned staging containers
-            for (String cid : unclaimed) {
-                Slog.w(TAG, "Deleting orphan container " + cid);
-                PackageHelper.destroySdDir(cid);
-            }
         }
     }
 
@@ -426,7 +401,8 @@ public class PackageInstallerService extends IPackageInstaller.Stub {
     private int createSessionInternal(SessionParams params, String installerPackageName, int userId)
             throws IOException {
         final int callingUid = Binder.getCallingUid();
-        mPm.enforceCrossUserPermission(callingUid, userId, true, true, "createSession");
+        mPermissionManager.enforceCrossUserPermission(
+                callingUid, userId, true, true, "createSession");
 
         if (mPm.isUserRestricted(userId, UserManager.DISALLOW_INSTALL_APPS)) {
             throw new SecurityException("User restriction prevents installing");
@@ -671,13 +647,6 @@ public class PackageInstallerService extends IPackageInstaller.Stub {
         return "smdl" + sessionId + ".tmp";
     }
 
-    static void prepareExternalStageCid(String stageCid, long sizeBytes) throws IOException {
-        if (PackageHelper.createSdDir(sizeBytes, stageCid, PackageManagerService.getEncryptKey(),
-                Process.SYSTEM_UID, true) == null) {
-            throw new IOException("Failed to create session cid: " + stageCid);
-        }
-    }
-
     @Override
     public SessionInfo getSessionInfo(int sessionId) {
         synchronized (mSessions) {
@@ -688,7 +657,8 @@ public class PackageInstallerService extends IPackageInstaller.Stub {
 
     @Override
     public ParceledListSlice<SessionInfo> getAllSessions(int userId) {
-        mPm.enforceCrossUserPermission(Binder.getCallingUid(), userId, true, false, "getAllSessions");
+        mPermissionManager.enforceCrossUserPermission(
+                Binder.getCallingUid(), userId, true, false, "getAllSessions");
 
         final List<SessionInfo> result = new ArrayList<>();
         synchronized (mSessions) {
@@ -704,7 +674,8 @@ public class PackageInstallerService extends IPackageInstaller.Stub {
 
     @Override
     public ParceledListSlice<SessionInfo> getMySessions(String installerPackageName, int userId) {
-        mPm.enforceCrossUserPermission(Binder.getCallingUid(), userId, true, false, "getMySessions");
+        mPermissionManager.enforceCrossUserPermission(
+                Binder.getCallingUid(), userId, true, false, "getMySessions");
         mAppOps.checkPackage(Binder.getCallingUid(), installerPackageName);
 
         final List<SessionInfo> result = new ArrayList<>();
@@ -726,7 +697,7 @@ public class PackageInstallerService extends IPackageInstaller.Stub {
     public void uninstall(VersionedPackage versionedPackage, String callerPackageName, int flags,
                 IntentSender statusReceiver, int userId) throws RemoteException {
         final int callingUid = Binder.getCallingUid();
-        mPm.enforceCrossUserPermission(callingUid, userId, true, true, "uninstall");
+        mPermissionManager.enforceCrossUserPermission(callingUid, userId, true, true, "uninstall");
         if ((callingUid != Process.SHELL_UID) && (callingUid != Process.ROOT_UID)) {
             mAppOps.checkPackage(callingUid, callerPackageName);
         }
@@ -775,7 +746,8 @@ public class PackageInstallerService extends IPackageInstaller.Stub {
 
     @Override
     public void registerCallback(IPackageInstallerCallback callback, int userId) {
-        mPm.enforceCrossUserPermission(Binder.getCallingUid(), userId, true, false, "registerCallback");
+        mPermissionManager.enforceCrossUserPermission(
+                Binder.getCallingUid(), userId, true, false, "registerCallback");
         mCallbacks.register(callback, userId);
     }
 

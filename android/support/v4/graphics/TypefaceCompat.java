@@ -23,16 +23,18 @@ import android.content.res.Resources;
 import android.graphics.Typeface;
 import android.os.Build;
 import android.os.CancellationSignal;
+import android.os.Handler;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 import android.support.annotation.RestrictTo;
+import android.support.v4.content.res.FontResourcesParserCompat;
 import android.support.v4.content.res.FontResourcesParserCompat.FamilyResourceEntry;
 import android.support.v4.content.res.FontResourcesParserCompat.FontFamilyFilesResourceEntry;
 import android.support.v4.content.res.FontResourcesParserCompat.ProviderResourceEntry;
+import android.support.v4.content.res.ResourcesCompat;
 import android.support.v4.provider.FontsContractCompat;
 import android.support.v4.provider.FontsContractCompat.FontInfo;
 import android.support.v4.util.LruCache;
-import android.widget.TextView;
 
 /**
  * Helper for accessing features in {@link Typeface}.
@@ -82,7 +84,8 @@ public class TypefaceCompat {
      *
      * @return null if not found.
      */
-    public static Typeface findFromCache(Resources resources, int id, int style) {
+    @Nullable
+    public static Typeface findFromCache(@NonNull Resources resources, int id, int style) {
         return sTypefaceCache.get(createResourceUid(resources, id, style));
     }
 
@@ -103,18 +106,35 @@ public class TypefaceCompat {
      *
      * @return null if failed to create.
      */
+    @Nullable
     public static Typeface createFromResourcesFamilyXml(
-            Context context, FamilyResourceEntry entry, Resources resources, int id, int style,
-            @Nullable TextView targetView) {
+            @NonNull Context context, @NonNull FamilyResourceEntry entry,
+            @NonNull Resources resources, int id, int style,
+            @Nullable ResourcesCompat.FontCallback fontCallback, @Nullable Handler handler,
+            boolean isRequestFromLayoutInflator) {
         Typeface typeface;
         if (entry instanceof ProviderResourceEntry) {
             ProviderResourceEntry providerEntry = (ProviderResourceEntry) entry;
-            typeface = FontsContractCompat.getFontSync(context,
-                    providerEntry.getRequest(), targetView, providerEntry.getFetchStrategy(),
-                    providerEntry.getTimeout(), style);
+            final boolean isBlocking = isRequestFromLayoutInflator
+                    ? providerEntry.getFetchStrategy()
+                    == FontResourcesParserCompat.FETCH_STRATEGY_BLOCKING
+                    : fontCallback == null;
+            final int timeout = isRequestFromLayoutInflator ? providerEntry.getTimeout()
+                    : FontResourcesParserCompat.INFINITE_TIMEOUT_VALUE;
+            typeface = FontsContractCompat.getFontSync(context, providerEntry.getRequest(),
+                    fontCallback, handler, isBlocking, timeout, style);
         } else {
             typeface = sTypefaceCompatImpl.createFromFontFamilyFilesResourceEntry(
                     context, (FontFamilyFilesResourceEntry) entry, resources, style);
+            if (fontCallback != null) {
+                if (typeface != null) {
+                    fontCallback.callbackSuccessAsync(typeface, handler);
+                } else {
+                    fontCallback.callbackFailAsync(
+                            FontsContractCompat.FontRequestCallback.FAIL_REASON_FONT_LOAD_ERROR,
+                            handler);
+                }
+            }
         }
         if (typeface != null) {
             sTypefaceCache.put(createResourceUid(resources, id, style), typeface);
@@ -127,11 +147,13 @@ public class TypefaceCompat {
      */
     @Nullable
     public static Typeface createFromResourcesFontFile(
-            Context context, Resources resources, int id, String path, int style) {
+            @NonNull Context context, @NonNull Resources resources, int id, String path,
+            int style) {
         Typeface typeface = sTypefaceCompatImpl.createFromResourcesFontFile(
                 context, resources, id, path, style);
         if (typeface != null) {
-            sTypefaceCache.put(createResourceUid(resources, id, style), typeface);
+            final String resourceUid = createResourceUid(resources, id, style);
+            sTypefaceCache.put(resourceUid, typeface);
         }
         return typeface;
     }
@@ -139,7 +161,8 @@ public class TypefaceCompat {
     /**
      * Create a Typeface from a given FontInfo list and a map that matches them to ByteBuffers.
      */
-    public static Typeface createFromFontInfo(Context context,
+    @Nullable
+    public static Typeface createFromFontInfo(@NonNull Context context,
             @Nullable CancellationSignal cancellationSignal, @NonNull FontInfo[] fonts, int style) {
         return sTypefaceCompatImpl.createFromFontInfo(context, cancellationSignal, fonts, style);
     }

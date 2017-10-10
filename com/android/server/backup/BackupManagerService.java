@@ -192,6 +192,10 @@ import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.SecretKeySpec;
 
+/**
+ * @Deprecated Use RefactoredBackupManagerService instead. This class is only
+ * kept for fallback and archeology reasons and will be removed soon.
+ */
 public class BackupManagerService implements BackupManagerServiceInterface {
 
     private static final String TAG = "BackupManagerService";
@@ -397,43 +401,51 @@ public class BackupManagerService implements BackupManagerServiceInterface {
         @Override
         public void onUnlockUser(int userId) {
             if (userId == UserHandle.USER_SYSTEM) {
-                Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "backup init");
-                sInstance.initialize(userId);
-                Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
-
-                // Migrate legacy setting
-                Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "backup migrate");
-                if (!backupSettingMigrated(userId)) {
-                    if (DEBUG) {
-                        Slog.i(TAG, "Backup enable apparently not migrated");
-                    }
-                    final ContentResolver r = sInstance.mContext.getContentResolver();
-                    final int enableState = Settings.Secure.getIntForUser(r,
-                            Settings.Secure.BACKUP_ENABLED, -1, userId);
-                    if (enableState >= 0) {
-                        if (DEBUG) {
-                            Slog.i(TAG, "Migrating enable state " + (enableState != 0));
-                        }
-                        writeBackupEnableState(enableState != 0, userId);
-                        Settings.Secure.putStringForUser(r,
-                                Settings.Secure.BACKUP_ENABLED, null, userId);
-                    } else {
-                        if (DEBUG) {
-                            Slog.i(TAG, "Backup not yet configured; retaining null enable state");
-                        }
-                    }
-                }
-                Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
-
-                Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "backup enable");
-                try {
-                    sInstance.setBackupEnabled(readBackupEnableState(userId));
-                } catch (RemoteException e) {
-                    // can't happen; it's a local object
-                }
-                Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
+                sInstance.unlockSystemUser();
             }
         }
+    }
+
+    // Called through the trampoline from onUnlockUser(), then we buck the work
+    // off to the background thread to keep the unlock time down.
+    public void unlockSystemUser() {
+        mBackupHandler.post(() -> {
+            Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "backup init");
+            sInstance.initialize(UserHandle.USER_SYSTEM);
+            Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
+
+            // Migrate legacy setting
+            Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "backup migrate");
+            if (!backupSettingMigrated(UserHandle.USER_SYSTEM)) {
+                if (DEBUG) {
+                    Slog.i(TAG, "Backup enable apparently not migrated");
+                }
+                final ContentResolver r = sInstance.mContext.getContentResolver();
+                final int enableState = Settings.Secure.getIntForUser(r,
+                        Settings.Secure.BACKUP_ENABLED, -1, UserHandle.USER_SYSTEM);
+                if (enableState >= 0) {
+                    if (DEBUG) {
+                        Slog.i(TAG, "Migrating enable state " + (enableState != 0));
+                    }
+                    writeBackupEnableState(enableState != 0, UserHandle.USER_SYSTEM);
+                    Settings.Secure.putStringForUser(r,
+                            Settings.Secure.BACKUP_ENABLED, null, UserHandle.USER_SYSTEM);
+                } else {
+                    if (DEBUG) {
+                        Slog.i(TAG, "Backup not yet configured; retaining null enable state");
+                    }
+                }
+            }
+            Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
+
+            Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "backup enable");
+            try {
+                sInstance.setBackupEnabled(readBackupEnableState(UserHandle.USER_SYSTEM));
+            } catch (RemoteException e) {
+                // can't happen; it's a local object
+            }
+            Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
+        });
     }
 
     class ProvisionedObserver extends ContentObserver {
@@ -1983,7 +1995,7 @@ public class BackupManagerService implements BackupManagerServiceInterface {
                 if (uri == null) {
                     return;
                 }
-                String pkgName = uri.getSchemeSpecificPart();
+                final String pkgName = uri.getSchemeSpecificPart();
                 if (pkgName != null) {
                     pkgList = new String[] { pkgName };
                 }
@@ -1991,7 +2003,7 @@ public class BackupManagerService implements BackupManagerServiceInterface {
 
                 // At package-changed we only care about looking at new transport states
                 if (changed) {
-                    String[] components =
+                    final String[] components =
                             intent.getStringArrayExtra(Intent.EXTRA_CHANGED_COMPONENT_NAME_LIST);
 
                     if (MORE_DEBUG) {
@@ -2001,7 +2013,8 @@ public class BackupManagerService implements BackupManagerServiceInterface {
                         }
                     }
 
-                    mTransportManager.onPackageChanged(pkgName, components);
+                    mBackupHandler.post(
+                            () -> mTransportManager.onPackageChanged(pkgName, components));
                     return; // nothing more to do in the PACKAGE_CHANGED case
                 }
 
@@ -2033,7 +2046,7 @@ public class BackupManagerService implements BackupManagerServiceInterface {
                 }
                 // If they're full-backup candidates, add them there instead
                 final long now = System.currentTimeMillis();
-                for (String packageName : pkgList) {
+                for (final String packageName : pkgList) {
                     try {
                         PackageInfo app = mPackageManager.getPackageInfo(packageName, 0);
                         if (appGetsFullBackup(app)
@@ -2050,7 +2063,8 @@ public class BackupManagerService implements BackupManagerServiceInterface {
                             writeFullBackupScheduleAsync();
                         }
 
-                        mTransportManager.onPackageAdded(packageName);
+                        mBackupHandler.post(
+                                () -> mTransportManager.onPackageAdded(packageName));
 
                     } catch (NameNotFoundException e) {
                         // doesn't really exist; ignore it
@@ -2074,8 +2088,9 @@ public class BackupManagerService implements BackupManagerServiceInterface {
                         removePackageParticipantsLocked(pkgList, uid);
                     }
                 }
-                for (String pkgName : pkgList) {
-                    mTransportManager.onPackageRemoved(pkgName);
+                for (final String pkgName : pkgList) {
+                    mBackupHandler.post(
+                            () -> mTransportManager.onPackageRemoved(pkgName));
                 }
             }
         }

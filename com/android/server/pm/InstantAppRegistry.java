@@ -49,6 +49,8 @@ import com.android.internal.os.BackgroundThread;
 import com.android.internal.os.SomeArgs;
 import com.android.internal.util.ArrayUtils;
 import com.android.internal.util.XmlUtils;
+import com.android.server.pm.permission.BasePermission;
+
 import libcore.io.IoUtils;
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
@@ -878,8 +880,9 @@ class InstantAppRegistry {
         final long identity = Binder.clearCallingIdentity();
         try {
             for (String grantedPermission : appInfo.getGrantedPermissions()) {
-                BasePermission bp = mService.mSettings.mPermissions.get(grantedPermission);
-                if (bp != null && (bp.isRuntime() || bp.isDevelopment()) && bp.isInstant()) {
+                final boolean propagatePermission =
+                        mService.mSettings.canPropagatePermissionToInstantApp(grantedPermission);
+                if (propagatePermission) {
                     mService.grantRuntimePermission(packageName, grantedPermission, userId);
                 }
             }

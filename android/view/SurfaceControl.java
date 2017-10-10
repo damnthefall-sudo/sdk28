@@ -18,6 +18,7 @@ package android.view;
 
 import static android.view.WindowManager.LayoutParams.INVALID_WINDOW_TYPE;
 
+import android.annotation.Size;
 import android.graphics.Bitmap;
 import android.graphics.GraphicBuffer;
 import android.graphics.Rect;
@@ -65,6 +66,7 @@ public class SurfaceControl {
     private static native void nativeSetSize(long nativeObject, int w, int h);
     private static native void nativeSetTransparentRegionHint(long nativeObject, Region region);
     private static native void nativeSetAlpha(long nativeObject, float alpha);
+    private static native void nativeSetColor(long nativeObject, float[] color);
     private static native void nativeSetMatrix(long nativeObject, float dsdx, float dtdx,
             float dtdy, float dsdy);
     private static native void nativeSetFlags(long nativeObject, int flags, int mask);
@@ -105,8 +107,8 @@ public class SurfaceControl {
             long surfaceObject, long frame);
     private static native void nativeReparentChildren(long nativeObject,
             IBinder handle);
-    private static native void nativeReparentChild(long nativeObject,
-            IBinder parentHandle, IBinder childHandle);
+    private static native void nativeReparent(long nativeObject,
+            IBinder parentHandle);
     private static native void nativeSeverChildren(long nativeObject);
     private static native void nativeSetOverrideScalingMode(long nativeObject,
             int scalingMode);
@@ -455,9 +457,9 @@ public class SurfaceControl {
         nativeReparentChildren(mNativeObject, newParentHandle);
     }
 
-    /** Re-parents a specific child layer to a new parent */
-    public void reparentChild(IBinder newParentHandle, IBinder childHandle) {
-        nativeReparentChild(mNativeObject, newParentHandle, childHandle);
+    /** Re-parents this layer to a new parent. */
+    public void reparent(IBinder newParentHandle) {
+        nativeReparent(mNativeObject, newParentHandle);
     }
 
     public void detachChildren() {
@@ -550,6 +552,15 @@ public class SurfaceControl {
     public void setAlpha(float alpha) {
         checkNotReleased();
         nativeSetAlpha(mNativeObject, alpha);
+    }
+
+    /**
+     * Sets a color for the Surface.
+     * @param color A float array with three values to represent r, g, b in range [0..1]
+     */
+    public void setColor(@Size(3) float[] color) {
+        checkNotReleased();
+        nativeSetColor(mNativeObject, color);
     }
 
     public void setMatrix(float dsdx, float dtdx, float dtdy, float dsdy) {

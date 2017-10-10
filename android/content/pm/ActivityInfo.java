@@ -17,6 +17,7 @@
 package android.content.pm;
 
 import android.annotation.IntDef;
+import android.annotation.TestApi;
 import android.content.Intent;
 import android.content.res.Configuration;
 import android.content.res.Configuration.NativeConfig;
@@ -34,8 +35,7 @@ import java.lang.annotation.RetentionPolicy;
  * from the AndroidManifest.xml's &lt;activity&gt; and
  * &lt;receiver&gt; tags.
  */
-public class ActivityInfo extends ComponentInfo
-        implements Parcelable {
+public class ActivityInfo extends ComponentInfo implements Parcelable {
 
      // NOTE: When adding new data members be sure to update the copy-constructor, Parcel
      // constructor, and writeToParcel.
@@ -181,6 +181,7 @@ public class ActivityInfo extends ComponentInfo
      * Activity explicitly requested to be resizeable.
      * @hide
      */
+    @TestApi
     public static final int RESIZE_MODE_RESIZEABLE = 2;
     /**
      * Activity is resizeable and supported picture-in-picture mode.  This flag is now deprecated
@@ -1209,6 +1210,67 @@ public class ActivityInfo extends ComponentInfo
                         false);
 
         return isFloating || isTranslucent || isSwipeToDismiss;
+    }
+
+    /**
+     * Convert the screen orientation constant to a human readable format.
+     * @hide
+     */
+    public static String screenOrientationToString(int orientation) {
+        switch (orientation) {
+            case SCREEN_ORIENTATION_UNSET:
+                return "SCREEN_ORIENTATION_UNSET";
+            case SCREEN_ORIENTATION_UNSPECIFIED:
+                return "SCREEN_ORIENTATION_UNSPECIFIED";
+            case SCREEN_ORIENTATION_LANDSCAPE:
+                return "SCREEN_ORIENTATION_LANDSCAPE";
+            case SCREEN_ORIENTATION_PORTRAIT:
+                return "SCREEN_ORIENTATION_PORTRAIT";
+            case SCREEN_ORIENTATION_USER:
+                return "SCREEN_ORIENTATION_USER";
+            case SCREEN_ORIENTATION_BEHIND:
+                return "SCREEN_ORIENTATION_BEHIND";
+            case SCREEN_ORIENTATION_SENSOR:
+                return "SCREEN_ORIENTATION_SENSOR";
+            case SCREEN_ORIENTATION_NOSENSOR:
+                return "SCREEN_ORIENTATION_NOSENSOR";
+            case SCREEN_ORIENTATION_SENSOR_LANDSCAPE:
+                return "SCREEN_ORIENTATION_SENSOR_LANDSCAPE";
+            case SCREEN_ORIENTATION_SENSOR_PORTRAIT:
+                return "SCREEN_ORIENTATION_SENSOR_PORTRAIT";
+            case SCREEN_ORIENTATION_REVERSE_LANDSCAPE:
+                return "SCREEN_ORIENTATION_REVERSE_LANDSCAPE";
+            case SCREEN_ORIENTATION_REVERSE_PORTRAIT:
+                return "SCREEN_ORIENTATION_REVERSE_PORTRAIT";
+            case SCREEN_ORIENTATION_FULL_SENSOR:
+                return "SCREEN_ORIENTATION_FULL_SENSOR";
+            case SCREEN_ORIENTATION_USER_LANDSCAPE:
+                return "SCREEN_ORIENTATION_USER_LANDSCAPE";
+            case SCREEN_ORIENTATION_USER_PORTRAIT:
+                return "SCREEN_ORIENTATION_USER_PORTRAIT";
+            case SCREEN_ORIENTATION_FULL_USER:
+                return "SCREEN_ORIENTATION_FULL_USER";
+            case SCREEN_ORIENTATION_LOCKED:
+                return "SCREEN_ORIENTATION_LOCKED";
+            default:
+                return Integer.toString(orientation);
+        }
+    }
+
+    /**
+     * @hide
+     */
+    public static String colorModeToString(@ColorMode int colorMode) {
+        switch (colorMode) {
+            case COLOR_MODE_DEFAULT:
+                return "COLOR_MODE_DEFAULT";
+            case COLOR_MODE_WIDE_COLOR_GAMUT:
+                return "COLOR_MODE_WIDE_COLOR_GAMUT";
+            case COLOR_MODE_HDR:
+                return "COLOR_MODE_HDR";
+            default:
+                return Integer.toString(colorMode);
+        }
     }
 
     public static final Parcelable.Creator<ActivityInfo> CREATOR

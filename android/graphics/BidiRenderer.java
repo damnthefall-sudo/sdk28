@@ -200,8 +200,7 @@ public class BidiRenderer {
 
     private static void logFontWarning() {
         Bridge.getLog().fidelityWarning(LayoutLog.TAG_BROKEN,
-                "Some fonts could not be loaded. The rendering may not be perfect. " +
-                        "Try running the IDE with JRE 7.", null, null);
+                "Some fonts could not be loaded. The rendering may not be perfect.", null, null);
     }
 
     /**
@@ -288,13 +287,15 @@ public class BidiRenderer {
     @NonNull
     private static Font getScriptFont(char[] text, int start, int limit, List<FontInfo> fonts) {
         for (FontInfo fontInfo : fonts) {
-            if (fontInfo.mFont == null) {
-                logFontWarning();
-                continue;
-            }
             if (fontInfo.mFont.canDisplayUpTo(text, start, limit) == -1) {
                 return fontInfo.mFont;
             }
+        }
+
+        if (fonts.isEmpty()) {
+            logFontWarning();
+            // Fallback font in case no font can be loaded
+            return Font.getFont(Font.SERIF);
         }
 
         return fonts.get(0).mFont;

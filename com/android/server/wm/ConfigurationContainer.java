@@ -21,12 +21,19 @@ import static android.app.WindowConfiguration.ACTIVITY_TYPE_HOME;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_RECENTS;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_STANDARD;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_UNDEFINED;
+import static android.app.WindowConfiguration.WINDOWING_MODE_FULLSCREEN;
 import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_PRIMARY;
 import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_SECONDARY;
+import static android.app.WindowConfiguration.WINDOWING_MODE_UNDEFINED;
 import static android.app.WindowConfiguration.activityTypeToString;
+import static com.android.server.wm.proto.ConfigurationContainerProto.FULL_CONFIGURATION;
+import static com.android.server.wm.proto.ConfigurationContainerProto.MERGED_OVERRIDE_CONFIGURATION;
+import static com.android.server.wm.proto.ConfigurationContainerProto.OVERRIDE_CONFIGURATION;
 
+import android.annotation.CallSuper;
 import android.app.WindowConfiguration;
 import android.content.res.Configuration;
+import android.util.proto.ProtoOutputStream;
 
 import java.util.ArrayList;
 
@@ -147,6 +154,17 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
         onOverrideConfigurationChanged(mTmpConfig);
     }
 
+    /**
+     * Returns true if this container is currently in multi-window mode. I.e. sharing the screen
+     * with another activity.
+     */
+    public boolean inMultiWindowMode() {
+        /*@WindowConfiguration.WindowingMode*/ int windowingMode =
+                mFullConfiguration.windowConfiguration.getWindowingMode();
+        return windowingMode != WINDOWING_MODE_FULLSCREEN
+                && windowingMode != WINDOWING_MODE_UNDEFINED;
+    }
+
     /** Returns true if this container is currently in split-screen windowing mode. */
     public boolean inSplitScreenWindowingMode() {
         /*@WindowConfiguration.WindowingMode*/ int windowingMode =
@@ -170,7 +188,7 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
      * {@link WindowConfiguration##WINDOWING_MODE_SPLIT_SCREEN_SECONDARY} windowing modes based on
      * its current state.
      */
-    public boolean supportSplitScreenWindowingMode() {
+    public boolean supportsSplitScreenWindowingMode() {
         return mFullConfiguration.windowConfiguration.supportSplitScreenWindowingMode();
     }
 
@@ -220,9 +238,48 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
         /*@WindowConfiguration.ActivityType*/ int thisType = getActivityType();
         /*@WindowConfiguration.ActivityType*/ int otherType = other.getActivityType();
 
-        return thisType == otherType
-                || thisType == ACTIVITY_TYPE_UNDEFINED
-                || otherType == ACTIVITY_TYPE_UNDEFINED;
+        if (thisType == otherType) {
+            return true;
+        }
+        if (thisType == ACTIVITY_TYPE_ASSISTANT) {
+            // Assistant activities are only compatible with themselves...
+            return false;
+        }
+        // Otherwise we are compatible if us or other is not currently defined.
+        return thisType == ACTIVITY_TYPE_UNDEFINED || otherType == ACTIVITY_TYPE_UNDEFINED;
+    }
+
+    /**
+     * Returns true if this container is compatible with the input windowing mode and activity type.
+     * The container is compatible:
+     * - If {@param activityType} and {@param windowingMode} match this container activity type and
+     * windowing mode.
+     * - If {@param activityType} is {@link WindowConfiguration#ACTIVITY_TYPE_UNDEFINED} or
+     * {@link WindowConfiguration#ACTIVITY_TYPE_STANDARD} and this containers activity type is also
+     * standard or undefined and its windowing mode matches {@param windowingMode}.
+     * - If {@param activityType} isn't {@link WindowConfiguration#ACTIVITY_TYPE_UNDEFINED} or
+     * {@link WindowConfiguration#ACTIVITY_TYPE_STANDARD} or this containers activity type isn't
+     * also standard or undefined and its activity type matches {@param activityType} regardless of
+     * if {@param windowingMode} matches the containers windowing mode.
+     */
+    public boolean isCompatible(int windowingMode, int activityType) {
+        final int thisActivityType = getActivityType();
+        final int thisWindowingMode = getWindowingMode();
+        final boolean sameActivityType = thisActivityType == activityType;
+        final boolean sameWindowingMode = thisWindowingMode == windowingMode;
+
+        if (sameActivityType && sameWindowingMode) {
+            return true;
+        }
+
+        if ((activityType != ACTIVITY_TYPE_UNDEFINED && activityType != ACTIVITY_TYPE_STANDARD)
+                || !isActivityTypeStandardOrUndefined()) {
+            // Only activity type need to match for non-standard activity types that are defined.
+            return sameActivityType;
+        }
+
+        // Otherwise we are compatible if the windowing mode is the same.
+        return sameWindowingMode;
     }
 
     public void registerConfigurationChangeListener(ConfigurationContainerListener listener) {
@@ -250,6 +307,24 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
             // Update merged override configuration of this container and all its children.
             onMergedOverrideConfigurationChanged();
         }
+    }
+
+    /**
+     * Write to a protocol buffer output stream. Protocol buffer message definition is at
+     * {@link com.android.server.wm.proto.ConfigurationContainerProto}.
+     *
+     * @param protoOutputStream Stream to write the ConfigurationContainer object to.
+     * @param fieldId           Field Id of the ConfigurationContainer as defined in the parent
+     *                          message.
+     * @hide
+     */
+    @CallSuper
+    public void writeToProto(ProtoOutputStream protoOutputStream, long fieldId) {
+        final long token = protoOutputStream.start(fieldId);
+        mOverrideConfiguration.writeToProto(protoOutputStream, OVERRIDE_CONFIGURATION);
+        mFullConfiguration.writeToProto(protoOutputStream, FULL_CONFIGURATION);
+        mMergedOverrideConfiguration.writeToProto(protoOutputStream, MERGED_OVERRIDE_CONFIGURATION);
+        protoOutputStream.end(token);
     }
 
     abstract protected int getChildCount();

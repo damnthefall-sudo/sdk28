@@ -21,11 +21,8 @@ import android.util.Slog;
 import java.util.ArrayDeque;
 import java.util.function.Consumer;
 
-import static android.app.ActivityManager.StackId;
-import static android.app.ActivityManager.StackId.ASSISTANT_STACK_ID;
-import static android.app.ActivityManager.StackId.DOCKED_STACK_ID;
-import static android.app.ActivityManager.StackId.INVALID_STACK_ID;
-import static android.app.ActivityManager.StackId.PINNED_STACK_ID;
+import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED;
+import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_PRIMARY;
 import static android.view.Display.DEFAULT_DISPLAY;
 import static android.view.WindowManager.LayoutParams.TYPE_DOCK_DIVIDER;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_LAYERS;
@@ -187,12 +184,13 @@ class WindowLayersController {
             }
         }
 
-        final int stackId = w.getAppToken() != null ? w.getStackId() : INVALID_STACK_ID;
-        if (stackId == PINNED_STACK_ID) {
+        final int windowingMode = w.getWindowingMode();
+        if (windowingMode == WINDOWING_MODE_PINNED) {
             mPinnedWindows.add(w);
-        } else if (stackId == DOCKED_STACK_ID) {
+        } else if (windowingMode == WINDOWING_MODE_SPLIT_SCREEN_PRIMARY) {
             mDockedWindows.add(w);
-        } else if (stackId == ASSISTANT_STACK_ID) {
+        }
+        if (w.isActivityTypeAssistant()) {
             mAssistantWindows.add(w);
         }
     }
@@ -268,20 +266,8 @@ class WindowLayersController {
         w.mLayer = layer;
         w.mWinAnimator.mAnimLayer = w.getAnimLayerAdjustment()
                 + w.getSpecialWindowAnimLayerAdjustment();
-        if (w.mAppToken != null && w.mAppToken.mAppAnimator.thumbnailForceAboveLayer > 0) {
-            if (w.mWinAnimator.mAnimLayer > w.mAppToken.mAppAnimator.thumbnailForceAboveLayer) {
-                w.mAppToken.mAppAnimator.thumbnailForceAboveLayer = w.mWinAnimator.mAnimLayer;
-            }
-            // TODO(b/62029108): the entire contents of the if statement should call the refactored
-            // function to set the thumbnail layer for w.AppToken
-            int highestLayer = w.mAppToken.getHighestAnimLayer();
-            if (highestLayer > 0) {
-                if (w.mAppToken.mAppAnimator.thumbnail != null
-                        && w.mAppToken.mAppAnimator.thumbnailForceAboveLayer != highestLayer) {
-                    w.mAppToken.mAppAnimator.thumbnailForceAboveLayer = highestLayer;
-                    w.mAppToken.mAppAnimator.thumbnail.setLayer(highestLayer + 1);
-                }
-            }
+        if (w.mAppToken != null) {
+            w.mAppToken.mAppAnimator.updateThumbnailLayer();
         }
     }
 }

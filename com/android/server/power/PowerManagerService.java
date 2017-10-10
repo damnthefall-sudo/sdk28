@@ -206,6 +206,8 @@ public final class PowerManagerService extends SystemService
     private static final String REASON_REBOOT = "reboot";
     private static final String REASON_USERREQUESTED = "shutdown,userrequested";
     private static final String REASON_THERMAL_SHUTDOWN = "shutdown,thermal";
+    private static final String REASON_LOW_BATTERY = "shutdown,battery";
+    private static final String REASON_BATTERY_THERMAL_STATE = "shutdown,thermal,battery";
 
     private static final String TRACE_SCREEN_ON = "Screen turning on";
 
@@ -1569,12 +1571,15 @@ public final class PowerManagerService extends SystemService
         return true;
     }
 
-    private void setWakefulnessLocked(int wakefulness, int reason) {
+    @VisibleForTesting
+    void setWakefulnessLocked(int wakefulness, int reason) {
         if (mWakefulness != wakefulness) {
             mWakefulness = wakefulness;
             mWakefulnessChanging = true;
             mDirty |= DIRTY_WAKEFULNESS;
-            mNotifier.onWakefulnessChangeStarted(wakefulness, reason);
+            if (mNotifier != null) {
+                mNotifier.onWakefulnessChangeStarted(wakefulness, reason);
+            }
         }
     }
 
@@ -2432,11 +2437,8 @@ public final class PowerManagerService extends SystemService
         return value >= -1.0f && value <= 1.0f;
     }
 
-    private int getDesiredScreenPolicyLocked() {
-        if (mIsVrModeEnabled) {
-            return DisplayPowerRequest.POLICY_VR;
-        }
-
+    @VisibleForTesting
+    int getDesiredScreenPolicyLocked() {
         if (mWakefulness == WAKEFULNESS_ASLEEP || sQuiescent) {
             return DisplayPowerRequest.POLICY_OFF;
         }
@@ -2450,6 +2452,13 @@ public final class PowerManagerService extends SystemService
             }
             // Fall through and preserve the current screen policy if not configured to
             // doze after screen off.  This causes the screen off transition to be skipped.
+        }
+
+        // It is important that POLICY_VR check happens after the wakefulness checks above so
+        // that VR-mode does not prevent displays from transitioning to the correct state when
+        // dozing or sleeping.
+        if (mIsVrModeEnabled) {
+            return DisplayPowerRequest.POLICY_VR;
         }
 
         if ((mWakeLockSummary & WAKE_LOCK_SCREEN_BRIGHT) != 0
@@ -3111,6 +3120,11 @@ public final class PowerManagerService extends SystemService
                 updatePowerStateLocked();
             }
         }
+    }
+
+    @VisibleForTesting
+    void setVrModeEnabled(boolean enabled) {
+        mIsVrModeEnabled = enabled;
     }
 
     private void powerHintInternal(int hintId, int data) {
@@ -3810,7 +3824,7 @@ public final class PowerManagerService extends SystemService
 
             synchronized (mLock) {
                 if (mIsVrModeEnabled != enabled) {
-                    mIsVrModeEnabled = enabled;
+                    setVrModeEnabled(enabled);
                     mDirty |= DIRTY_VR_MODE_CHANGED;
                     updatePowerStateLocked();
                 }
@@ -4639,6 +4653,10 @@ public final class PowerManagerService extends SystemService
                 return PowerManager.SHUTDOWN_REASON_USER_REQUESTED;
             case REASON_THERMAL_SHUTDOWN:
                 return PowerManager.SHUTDOWN_REASON_THERMAL_SHUTDOWN;
+            case REASON_LOW_BATTERY:
+                return PowerManager.SHUTDOWN_REASON_LOW_BATTERY;
+            case REASON_BATTERY_THERMAL_STATE:
+                return PowerManager.SHUTDOWN_REASON_BATTERY_THERMAL;
             default:
                 return PowerManager.SHUTDOWN_REASON_UNKNOWN;
         }

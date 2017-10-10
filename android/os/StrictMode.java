@@ -16,6 +16,7 @@
 package android.os;
 
 import android.animation.ValueAnimator;
+import android.annotation.Nullable;
 import android.annotation.TestApi;
 import android.app.ActivityManager;
 import android.app.ActivityThread;
@@ -153,12 +154,15 @@ public final class StrictMode {
     // Byte 1: Thread-policy
 
     /** @hide */
+    @TestApi
     public static final int DETECT_DISK_WRITE = 0x01; // for ThreadPolicy
 
     /** @hide */
+    @TestApi
     public static final int DETECT_DISK_READ = 0x02; // for ThreadPolicy
 
     /** @hide */
+    @TestApi
     public static final int DETECT_NETWORK = 0x04; // for ThreadPolicy
 
     /**
@@ -166,6 +170,7 @@ public final class StrictMode {
      *
      * @hide
      */
+    @TestApi
     public static final int DETECT_CUSTOM = 0x08; // for ThreadPolicy
 
     /**
@@ -173,9 +178,11 @@ public final class StrictMode {
      *
      * @hide
      */
+    @TestApi
     public static final int DETECT_RESOURCE_MISMATCH = 0x10; // for ThreadPolicy
 
     /** @hide */
+    @TestApi
     public static final int DETECT_UNBUFFERED_IO = 0x20; // for ThreadPolicy
 
     private static final int ALL_THREAD_DETECT_BITS =
@@ -193,6 +200,7 @@ public final class StrictMode {
      *
      * @hide
      */
+    @TestApi
     public static final int DETECT_VM_CURSOR_LEAKS = 0x01 << 8; // for VmPolicy
 
     /**
@@ -200,6 +208,7 @@ public final class StrictMode {
      *
      * @hide
      */
+    @TestApi
     public static final int DETECT_VM_CLOSABLE_LEAKS = 0x02 << 8; // for VmPolicy
 
     /**
@@ -207,25 +216,32 @@ public final class StrictMode {
      *
      * @hide
      */
+    @TestApi
     public static final int DETECT_VM_ACTIVITY_LEAKS = 0x04 << 8; // for VmPolicy
 
     /** @hide */
-    private static final int DETECT_VM_INSTANCE_LEAKS = 0x08 << 8; // for VmPolicy
+    @TestApi
+    public static final int DETECT_VM_INSTANCE_LEAKS = 0x08 << 8; // for VmPolicy
 
     /** @hide */
+    @TestApi
     public static final int DETECT_VM_REGISTRATION_LEAKS = 0x10 << 8; // for VmPolicy
 
     /** @hide */
-    private static final int DETECT_VM_FILE_URI_EXPOSURE = 0x20 << 8; // for VmPolicy
+    @TestApi
+    public static final int DETECT_VM_FILE_URI_EXPOSURE = 0x20 << 8; // for VmPolicy
 
     /** @hide */
-    private static final int DETECT_VM_CLEARTEXT_NETWORK = 0x40 << 8; // for VmPolicy
+    @TestApi
+    public static final int DETECT_VM_CLEARTEXT_NETWORK = 0x40 << 8; // for VmPolicy
 
     /** @hide */
-    private static final int DETECT_VM_CONTENT_URI_WITHOUT_PERMISSION = 0x80 << 8; // for VmPolicy
+    @TestApi
+    public static final int DETECT_VM_CONTENT_URI_WITHOUT_PERMISSION = 0x80 << 8; // for VmPolicy
 
     /** @hide */
-    private static final int DETECT_VM_UNTAGGED_SOCKET = 0x80 << 24; // for VmPolicy
+    @TestApi
+    public static final int DETECT_VM_UNTAGGED_SOCKET = 0x80 << 24; // for VmPolicy
 
     private static final int ALL_VM_DETECT_BITS =
             DETECT_VM_CURSOR_LEAKS
@@ -322,16 +338,36 @@ public final class StrictMode {
 
     /** {@hide} */
     @TestApi
-    public interface ViolationListener {
-        public void onViolation(String message);
+    public interface ViolationLogger {
+
+        /** Called when penaltyLog is enabled and a violation needs logging. */
+        void log(ViolationInfo info);
     }
 
-    private static volatile ViolationListener sListener;
+    private static final ViolationLogger LOGCAT_LOGGER =
+            info -> {
+                String msg;
+                if (info.durationMillis != -1) {
+                    msg = "StrictMode policy violation; ~duration=" + info.durationMillis + " ms:";
+                } else {
+                    msg = "StrictMode policy violation:";
+                }
+                if (info.crashInfo != null) {
+                    Log.d(TAG, msg + " " + info.crashInfo.stackTrace);
+                } else {
+                    Log.d(TAG, msg + " missing stack trace!");
+                }
+            };
+
+    private static volatile ViolationLogger sLogger = LOGCAT_LOGGER;
 
     /** {@hide} */
     @TestApi
-    public static void setViolationListener(ViolationListener listener) {
-        sListener = listener;
+    public static void setViolationLogger(ViolationLogger listener) {
+        if (listener == null) {
+            listener = LOGCAT_LOGGER;
+        }
+        sLogger = listener;
     }
 
     /**
@@ -1512,28 +1548,16 @@ public final class StrictMode {
                     lastViolationTime = vtime;
                 }
             } else {
-                mLastViolationTime = new ArrayMap<Integer, Long>(1);
+                mLastViolationTime = new ArrayMap<>(1);
             }
             long now = SystemClock.uptimeMillis();
             mLastViolationTime.put(crashFingerprint, now);
             long timeSinceLastViolationMillis =
                     lastViolationTime == 0 ? Long.MAX_VALUE : (now - lastViolationTime);
 
-            if ((info.policy & PENALTY_LOG) != 0 && sListener != null) {
-                sListener.onViolation(info.crashInfo.stackTrace);
-            }
             if ((info.policy & PENALTY_LOG) != 0
                     && timeSinceLastViolationMillis > MIN_LOG_INTERVAL_MS) {
-                if (info.durationMillis != -1) {
-                    Log.d(
-                            TAG,
-                            "StrictMode policy violation; ~duration="
-                                    + info.durationMillis
-                                    + " ms: "
-                                    + info.crashInfo.stackTrace);
-                } else {
-                    Log.d(TAG, "StrictMode policy violation: " + info.crashInfo.stackTrace);
-                }
+                sLogger.log(info);
             }
 
             // The violationMaskSubset, passed to ActivityManager, is a
@@ -1849,6 +1873,10 @@ public final class StrictMode {
     }
 
     /** @hide */
+    public static final String CLEARTEXT_DETECTED_MSG =
+            "Detected cleartext network traffic from UID ";
+
+    /** @hide */
     public static void onCleartextNetworkDetected(byte[] firstPacket) {
         byte[] rawAddr = null;
         if (firstPacket != null) {
@@ -1864,14 +1892,10 @@ public final class StrictMode {
         }
 
         final int uid = android.os.Process.myUid();
-        String msg = "Detected cleartext network traffic from UID " + uid;
+        String msg = CLEARTEXT_DETECTED_MSG + uid;
         if (rawAddr != null) {
             try {
-                msg =
-                        "Detected cleartext network traffic from UID "
-                                + uid
-                                + " to "
-                                + InetAddress.getByAddress(rawAddr);
+                msg += " to " + InetAddress.getByAddress(rawAddr);
             } catch (UnknownHostException ignored) {
             }
         }
@@ -1882,12 +1906,13 @@ public final class StrictMode {
     }
 
     /** @hide */
+    public static final String UNTAGGED_SOCKET_VIOLATION_MESSAGE =
+            "Untagged socket detected; use"
+                    + " TrafficStats.setThreadSocketTag() to track all network usage";
+
+    /** @hide */
     public static void onUntaggedSocket() {
-        onVmPolicyViolation(
-                null,
-                new Throwable(
-                        "Untagged socket detected; use"
-                                + " TrafficStats.setThreadSocketTag() to track all network usage"));
+        onVmPolicyViolation(null, new Throwable(UNTAGGED_SOCKET_VIOLATION_MESSAGE));
     }
 
     // Map from VM violation fingerprint to uptime millis.
@@ -1925,11 +1950,11 @@ public final class StrictMode {
             }
         }
 
-        if (penaltyLog && sListener != null) {
-            sListener.onViolation(originStack.toString());
+        if (penaltyLog && sLogger != null) {
+            sLogger.log(info);
         }
         if (penaltyLog && timeSinceLastViolationMillis > MIN_LOG_INTERVAL_MS) {
-            Log.e(TAG, message, originStack);
+            sLogger.log(info);
         }
 
         int violationMaskSubset = PENALTY_DROPBOX | (ALL_VM_DETECT_BITS & sVmPolicy.mask);
@@ -2339,11 +2364,12 @@ public final class StrictMode {
      *
      * @hide
      */
-    public static class ViolationInfo implements Parcelable {
+    @TestApi
+    public static final class ViolationInfo implements Parcelable {
         public final String message;
 
         /** Stack and other stuff info. */
-        public final ApplicationErrorReport.CrashInfo crashInfo;
+        @Nullable public final ApplicationErrorReport.CrashInfo crashInfo;
 
         /** The strict mode policy mask at the time of violation. */
         public final int policy;

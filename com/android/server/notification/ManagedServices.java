@@ -45,12 +45,16 @@ import android.os.RemoteException;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.provider.Settings;
+import android.service.notification.ManagedServiceInfoProto;
+import android.service.notification.ManagedServicesProto;
+import android.service.notification.ManagedServicesProto.ServiceProto;
 import android.text.TextUtils;
 import android.util.ArrayMap;
 import android.util.ArraySet;
 import android.util.Log;
 import android.util.Slog;
 import android.util.SparseArray;
+import android.util.proto.ProtoOutputStream;
 
 import com.android.internal.util.XmlUtils;
 import com.android.server.notification.NotificationManagerService.DumpFilter;
@@ -214,6 +218,53 @@ abstract public class ManagedServices {
         }
     }
 
+    public void dump(ProtoOutputStream proto, DumpFilter filter) {
+        proto.write(ManagedServicesProto.CAPTION, getCaption());
+        final int N = mApproved.size();
+        for (int i = 0 ; i < N; i++) {
+            final int userId = mApproved.keyAt(i);
+            final ArrayMap<Boolean, ArraySet<String>> approvedByType = mApproved.valueAt(i);
+            if (approvedByType != null) {
+                final int M = approvedByType.size();
+                for (int j = 0; j < M; j++) {
+                    final boolean isPrimary = approvedByType.keyAt(j);
+                    final ArraySet<String> approved = approvedByType.valueAt(j);
+                    if (approvedByType != null && approvedByType.size() > 0) {
+                        final long sToken = proto.start(ManagedServicesProto.APPROVED);
+                        for (String s : approved) {
+                            proto.write(ServiceProto.NAME, s);
+                        }
+                        proto.write(ServiceProto.USER_ID, userId);
+                        proto.write(ServiceProto.IS_PRIMARY, isPrimary);
+                        proto.end(sToken);
+                    }
+                }
+            }
+        }
+
+        for (ComponentName cmpt : mEnabledServicesForCurrentProfiles) {
+            if (filter != null && !filter.matches(cmpt)) continue;
+
+            final long cToken = proto.start(ManagedServicesProto.ENABLED);
+            cmpt.toProto(proto);
+            proto.end(cToken);
+        }
+
+        for (ManagedServiceInfo info : mServices) {
+            if (filter != null && !filter.matches(info.component)) continue;
+
+            final long lToken = proto.start(ManagedServicesProto.LIVE_SERVICES);
+            info.toProto(proto, this);
+            proto.end(lToken);
+        }
+
+        for (ComponentName name : mSnoozingForCurrentProfiles) {
+            final long cToken = proto.start(ManagedServicesProto.SNOOZED);
+            name.toProto(proto);
+            proto.end(cToken);
+        }
+    }
+
     protected void onSettingRestored(String element, String value, int backupSdkInt, int userId) {
         if (!mUseXml) {
             Slog.d(TAG, "Restored managed service setting: " + element);
@@ -294,6 +345,7 @@ abstract public class ManagedServices {
             }
             if (type == XmlPullParser.START_TAG) {
                 if (TAG_MANAGED_SERVICES.equals(tag)) {
+                    Slog.i(TAG, "Read " + mConfig.caption + " permissions from xml");
                     final String approved = XmlUtils.readStringAttribute(parser, ATT_APPROVED_LIST);
                     final int userId = XmlUtils.readIntAttribute(parser, ATT_USER_ID, 0);
                     final boolean isPrimary =
@@ -353,6 +405,8 @@ abstract public class ManagedServices {
 
     protected void setPackageOrComponentEnabled(String pkgOrComponent, int userId,
             boolean isPrimary, boolean enabled) {
+        Slog.i(TAG,
+                (enabled ? " Allowing " : "Disallowing ") + mConfig.caption + " " + pkgOrComponent);
         ArrayMap<Boolean, ArraySet<String>> allowedByType = mApproved.get(userId);
         if (allowedByType == null) {
             allowedByType = new ArrayMap<>();
@@ -460,6 +514,7 @@ abstract public class ManagedServices {
     }
 
     public void onUserRemoved(int user) {
+        Slog.i(TAG, "Removing approved services for removed user " + user);
         mApproved.remove(user);
         rebindServices(true);
     }
@@ -489,6 +544,17 @@ abstract public class ManagedServices {
             if (info.service.asBinder() == token) return info;
         }
         return null;
+    }
+
+    protected boolean isServiceTokenValidLocked(IInterface service) {
+        if (service == null) {
+            return false;
+        }
+        ManagedServiceInfo info = getServiceFromTokenLocked(service);
+        if (info != null) {
+            return true;
+        }
+        return false;
     }
 
     protected ManagedServiceInfo checkServiceTokenLocked(IInterface service) {
@@ -543,10 +609,8 @@ abstract public class ManagedServices {
         }
 
         // State changed
-        if (DEBUG) {
-            Slog.d(TAG, ((enabled) ? "Enabling " : "Disabling ") + "component " +
-                    component.flattenToShortString());
-        }
+        Slog.d(TAG, ((enabled) ? "Enabling " : "Disabling ") + "component " +
+                component.flattenToShortString());
 
         synchronized (mMutex) {
             final int[] userIds = mUserProfiles.getCurrentProfileIds();
@@ -628,12 +692,10 @@ abstract public class ManagedServices {
                 int P = approved.size();
                 for (int k = P - 1; k >= 0; k--) {
                     final String approvedPackageOrComponent = approved.valueAt(k);
-                    if (!hasMatchingServices(approvedPackageOrComponent, userId)){
+                    if (!isValidEntry(approvedPackageOrComponent, userId)){
                         approved.removeAt(k);
-                        if (DEBUG) {
-                            Slog.v(TAG, "Removing " + approvedPackageOrComponent
-                                    + " from approved list; no matching services found");
-                        }
+                        Slog.v(TAG, "Removing " + approvedPackageOrComponent
+                                + " from approved list; no matching services found");
                     } else {
                         if (DEBUG) {
                             Slog.v(TAG, "Keeping " + approvedPackageOrComponent
@@ -676,6 +738,10 @@ abstract public class ManagedServices {
         } else {
             return packageOrComponent;
         }
+    }
+
+    protected boolean isValidEntry(String packageOrComponent, int userId) {
+        return hasMatchingServices(packageOrComponent, userId);
     }
 
     private boolean hasMatchingServices(String packageOrComponent, int userId) {
@@ -774,7 +840,12 @@ abstract public class ManagedServices {
                     ServiceInfo info = mPm.getServiceInfo(component,
                             PackageManager.MATCH_DIRECT_BOOT_AWARE
                                     | PackageManager.MATCH_DIRECT_BOOT_UNAWARE, userIds[i]);
-                    if (info == null || !mConfig.bindPermission.equals(info.permission)) {
+                    if (info == null) {
+                        Slog.w(TAG, "Not binding " + getCaption() + " service " + component
+                                + ": service not found");
+                        continue;
+                    }
+                    if (!mConfig.bindPermission.equals(info.permission)) {
                         Slog.w(TAG, "Not binding " + getCaption() + " service " + component
                                 + ": it does not require the permission " + mConfig.bindPermission);
                         continue;
@@ -830,8 +901,7 @@ abstract public class ManagedServices {
             if (name.equals(info.component)
                 && info.userid == userid) {
                 // cut old connections
-                if (DEBUG) Slog.v(TAG, "    disconnecting old " + getCaption() + ": "
-                    + info.service);
+                Slog.v(TAG, "    disconnecting old " + getCaption() + ": " + info.service);
                 removeServiceLocked(i);
                 if (info.connection != null) {
                     mContext.unbindService(info.connection);
@@ -859,7 +929,7 @@ abstract public class ManagedServices {
             appInfo != null ? appInfo.targetSdkVersion : Build.VERSION_CODES.BASE;
 
         try {
-            if (DEBUG) Slog.v(TAG, "binding: " + intent);
+            Slog.v(TAG, "binding: " + intent);
             ServiceConnection serviceConnection = new ServiceConnection() {
                 IInterface mService;
 
@@ -917,8 +987,7 @@ abstract public class ManagedServices {
         final int N = mServices.size();
         for (int i = N - 1; i >= 0; i--) {
             final ManagedServiceInfo info = mServices.get(i);
-            if (name.equals(info.component)
-                && info.userid == userid) {
+            if (name.equals(info.component) && info.userid == userid) {
                 removeServiceLocked(i);
                 if (info.connection != null) {
                     try {
@@ -945,9 +1014,8 @@ abstract public class ManagedServices {
             final int N = mServices.size();
             for (int i = N - 1; i >= 0; i--) {
                 final ManagedServiceInfo info = mServices.get(i);
-                if (info.service.asBinder() == service.asBinder()
-                        && info.userid == userid) {
-                    if (DEBUG) Slog.d(TAG, "Removing active service " + info.component);
+                if (info.service.asBinder() == service.asBinder() && info.userid == userid) {
+                    Slog.d(TAG, "Removing active service " + info.component);
                     serviceInfo = removeServiceLocked(i);
                 }
             }
@@ -1033,6 +1101,16 @@ abstract public class ManagedServices {
                     .append(",connection=").append(connection == null ? null : "<connection>")
                     .append(",service=").append(service)
                     .append(']').toString();
+        }
+
+        public void toProto(ProtoOutputStream proto, ManagedServices host) {
+            final long cToken = proto.start(ManagedServiceInfoProto.COMPONENT);
+            component.toProto(proto);
+            proto.end(cToken);
+            proto.write(ManagedServiceInfoProto.USER_ID, userid);
+            proto.write(ManagedServiceInfoProto.SERVICE, service.getClass().getName());
+            proto.write(ManagedServiceInfoProto.IS_SYSTEM, isSystem);
+            proto.write(ManagedServiceInfoProto.IS_GUEST, isGuest(host));
         }
 
         public boolean enabledAndUserMatches(int nid) {

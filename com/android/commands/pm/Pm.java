@@ -416,7 +416,7 @@ public final class Pm {
                     PackageLite pkgLite = new PackageLite(null, baseApk, null, null, null, null,
                             null, null);
                     params.sessionParams.setSize(
-                            PackageHelper.calculateInstalledSize(pkgLite, false,
+                            PackageHelper.calculateInstalledSize(pkgLite,
                             params.sessionParams.abiOverride));
                 } catch (PackageParserException | IOException e) {
                     System.err.println("Error: Failed to parse APK file: " + e);
@@ -636,7 +636,7 @@ public final class Pm {
             out = session.openWrite(splitName, 0, sizeBytes);
 
             int total = 0;
-            byte[] buffer = new byte[65536];
+            byte[] buffer = new byte[1024 * 1024];
             int c;
             while ((c = in.read(buffer)) != -1) {
                 total += c;

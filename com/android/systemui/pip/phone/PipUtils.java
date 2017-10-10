@@ -16,7 +16,8 @@
 
 package com.android.systemui.pip.phone;
 
-import static android.app.ActivityManager.StackId.PINNED_STACK_ID;
+import static android.app.WindowConfiguration.ACTIVITY_TYPE_UNDEFINED;
+import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED;
 
 import android.app.ActivityManager.StackInfo;
 import android.app.IActivityManager;
@@ -24,33 +25,35 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.os.RemoteException;
 import android.util.Log;
+import android.util.Pair;
 
 public class PipUtils {
 
     private static final String TAG = "PipUtils";
 
     /**
-     * @return the ComponentName of the top non-SystemUI activity in the pinned stack, or null if
-     *         none exists.
+     * @return the ComponentName and user id of the top non-SystemUI activity in the pinned stack.
+     *         The component name may be null if no such activity exists.
      */
-    public static ComponentName getTopPinnedActivity(Context context,
+    public static Pair<ComponentName, Integer> getTopPinnedActivity(Context context,
             IActivityManager activityManager) {
         try {
             final String sysUiPackageName = context.getPackageName();
-            final StackInfo pinnedStackInfo = activityManager.getStackInfo(PINNED_STACK_ID);
+            final StackInfo pinnedStackInfo =
+                    activityManager.getStackInfo(WINDOWING_MODE_PINNED, ACTIVITY_TYPE_UNDEFINED);
             if (pinnedStackInfo != null && pinnedStackInfo.taskIds != null &&
                     pinnedStackInfo.taskIds.length > 0) {
                 for (int i = pinnedStackInfo.taskNames.length - 1; i >= 0; i--) {
                     ComponentName cn = ComponentName.unflattenFromString(
                             pinnedStackInfo.taskNames[i]);
                     if (cn != null && !cn.getPackageName().equals(sysUiPackageName)) {
-                        return cn;
+                        return new Pair<>(cn, pinnedStackInfo.taskUserIds[i]);
                     }
                 }
             }
         } catch (RemoteException e) {
             Log.w(TAG, "Unable to get pinned stack.");
         }
-        return null;
+        return new Pair<>(null, 0);
     }
 }

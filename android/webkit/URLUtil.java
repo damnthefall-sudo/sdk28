@@ -16,6 +16,7 @@
 
 package android.webkit;
 
+import android.annotation.Nullable;
 import android.net.ParseException;
 import android.net.Uri;
 import android.net.WebAddress;
@@ -300,8 +301,8 @@ public final class URLUtil {
      */
     public static final String guessFileName(
             String url,
-            String contentDisposition,
-            String mimeType) {
+            @Nullable String contentDisposition,
+            @Nullable String mimeType) {
         String filename = null;
         String extension = null;
 
@@ -388,7 +389,7 @@ public final class URLUtil {
             Pattern.compile("attachment;\\s*filename\\s*=\\s*(\"?)([^\"]*)\\1\\s*$",
             Pattern.CASE_INSENSITIVE);
 
-    /*
+    /**
      * Parse the Content-Disposition HTTP Header. The format of the header
      * is defined here: http://www.w3.org/Protocols/rfc2616/rfc2616-sec19.html
      * This header provides a filename for content that is going to be

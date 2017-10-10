@@ -16,8 +16,7 @@
 
 package com.android.server.wm;
 
-import static android.app.ActivityManager.StackId;
-import static android.app.ActivityManager.StackId.PINNED_STACK_ID;
+import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED;
 import static android.content.pm.ActivityInfo.CONFIG_ORIENTATION;
 import static android.content.pm.ActivityInfo.CONFIG_SCREEN_SIZE;
 import static android.content.pm.ActivityInfo.SCREEN_ORIENTATION_BEHIND;
@@ -53,6 +52,7 @@ import static com.android.server.wm.WindowManagerService.logWithStack;
 import static com.android.server.wm.proto.AppWindowTokenProto.NAME;
 import static com.android.server.wm.proto.AppWindowTokenProto.WINDOW_TOKEN;
 
+import android.annotation.CallSuper;
 import android.annotation.NonNull;
 import android.app.Activity;
 import android.content.res.Configuration;
@@ -1170,7 +1170,6 @@ class AppWindowToken extends WindowToken implements WindowManagerService.AppFree
                 wAppAnimator.thumbnail.destroy();
             }
             wAppAnimator.thumbnail = tAppAnimator.thumbnail;
-            wAppAnimator.thumbnailLayer = tAppAnimator.thumbnailLayer;
             wAppAnimator.thumbnailAnimation = tAppAnimator.thumbnailAnimation;
             tAppAnimator.thumbnail = null;
         }
@@ -1311,7 +1310,8 @@ class AppWindowToken extends WindowToken implements WindowManagerService.AppFree
 
                 // Notify the pinned stack upon all windows drawn. If there was an animation in
                 // progress then this signal will resume that animation.
-                final TaskStack pinnedStack = mDisplayContent.getStackById(PINNED_STACK_ID);
+                final TaskStack pinnedStack =
+                        mDisplayContent.getStack(WINDOWING_MODE_PINNED);
                 if (pinnedStack != null) {
                     pinnedStack.onAllWindowsDrawn();
                 }
@@ -1620,8 +1620,9 @@ class AppWindowToken extends WindowToken implements WindowManagerService.AppFree
         }
     }
 
+    @CallSuper
     @Override
-    void writeToProto(ProtoOutputStream proto, long fieldId) {
+    public void writeToProto(ProtoOutputStream proto, long fieldId) {
         final long token = proto.start(fieldId);
         writeNameToProto(proto, NAME);
         super.writeToProto(proto, WINDOW_TOKEN);

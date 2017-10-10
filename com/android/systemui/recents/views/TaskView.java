@@ -647,7 +647,7 @@ public class TaskView extends FixedSizeFrameLayout implements Task.TaskCallbacks
     }
 
     @Override
-    public void onTaskStackIdChanged() {
+    public void onTaskWindowingModeChanged() {
         // Force rebind the header, the thumbnail does not change due to stack changes
         mHeaderView.bindToTask(mTask, mTouchExplorationEnabled, mIsDisabledInSafeMode);
         mHeaderView.onTaskDataLoaded();
@@ -674,8 +674,7 @@ public class TaskView extends FixedSizeFrameLayout implements Task.TaskCallbacks
             mActionButtonView.setTranslationZ(0f);
             screenPinningRequested = true;
         }
-        EventBus.getDefault().send(new LaunchTaskEvent(this, mTask, null, INVALID_STACK_ID,
-                screenPinningRequested));
+        EventBus.getDefault().send(new LaunchTaskEvent(this, mTask, null, screenPinningRequested));
 
         MetricsLogger.action(v.getContext(), MetricsEvent.ACTION_OVERVIEW_SELECT,
                 mTask.key.getComponent().toString());

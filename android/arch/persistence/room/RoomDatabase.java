@@ -16,7 +16,7 @@
 
 package android.arch.persistence.room;
 
-import android.arch.core.executor.AppToolkitTaskExecutor;
+import android.arch.core.executor.ArchTaskExecutor;
 import android.arch.persistence.db.SimpleSQLiteQuery;
 import android.arch.persistence.db.SupportSQLiteDatabase;
 import android.arch.persistence.db.SupportSQLiteOpenHelper;
@@ -158,7 +158,7 @@ public abstract class RoomDatabase {
         if (mAllowMainThreadQueries) {
             return;
         }
-        if (AppToolkitTaskExecutor.getInstance().isMainThread()) {
+        if (ArchTaskExecutor.getInstance().isMainThread()) {
             throw new IllegalStateException("Cannot access database on the main thread since"
                     + " it may potentially lock the UI for a long period of time.");
         }
@@ -216,7 +216,11 @@ public abstract class RoomDatabase {
      */
     public void endTransaction() {
         mOpenHelper.getWritableDatabase().endTransaction();
-        mInvalidationTracker.refreshVersionsAsync();
+        if (!inTransaction()) {
+            // enqueue refresh only if we are NOT in a transaction. Otherwise, wait for the last
+            // endTransaction call to do it.
+            mInvalidationTracker.refreshVersionsAsync();
+        }
     }
 
     /**
@@ -311,7 +315,6 @@ public abstract class RoomDatabase {
         private ArrayList<Callback> mCallbacks;
 
         private SupportSQLiteOpenHelper.Factory mFactory;
-        private boolean mInMemory;
         private boolean mAllowMainThreadQueries;
         private boolean mRequireMigration;
         /**
@@ -381,6 +384,9 @@ public abstract class RoomDatabase {
         }
 
         /**
+         * Allows Room to destructively recreate database tables if {@link Migration}s that would
+         * migrate old database schemas to the latest schema version are not found.
+         * <p>
          * When the database version on the device does not match the latest schema version, Room
          * runs necessary {@link Migration}s on the database.
          * <p>

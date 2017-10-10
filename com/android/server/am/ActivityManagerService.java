@@ -33,6 +33,14 @@ import static android.app.ActivityManager.StackId.FIRST_DYNAMIC_STACK_ID;
 import static android.app.ActivityManager.StackId.FULLSCREEN_WORKSPACE_STACK_ID;
 import static android.app.ActivityManager.StackId.INVALID_STACK_ID;
 import static android.app.ActivityManager.StackId.PINNED_STACK_ID;
+import static android.app.ActivityManager.StackId.getWindowingModeForStackId;
+import static android.app.ActivityManager.StackId.isStaticStack;
+import static android.app.WindowConfiguration.ACTIVITY_TYPE_STANDARD;
+import static android.app.WindowConfiguration.WINDOWING_MODE_FREEFORM;
+import static android.app.WindowConfiguration.WINDOWING_MODE_FULLSCREEN;
+import static android.app.WindowConfiguration.WINDOWING_MODE_FULLSCREEN_OR_SPLIT_SCREEN_SECONDARY;
+import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED;
+import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_PRIMARY;
 import static android.content.pm.PackageManager.FEATURE_ACTIVITIES_ON_SECONDARY_DISPLAYS;
 import static android.content.pm.PackageManager.FEATURE_FREEFORM_WINDOW_MANAGEMENT;
 import static android.content.pm.PackageManager.FEATURE_LEANBACK_ONLY;
@@ -145,7 +153,6 @@ import static com.android.server.am.ActivityManagerDebugConfig.POSTFIX_CLEANUP;
 import static com.android.server.am.ActivityManagerDebugConfig.POSTFIX_CONFIGURATION;
 import static com.android.server.am.ActivityManagerDebugConfig.POSTFIX_FOCUS;
 import static com.android.server.am.ActivityManagerDebugConfig.POSTFIX_IMMERSIVE;
-import static com.android.server.am.ActivityManagerDebugConfig.POSTFIX_LOCKSCREEN;
 import static com.android.server.am.ActivityManagerDebugConfig.POSTFIX_LOCKTASK;
 import static com.android.server.am.ActivityManagerDebugConfig.POSTFIX_LRU;
 import static com.android.server.am.ActivityManagerDebugConfig.POSTFIX_MU;
@@ -163,10 +170,8 @@ import static com.android.server.am.ActivityManagerDebugConfig.POSTFIX_SWITCH;
 import static com.android.server.am.ActivityManagerDebugConfig.POSTFIX_UID_OBSERVERS;
 import static com.android.server.am.ActivityManagerDebugConfig.POSTFIX_URI_PERMISSION;
 import static com.android.server.am.ActivityManagerDebugConfig.POSTFIX_VISIBILITY;
-import static com.android.server.am.ActivityManagerDebugConfig.POSTFIX_VISIBLE_BEHIND;
 import static com.android.server.am.ActivityManagerDebugConfig.TAG_AM;
 import static com.android.server.am.ActivityManagerDebugConfig.TAG_WITH_CLASS_NAME;
-import static com.android.server.am.ActivityStackSupervisor.CREATE_IF_NEEDED;
 import static com.android.server.am.ActivityStackSupervisor.DEFER_RESUME;
 import static com.android.server.am.ActivityStackSupervisor.MATCH_TASK_IN_STACKS_ONLY;
 import static com.android.server.am.ActivityStackSupervisor.MATCH_TASK_IN_STACKS_OR_RECENT_TASKS;
@@ -177,8 +182,8 @@ import static com.android.server.am.TaskRecord.INVALID_TASK_ID;
 import static com.android.server.am.TaskRecord.LOCK_TASK_AUTH_DONT_LOCK;
 import static com.android.server.am.TaskRecord.REPARENT_KEEP_STACK_AT_FRONT;
 import static com.android.server.am.TaskRecord.REPARENT_LEAVE_STACK_IN_PLACE;
+import static com.android.server.am.proto.ActivityManagerServiceProto.ACTIVITIES;
 import static com.android.server.wm.AppTransition.TRANSIT_ACTIVITY_OPEN;
-import static com.android.server.wm.AppTransition.TRANSIT_ACTIVITY_RELAUNCH;
 import static com.android.server.wm.AppTransition.TRANSIT_NONE;
 import static com.android.server.wm.AppTransition.TRANSIT_TASK_IN_PLACE;
 import static com.android.server.wm.AppTransition.TRANSIT_TASK_OPEN;
@@ -259,8 +264,8 @@ import android.content.pm.IPackageManager;
 import android.content.pm.InstrumentationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
-import android.content.pm.PackageManager.NameNotFoundException;
 import android.content.pm.PackageManagerInternal;
+import android.content.pm.PackageManager.NameNotFoundException;
 import android.content.pm.ParceledListSlice;
 import android.content.pm.PathPermission;
 import android.content.pm.PermissionInfo;
@@ -349,6 +354,7 @@ import android.util.SparseArray;
 import android.util.SparseIntArray;
 import android.util.TimeUtils;
 import android.util.Xml;
+import android.util.proto.ProtoOutputStream;
 import android.view.Gravity;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -402,6 +408,7 @@ import com.android.server.firewall.IntentFirewall;
 import com.android.server.job.JobSchedulerInternal;
 import com.android.server.pm.Installer;
 import com.android.server.pm.Installer.InstallerException;
+import com.android.server.utils.PriorityDump;
 import com.android.server.vr.VrManagerInternal;
 import com.android.server.wm.PinnedStackWindowController;
 import com.android.server.wm.WindowManagerService;
@@ -682,11 +689,6 @@ public class ActivityManagerService extends IActivityManager.Stub
     ActivityInfo mLastAddedTaskActivity;
 
     /**
-     * List of packages whitelisted by DevicePolicyManager for locktask. Indexed by userId.
-     */
-    SparseArray<String[]> mLockTaskPackages = new SparseArray<>();
-
-    /**
      * The package name of the DeviceOwner. This package is not permitted to have its data cleared.
      */
     String mDeviceOwnerName;
@@ -712,9 +714,45 @@ public class ActivityManagerService extends IActivityManager.Stub
     @VisibleForTesting
     long mWaitForNetworkTimeoutMs;
 
+    /**
+     * Helper class which parses out priority arguments and dumps sections according to their
+     * priority. If priority arguments are omitted, function calls the legacy dump command.
+     */
+    private final PriorityDump.PriorityDumper mPriorityDumper = new PriorityDump.PriorityDumper() {
+        @Override
+        public void dumpCritical(FileDescriptor fd, PrintWriter pw, String[] args) {
+            doDump(fd, pw, new String[] {"activities"});
+        }
+
+        @Override
+        public void dumpNormal(FileDescriptor fd, PrintWriter pw, String[] args) {
+            doDump(fd, pw, new String[] {"settings"});
+            doDump(fd, pw, new String[] {"intents"});
+            doDump(fd, pw, new String[] {"broadcasts"});
+            doDump(fd, pw, new String[] {"providers"});
+            doDump(fd, pw, new String[] {"permissions"});
+            doDump(fd, pw, new String[] {"services"});
+            doDump(fd, pw, new String[] {"recents"});
+            doDump(fd, pw, new String[] {"lastanr"});
+            doDump(fd, pw, new String[] {"starter"});
+            if (mAssociations.size() > 0) {
+                doDump(fd, pw, new String[] {"associations"});
+            }
+            doDump(fd, pw, new String[] {"processes"});
+            doDump(fd, pw, new String[] {"-v", "all"});
+            doDump(fd, pw, new String[] {"service", "all"});
+            doDump(fd, pw, new String[] {"provider", "all"});
+        }
+
+        @Override
+        public void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
+            doDump(fd, pw, args);
+        }
+    };
+
     public boolean canShowErrorDialogs() {
         return mShowDialogs && !mSleeping && !mShuttingDown
-                && !mKeyguardController.isKeyguardShowing()
+                && !mKeyguardController.isKeyguardShowing(DEFAULT_DISPLAY)
                 && !(UserManager.isDeviceInDemoMode(mContext)
                         && mUserController.getCurrentUser().isDemo());
     }
@@ -1653,45 +1691,34 @@ public class ActivityManagerService extends IActivityManager.Stub
     static final int DISPATCH_PROCESSES_CHANGED_UI_MSG = 31;
     static final int DISPATCH_PROCESS_DIED_UI_MSG = 32;
     static final int REPORT_MEM_USAGE_MSG = 33;
-    static final int REPORT_USER_SWITCH_MSG = 34;
-    static final int CONTINUE_USER_SWITCH_MSG = 35;
-    static final int USER_SWITCH_TIMEOUT_MSG = 36;
     static final int IMMERSIVE_MODE_LOCK_MSG = 37;
     static final int PERSIST_URI_GRANTS_MSG = 38;
     static final int REQUEST_ALL_PSS_MSG = 39;
-    static final int START_PROFILES_MSG = 40;
     static final int UPDATE_TIME_PREFERENCE_MSG = 41;
-    static final int SYSTEM_USER_START_MSG = 42;
-    static final int SYSTEM_USER_CURRENT_MSG = 43;
     static final int ENTER_ANIMATION_COMPLETE_MSG = 44;
     static final int FINISH_BOOTING_MSG = 45;
-    static final int START_USER_SWITCH_UI_MSG = 46;
     static final int SEND_LOCALE_TO_MOUNT_DAEMON_MSG = 47;
     static final int DISMISS_DIALOG_UI_MSG = 48;
     static final int NOTIFY_CLEARTEXT_NETWORK_MSG = 49;
     static final int POST_DUMP_HEAP_NOTIFICATION_MSG = 50;
     static final int DELETE_DUMPHEAP_MSG = 51;
-    static final int FOREGROUND_PROFILE_CHANGED_MSG = 52;
     static final int DISPATCH_UIDS_CHANGED_UI_MSG = 53;
     static final int REPORT_TIME_TRACKER_MSG = 54;
-    static final int REPORT_USER_SWITCH_COMPLETE_MSG = 55;
     static final int SHUTDOWN_UI_AUTOMATION_CONNECTION_MSG = 56;
     static final int CONTENT_PROVIDER_PUBLISH_TIMEOUT_MSG = 57;
     static final int IDLE_UIDS_MSG = 58;
-    static final int SYSTEM_USER_UNLOCK_MSG = 59;
     static final int LOG_STACK_STATE = 60;
     static final int VR_MODE_CHANGE_MSG = 61;
     static final int SHOW_UNSUPPORTED_DISPLAY_SIZE_DIALOG_MSG = 62;
     static final int HANDLE_TRUST_STORAGE_UPDATE_MSG = 63;
-    static final int REPORT_LOCKED_BOOT_COMPLETE_MSG = 64;
     static final int NOTIFY_VR_SLEEPING_MSG = 65;
     static final int SERVICE_FOREGROUND_TIMEOUT_MSG = 66;
     static final int DISPATCH_PENDING_INTENT_CANCEL_MSG = 67;
     static final int PUSH_TEMP_WHITELIST_UI_MSG = 68;
     static final int SERVICE_FOREGROUND_CRASH_MSG = 69;
     static final int DISPATCH_OOM_ADJ_OBSERVER_MSG = 70;
-    static final int USER_SWITCH_CALLBACKS_TIMEOUT_MSG = 71;
-    static final int START_USER_SWITCH_FG_MSG = 712;
+    static final int TOP_APP_KILLED_BY_LMK_MSG = 73;
+    static final int NOTIFY_VR_KEYGUARD_MSG = 74;
 
     static final int FIRST_ACTIVITY_STACK_MSG = 100;
     static final int FIRST_BROADCAST_QUEUE_MSG = 200;
@@ -1904,10 +1931,6 @@ public class ActivityManagerService extends IActivityManager.Stub
                 }
                 break;
             }
-            case START_USER_SWITCH_UI_MSG: {
-                mUserController.showUserSwitchDialog((Pair<UserInfo, UserInfo>) msg.obj);
-                break;
-            }
             case DISMISS_DIALOG_UI_MSG: {
                 final Dialog d = (Dialog) msg.obj;
                 d.dismiss();
@@ -1921,6 +1944,17 @@ public class ActivityManagerService extends IActivityManager.Stub
                 final int pid = msg.arg1;
                 final int uid = msg.arg2;
                 dispatchProcessDied(pid, uid);
+                break;
+            }
+            case TOP_APP_KILLED_BY_LMK_MSG: {
+                final String appName = (String) msg.obj;
+                final AlertDialog d = new BaseErrorDialog(mUiContext);
+                d.getWindow().setType(WindowManager.LayoutParams.TYPE_SYSTEM_ERROR);
+                d.setTitle(mUiContext.getText(R.string.top_app_killed_title));
+                d.setMessage(mUiContext.getString(R.string.top_app_killed_message, appName));
+                d.setButton(DialogInterface.BUTTON_POSITIVE, mUiContext.getText(R.string.close),
+                        obtainMessage(DISMISS_DIALOG_UI_MSG, d));
+                d.show();
                 break;
             }
             case DISPATCH_UIDS_CHANGED_UI_MSG: {
@@ -2136,26 +2170,6 @@ public class ActivityManagerService extends IActivityManager.Stub
                 thread.start();
                 break;
             }
-            case START_USER_SWITCH_FG_MSG: {
-                mUserController.startUserInForeground(msg.arg1);
-                break;
-            }
-            case REPORT_USER_SWITCH_MSG: {
-                mUserController.dispatchUserSwitch((UserState) msg.obj, msg.arg1, msg.arg2);
-                break;
-            }
-            case CONTINUE_USER_SWITCH_MSG: {
-                mUserController.continueUserSwitch((UserState) msg.obj, msg.arg1, msg.arg2);
-                break;
-            }
-            case USER_SWITCH_TIMEOUT_MSG: {
-                mUserController.timeoutUserSwitch((UserState) msg.obj, msg.arg1, msg.arg2);
-                break;
-            }
-            case USER_SWITCH_CALLBACKS_TIMEOUT_MSG: {
-                mUserController.timeoutUserSwitchCallbacks(msg.arg1, msg.arg2);
-                break;
-            }
             case IMMERSIVE_MODE_LOCK_MSG: {
                 final boolean nextState = (msg.arg1 != 0);
                 if (mUpdateLock.isHeld() != nextState) {
@@ -2180,12 +2194,6 @@ public class ActivityManagerService extends IActivityManager.Stub
                 }
                 break;
             }
-            case START_PROFILES_MSG: {
-                synchronized (ActivityManagerService.this) {
-                    mUserController.startProfilesLocked();
-                }
-                break;
-            }
             case UPDATE_TIME_PREFERENCE_MSG: {
                 // The user's time format preference might have changed.
                 // For convenience we re-use the Intent extra values.
@@ -2202,35 +2210,6 @@ public class ActivityManagerService extends IActivityManager.Stub
                         }
                     }
                 }
-                break;
-            }
-            case SYSTEM_USER_START_MSG: {
-                mBatteryStatsService.noteEvent(BatteryStats.HistoryItem.EVENT_USER_RUNNING_START,
-                        Integer.toString(msg.arg1), msg.arg1);
-                mSystemServiceManager.startUser(msg.arg1);
-                break;
-            }
-            case SYSTEM_USER_UNLOCK_MSG: {
-                final int userId = msg.arg1;
-                mSystemServiceManager.unlockUser(userId);
-                synchronized (ActivityManagerService.this) {
-                    mRecentTasks.loadUserRecentsLocked(userId);
-                }
-                if (userId == UserHandle.USER_SYSTEM) {
-                    startPersistentApps(PackageManager.MATCH_DIRECT_BOOT_UNAWARE);
-                }
-                installEncryptionUnawareProviders(userId);
-                mUserController.finishUserUnlocked((UserState) msg.obj);
-                break;
-            }
-            case SYSTEM_USER_CURRENT_MSG: {
-                mBatteryStatsService.noteEvent(
-                        BatteryStats.HistoryItem.EVENT_USER_FOREGROUND_FINISH,
-                        Integer.toString(msg.arg2), msg.arg2);
-                mBatteryStatsService.noteEvent(
-                        BatteryStats.HistoryItem.EVENT_USER_FOREGROUND_START,
-                        Integer.toString(msg.arg1), msg.arg1);
-                mSystemServiceManager.switchUser(msg.arg1);
                 break;
             }
             case ENTER_ANIMATION_COMPLETE_MSG: {
@@ -2372,18 +2351,9 @@ public class ActivityManagerService extends IActivityManager.Stub
                     mMemWatchDumpUid = -1;
                 }
             } break;
-            case FOREGROUND_PROFILE_CHANGED_MSG: {
-                mUserController.dispatchForegroundProfileChanged(msg.arg1);
-            } break;
             case REPORT_TIME_TRACKER_MSG: {
                 AppTimeTracker tracker = (AppTimeTracker)msg.obj;
                 tracker.deliverResult(mContext);
-            } break;
-            case REPORT_USER_SWITCH_COMPLETE_MSG: {
-                mUserController.dispatchUserSwitchComplete(msg.arg1);
-            } break;
-            case REPORT_LOCKED_BOOT_COMPLETE_MSG: {
-                mUserController.dispatchLockedBootComplete(msg.arg1);
             } break;
             case SHUTDOWN_UI_AUTOMATION_CONNECTION_MSG: {
                 IUiAutomationConnection connection = (IUiAutomationConnection) msg.obj;
@@ -2409,16 +2379,15 @@ public class ActivityManagerService extends IActivityManager.Stub
                     if (disableNonVrUi) {
                         // If we are in a VR mode where Picture-in-Picture mode is unsupported,
                         // then remove the pinned stack.
-                        final PinnedActivityStack pinnedStack = mStackSupervisor.getStack(
-                                PINNED_STACK_ID);
-                        if (pinnedStack != null) {
-                            mStackSupervisor.removeStackLocked(PINNED_STACK_ID);
-                        }
+                        mStackSupervisor.removeStacksInWindowingModes(WINDOWING_MODE_PINNED);
                     }
                 }
             } break;
             case NOTIFY_VR_SLEEPING_MSG: {
                 notifyVrManagerOfSleepState(msg.arg1 != 0);
+            } break;
+            case NOTIFY_VR_KEYGUARD_MSG: {
+                notifyVrManagerOfKeyguardState(msg.arg1 != 0);
             } break;
             case HANDLE_TRUST_STORAGE_UPDATE_MSG: {
                 synchronized (ActivityManagerService.this) {
@@ -2568,10 +2537,12 @@ public class ActivityManagerService extends IActivityManager.Stub
     }
 
     public void setWindowManager(WindowManagerService wm) {
-        mWindowManager = wm;
-        mStackSupervisor.setWindowManager(wm);
-        mActivityStarter.setWindowManager(wm);
-        mLockTaskController.setWindowManager(wm);
+        synchronized (this) {
+            mWindowManager = wm;
+            mStackSupervisor.setWindowManager(wm);
+            mActivityStarter.setWindowManager(wm);
+            mLockTaskController.setWindowManager(wm);
+        }
     }
 
     public void setUsageStatsManager(UsageStatsManagerInternal usageStatsManager) {
@@ -2589,6 +2560,14 @@ public class ActivityManagerService extends IActivityManager.Stub
 
     static class MemBinder extends Binder {
         ActivityManagerService mActivityManagerService;
+        private final PriorityDump.PriorityDumper mPriorityDumper =
+                new PriorityDump.PriorityDumper() {
+            @Override
+            public void dumpNormal(FileDescriptor fd, PrintWriter pw, String[] args) {
+                mActivityManagerService.dumpApplicationMemoryUsage(fd, pw, "  ", args, false, null);
+            }
+        };
+
         MemBinder(ActivityManagerService activityManagerService) {
             mActivityManagerService = activityManagerService;
         }
@@ -2597,7 +2576,7 @@ public class ActivityManagerService extends IActivityManager.Stub
         protected void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
             if (!DumpUtils.checkDumpAndUsageStatsPermission(mActivityManagerService.mContext,
                     "meminfo", pw)) return;
-            mActivityManagerService.dumpApplicationMemoryUsage(fd, pw, "  ", args, false, null);
+            PriorityDump.dump(mPriorityDumper, fd, pw, args);
         }
     }
 
@@ -2631,19 +2610,27 @@ public class ActivityManagerService extends IActivityManager.Stub
 
     static class CpuBinder extends Binder {
         ActivityManagerService mActivityManagerService;
+        private final PriorityDump.PriorityDumper mPriorityDumper =
+                new PriorityDump.PriorityDumper() {
+            @Override
+            public void dumpCritical(FileDescriptor fd, PrintWriter pw, String[] args) {
+                if (!DumpUtils.checkDumpAndUsageStatsPermission(mActivityManagerService.mContext,
+                        "cpuinfo", pw)) return;
+                synchronized (mActivityManagerService.mProcessCpuTracker) {
+                    pw.print(mActivityManagerService.mProcessCpuTracker.printCurrentLoad());
+                    pw.print(mActivityManagerService.mProcessCpuTracker.printCurrentState(
+                            SystemClock.uptimeMillis()));
+                }
+            }
+        };
+
         CpuBinder(ActivityManagerService activityManagerService) {
             mActivityManagerService = activityManagerService;
         }
 
         @Override
         protected void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
-            if (!DumpUtils.checkDumpAndUsageStatsPermission(mActivityManagerService.mContext,
-                    "cpuinfo", pw)) return;
-            synchronized (mActivityManagerService.mProcessCpuTracker) {
-                pw.print(mActivityManagerService.mProcessCpuTracker.printCurrentLoad());
-                pw.print(mActivityManagerService.mProcessCpuTracker.printCurrentState(
-                        SystemClock.uptimeMillis()));
-            }
+            PriorityDump.dump(mPriorityDumper, fd, pw, args);
         }
     }
 
@@ -3152,9 +3139,7 @@ public class ActivityManagerService extends IActivityManager.Stub
         }
 
         if (mLastResumedActivity != null && r.userId != mLastResumedActivity.userId) {
-            mHandler.removeMessages(FOREGROUND_PROFILE_CHANGED_MSG);
-            mHandler.obtainMessage(
-                    FOREGROUND_PROFILE_CHANGED_MSG, r.userId, 0).sendToTarget();
+            mUserController.sendForegroundProfileChanged(r.userId);
         }
         mLastResumedActivity = r;
 
@@ -3259,7 +3244,8 @@ public class ActivityManagerService extends IActivityManager.Stub
         if (r.requestedVrComponent != null && r.getStackId() >= FIRST_DYNAMIC_STACK_ID) {
             Slog.i(TAG, "Moving " + r.shortComponentName + " from stack " + r.getStackId()
                     + " to main stack for VR");
-            moveTaskToStack(r.getTask().taskId, FULLSCREEN_WORKSPACE_STACK_ID, true /* toTop */);
+            setTaskWindowingMode(r.getTask().taskId,
+                    WINDOWING_MODE_FULLSCREEN_OR_SPLIT_SCREEN_SECONDARY, true /* toTop */);
         }
         mHandler.sendMessage(
                 mHandler.obtainMessage(VR_MODE_CHANGE_MSG, 0, 0, r));
@@ -3276,6 +3262,19 @@ public class ActivityManagerService extends IActivityManager.Stub
             return;
         }
         vrService.onSleepStateChanged(isSleeping);
+    }
+
+    private void sendNotifyVrManagerOfKeyguardState(boolean isShowing) {
+        mHandler.sendMessage(
+                mHandler.obtainMessage(NOTIFY_VR_KEYGUARD_MSG, isShowing ? 1 : 0, 0));
+    }
+
+    private void notifyVrManagerOfKeyguardState(boolean isShowing) {
+        final VrManagerInternal vrService = LocalServices.getService(VrManagerInternal.class);
+        if (vrService == null) {
+            return;
+        }
+        vrService.onKeyguardStateChanged(isShowing);
     }
 
     final void showAskCompatModeDialogLocked(ActivityRecord r) {
@@ -3874,6 +3873,12 @@ public class ActivityManagerService extends IActivityManager.Stub
                 mNativeDebuggingApp = null;
             }
 
+            if (app.info.isPrivilegedApp() &&
+                    !SystemProperties.getBoolean("pm.dexopt.priv-apps", true)) {
+                runtimeFlags |= Zygote.DISABLE_VERIFIER;
+                runtimeFlags |= Zygote.ONLY_USE_SYSTEM_OAT_FILES;
+            }
+
             String invokeWith = null;
             if ((app.info.flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
                 // Debuggable apps may include a wrapper script with their library directory.
@@ -4153,15 +4158,6 @@ public class ActivityManagerService extends IActivityManager.Stub
     void enforceNotIsolatedCaller(String caller) {
         if (UserHandle.isIsolated(Binder.getCallingUid())) {
             throw new SecurityException("Isolated process not allowed to call " + caller);
-        }
-    }
-
-    void enforceShellRestriction(String restriction, int userHandle) {
-        if (Binder.getCallingUid() == SHELL_UID) {
-            if (userHandle < 0 || mUserController.hasUserRestriction(restriction, userHandle)) {
-                throw new SecurityException("Shell does not have permission to access user "
-                        + userHandle);
-            }
         }
     }
 
@@ -5432,6 +5428,7 @@ public class ActivityManagerService extends IActivityManager.Stub
             boolean doLowMem = app.instr == null;
             boolean doOomAdj = doLowMem;
             if (!app.killedByAm) {
+                maybeNotifyTopAppKilled(app);
                 Slog.i(TAG, "Process " + app.processName + " (pid " + pid + ") has died: "
                         + ProcessList.makeOomAdjString(app.setAdj)
                         + ProcessList.makeProcStateString(app.setProcState));
@@ -5463,6 +5460,23 @@ public class ActivityManagerService extends IActivityManager.Stub
             Slog.d(TAG_PROCESSES, "Received spurious death notification for thread "
                     + thread.asBinder());
         }
+    }
+
+    /** Show system error dialog when a top app is killed by LMK */
+    void maybeNotifyTopAppKilled(ProcessRecord app) {
+        if (!shouldNotifyTopAppKilled(app)) {
+            return;
+        }
+
+        Message msg = mHandler.obtainMessage(TOP_APP_KILLED_BY_LMK_MSG);
+        msg.obj = mContext.getPackageManager().getApplicationLabel(app.info);
+        mUiHandler.sendMessage(msg);
+    }
+
+    /** Only show notification when the top app is killed on low ram devices */
+    private boolean shouldNotifyTopAppKilled(ProcessRecord app) {
+        return app.curSchedGroup == ProcessList.SCHED_GROUP_TOP_APP &&
+            ActivityManager.isLowRamDeviceStatic();
     }
 
     /**
@@ -6188,7 +6202,7 @@ public class ActivityManagerService extends IActivityManager.Stub
                         Slog.w(TAG, "Failed trying to unstop package "
                                 + packageName + ": " + e);
                     }
-                    if (mUserController.isUserRunningLocked(user, 0)) {
+                    if (mUserController.isUserRunning(user, 0)) {
                         forceStopPackageLocked(packageName, pkgUid, "from pid " + callingPid);
                         finishForceStopPackageLocked(packageName, pkgUid);
                     }
@@ -7346,33 +7360,32 @@ public class ActivityManagerService extends IActivityManager.Stub
                     startProcessLocked(procs.get(ip), "on-hold", null);
                 }
             }
-
-            if (mFactoryTest != FactoryTest.FACTORY_TEST_LOW_LEVEL) {
-                // Start looking for apps that are abusing wake locks.
-                Message nmsg = mHandler.obtainMessage(CHECK_EXCESSIVE_POWER_USE_MSG);
-                mHandler.sendMessageDelayed(nmsg, mConstants.POWER_CHECK_INTERVAL);
-                // Tell anyone interested that we are done booting!
-                SystemProperties.set("sys.boot_completed", "1");
-
-                // And trigger dev.bootcomplete if we are not showing encryption progress
-                if (!"trigger_restart_min_framework".equals(SystemProperties.get("vold.decrypt"))
-                    || "".equals(SystemProperties.get("vold.encrypt_progress"))) {
-                    SystemProperties.set("dev.bootcomplete", "1");
-                }
-                mUserController.sendBootCompletedLocked(
-                        new IIntentReceiver.Stub() {
-                            @Override
-                            public void performReceive(Intent intent, int resultCode,
-                                    String data, Bundle extras, boolean ordered,
-                                    boolean sticky, int sendingUser) {
-                                synchronized (ActivityManagerService.this) {
-                                    requestPssAllProcsLocked(SystemClock.uptimeMillis(),
-                                            true, false);
-                                }
-                            }
-                        });
-                scheduleStartProfilesLocked();
+            if (mFactoryTest == FactoryTest.FACTORY_TEST_LOW_LEVEL) {
+                return;
             }
+            // Start looking for apps that are abusing wake locks.
+            Message nmsg = mHandler.obtainMessage(CHECK_EXCESSIVE_POWER_USE_MSG);
+            mHandler.sendMessageDelayed(nmsg, mConstants.POWER_CHECK_INTERVAL);
+            // Tell anyone interested that we are done booting!
+            SystemProperties.set("sys.boot_completed", "1");
+
+            // And trigger dev.bootcomplete if we are not showing encryption progress
+            if (!"trigger_restart_min_framework".equals(SystemProperties.get("vold.decrypt"))
+                    || "".equals(SystemProperties.get("vold.encrypt_progress"))) {
+                SystemProperties.set("dev.bootcomplete", "1");
+            }
+            mUserController.sendBootCompleted(
+                    new IIntentReceiver.Stub() {
+                        @Override
+                        public void performReceive(Intent intent, int resultCode,
+                                String data, Bundle extras, boolean ordered,
+                                boolean sticky, int sendingUser) {
+                            synchronized (ActivityManagerService.this) {
+                                requestPssAllProcsLocked(SystemClock.uptimeMillis(), true, false);
+                            }
+                        }
+                    });
+            mUserController.scheduleStartProfiles();
         }
     }
 
@@ -8112,7 +8125,7 @@ public class ActivityManagerService extends IActivityManager.Stub
                     final Rect sourceBounds = new Rect(r.pictureInPictureArgs.getSourceRectHint());
                     mStackSupervisor.moveActivityToPinnedStackLocked(r, sourceBounds, aspectRatio,
                             true /* moveHomeStackToFront */, "enterPictureInPictureMode");
-                    final PinnedActivityStack stack = mStackSupervisor.getStack(PINNED_STACK_ID);
+                    final PinnedActivityStack stack = r.getStack();
                     stack.setPictureInPictureAspectRatio(aspectRatio);
                     stack.setPictureInPictureActions(actions);
 
@@ -8225,11 +8238,6 @@ public class ActivityManagerService extends IActivityManager.Stub
         if (!r.supportsPictureInPicture()) {
             throw new IllegalStateException(caller
                     + ": Current activity does not support picture-in-picture.");
-        }
-
-        if (!StackId.isAllowedToEnterPictureInPicture(r.getStack().getStackId())) {
-            throw new IllegalStateException(caller
-                    + ": Activities on the home, assistant, or recents stack not supported");
         }
 
         if (params.hasSetAspectRatio()
@@ -9869,8 +9877,9 @@ public class ActivityManagerService extends IActivityManager.Stub
         if (tr.mBounds != null) {
             rti.bounds = new Rect(tr.mBounds);
         }
-        rti.supportsSplitScreenMultiWindow = tr.supportsSplitScreen();
+        rti.supportsSplitScreenMultiWindow = tr.supportsSplitScreenWindowingMode();
         rti.resizeMode = tr.mResizeMode;
+        rti.configuration.setTo(tr.getConfiguration());
 
         ActivityRecord base = null;
         ActivityRecord top = null;
@@ -10048,7 +10057,7 @@ public class ActivityManagerService extends IActivityManager.Stub
             enforceCallingPermission(android.Manifest.permission.MANAGE_ACTIVITY_STACKS,
                     "getTaskDescription()");
             final TaskRecord tr = mStackSupervisor.anyTaskForIdLocked(id,
-                    MATCH_TASK_IN_STACKS_OR_RECENT_TASKS, INVALID_STACK_ID);
+                    MATCH_TASK_IN_STACKS_OR_RECENT_TASKS);
             if (tr != null) {
                 return tr.lastTaskDescription;
             }
@@ -10161,7 +10170,7 @@ public class ActivityManagerService extends IActivityManager.Stub
     public void setTaskResizeable(int taskId, int resizeableMode) {
         synchronized (this) {
             final TaskRecord task = mStackSupervisor.anyTaskForIdLocked(
-                    taskId, MATCH_TASK_IN_STACKS_OR_RECENT_TASKS, INVALID_STACK_ID);
+                    taskId, MATCH_TASK_IN_STACKS_OR_RECENT_TASKS);
             if (task == null) {
                 Slog.w(TAG, "setTaskResizeable: taskId=" + taskId + " not found");
                 return;
@@ -10188,21 +10197,23 @@ public class ActivityManagerService extends IActivityManager.Stub
                 // - a non-null bounds on a non-freeform (fullscreen OR docked) task moves
                 //   that task to freeform
                 // - otherwise the task is not moved
-                int stackId = task.getStackId();
+                ActivityStack stack = task.getStack();
                 if (!task.getWindowConfiguration().canResizeTask()) {
                     throw new IllegalArgumentException("resizeTask not allowed on task=" + task);
                 }
-                if (bounds == null && stackId == FREEFORM_WORKSPACE_STACK_ID) {
-                    stackId = FULLSCREEN_WORKSPACE_STACK_ID;
-                } else if (bounds != null && stackId != FREEFORM_WORKSPACE_STACK_ID ) {
-                    stackId = FREEFORM_WORKSPACE_STACK_ID;
+                if (bounds == null && stack.getWindowingMode() == WINDOWING_MODE_FREEFORM) {
+                    stack = stack.getDisplay().getOrCreateStack(
+                            WINDOWING_MODE_FULLSCREEN, stack.getActivityType(), ON_TOP);
+                } else if (bounds != null && stack.getWindowingMode() != WINDOWING_MODE_FREEFORM) {
+                    stack = stack.getDisplay().getOrCreateStack(
+                            WINDOWING_MODE_FREEFORM, stack.getActivityType(), ON_TOP);
                 }
 
                 // Reparent the task to the right stack if necessary
                 boolean preserveWindow = (resizeMode & RESIZE_MODE_PRESERVE_WINDOW) != 0;
-                if (stackId != task.getStackId()) {
+                if (stack != task.getStack()) {
                     // Defer resume until the task is resized below
-                    task.reparent(stackId, ON_TOP, REPARENT_KEEP_STACK_AT_FRONT, ANIMATE,
+                    task.reparent(stack, ON_TOP, REPARENT_KEEP_STACK_AT_FRONT, ANIMATE,
                             DEFER_RESUME, "resizeTask");
                     preserveWindow = false;
                 }
@@ -10224,7 +10235,7 @@ public class ActivityManagerService extends IActivityManager.Stub
         try {
             synchronized (this) {
                 final TaskRecord task = mStackSupervisor.anyTaskForIdLocked(taskId,
-                        MATCH_TASK_IN_STACKS_OR_RECENT_TASKS, INVALID_STACK_ID);
+                        MATCH_TASK_IN_STACKS_OR_RECENT_TASKS);
                 if (task == null) {
                     Slog.w(TAG, "getTaskBounds: taskId=" + taskId + " not found");
                     return rect;
@@ -10256,7 +10267,7 @@ public class ActivityManagerService extends IActivityManager.Stub
         try {
             synchronized (this) {
                 final TaskRecord task = mStackSupervisor.anyTaskForIdLocked(taskId,
-                        MATCH_TASK_IN_STACKS_ONLY, INVALID_STACK_ID);
+                        MATCH_TASK_IN_STACKS_ONLY);
                 if (task == null) {
                     Slog.w(TAG, "cancelTaskWindowTransition: taskId=" + taskId + " not found");
                     return;
@@ -10275,7 +10286,7 @@ public class ActivityManagerService extends IActivityManager.Stub
         try {
             synchronized (this) {
                 final TaskRecord task = mStackSupervisor.anyTaskForIdLocked(taskId,
-                        MATCH_TASK_IN_STACKS_ONLY, INVALID_STACK_ID);
+                        MATCH_TASK_IN_STACKS_ONLY);
                 if (task == null) {
                     Slog.w(TAG, "cancelTaskThumbnailTransition: taskId=" + taskId + " not found");
                     return;
@@ -10295,7 +10306,7 @@ public class ActivityManagerService extends IActivityManager.Stub
             final TaskRecord task;
             synchronized (this) {
                 task = mStackSupervisor.anyTaskForIdLocked(taskId,
-                        MATCH_TASK_IN_STACKS_OR_RECENT_TASKS, INVALID_STACK_ID);
+                        MATCH_TASK_IN_STACKS_OR_RECENT_TASKS);
                 if (task == null) {
                     Slog.w(TAG, "getTaskSnapshot: taskId=" + taskId + " not found");
                     return null;
@@ -10375,14 +10386,45 @@ public class ActivityManagerService extends IActivityManager.Stub
     @Override
     public void removeStack(int stackId) {
         enforceCallingPermission(Manifest.permission.MANAGE_ACTIVITY_STACKS, "removeStack()");
-        if (StackId.isHomeOrRecentsStack(stackId)) {
-            throw new IllegalArgumentException("Removing home or recents stack is not allowed.");
-        }
-
         synchronized (this) {
             final long ident = Binder.clearCallingIdentity();
             try {
+                final ActivityStack stack = mStackSupervisor.getStack(stackId);
+                if (stack != null && !stack.isActivityTypeStandardOrUndefined()) {
+                    throw new IllegalArgumentException(
+                            "Removing non-standard stack is not allowed.");
+                }
                 mStackSupervisor.removeStackLocked(stackId);
+            } finally {
+                Binder.restoreCallingIdentity(ident);
+            }
+        }
+    }
+
+    /**
+     * Removes stacks in the input windowing modes from the system if they are of activity type
+     * ACTIVITY_TYPE_STANDARD or ACTIVITY_TYPE_UNDEFINED
+     */
+    @Override
+    public void removeStacksInWindowingModes(int[] windowingModes) {
+        enforceCallingPermission(MANAGE_ACTIVITY_STACKS, "removeStacksInWindowingModes()");
+        synchronized (this) {
+            final long ident = Binder.clearCallingIdentity();
+            try {
+                mStackSupervisor.removeStacksInWindowingModes(windowingModes);
+            } finally {
+                Binder.restoreCallingIdentity(ident);
+            }
+        }
+    }
+
+    @Override
+    public void removeStacksWithActivityTypes(int[] activityTypes) {
+        enforceCallingPermission(MANAGE_ACTIVITY_STACKS, "removeStacksWithActivityTypes()");
+        synchronized (this) {
+            final long ident = Binder.clearCallingIdentity();
+            try {
+                mStackSupervisor.removeStacksWithActivityTypes(activityTypes);
             } finally {
                 Binder.restoreCallingIdentity(ident);
             }
@@ -10532,13 +10574,15 @@ public class ActivityManagerService extends IActivityManager.Stub
     public int createStackOnDisplay(int displayId) throws RemoteException {
         enforceCallingPermission(MANAGE_ACTIVITY_STACKS, "createStackOnDisplay()");
         synchronized (this) {
-            final int stackId = mStackSupervisor.getNextStackId();
-            final ActivityStack stack =
-                    mStackSupervisor.createStackOnDisplay(stackId, displayId, true /*onTop*/);
-            if (stack == null) {
+            final ActivityDisplay display =
+                    mStackSupervisor.getActivityDisplayOrCreateLocked(displayId);
+            if (display == null) {
                 return INVALID_STACK_ID;
             }
-            return stack.mStackId;
+            // TODO(multi-display): Have the caller pass in the windowing mode and activity type.
+            final ActivityStack stack = display.createStack(
+                    WINDOWING_MODE_FULLSCREEN, ACTIVITY_TYPE_STANDARD, true /*onTop*/);
+            return (stack != null) ? stack.mStackId : INVALID_STACK_ID;
         }
     }
 
@@ -10570,9 +10614,49 @@ public class ActivityManagerService extends IActivityManager.Stub
                             "exitFreeformMode: You can only go fullscreen from freeform.");
                 }
 
+                final ActivityStack fullscreenStack = stack.getDisplay().getOrCreateStack(
+                        WINDOWING_MODE_FULLSCREEN, stack.getActivityType(), ON_TOP);
+
                 if (DEBUG_STACK) Slog.d(TAG_STACK, "exitFreeformMode: " + r);
-                r.getTask().reparent(FULLSCREEN_WORKSPACE_STACK_ID, ON_TOP,
+                // TODO: Should just change windowing mode vs. re-parenting...
+                r.getTask().reparent(fullscreenStack, ON_TOP,
                         REPARENT_KEEP_STACK_AT_FRONT, ANIMATE, !DEFER_RESUME, "exitFreeformMode");
+            } finally {
+                Binder.restoreCallingIdentity(ident);
+            }
+        }
+    }
+
+    @Override
+    public void setTaskWindowingMode(int taskId, int windowingMode, boolean toTop) {
+        enforceCallingPermission(MANAGE_ACTIVITY_STACKS, "setTaskWindowingMode()");
+        synchronized (this) {
+            final long ident = Binder.clearCallingIdentity();
+            try {
+                final TaskRecord task = mStackSupervisor.anyTaskForIdLocked(taskId);
+                if (task == null) {
+                    Slog.w(TAG, "setTaskWindowingMode: No task for id=" + taskId);
+                    return;
+                }
+
+                if (DEBUG_STACK) Slog.d(TAG_STACK, "setTaskWindowingMode: moving task=" + taskId
+                        + " to windowingMode=" + windowingMode + " toTop=" + toTop);
+                if (windowingMode == WINDOWING_MODE_SPLIT_SCREEN_PRIMARY) {
+                    mWindowManager.setDockedStackCreateState(DOCKED_STACK_CREATE_MODE_TOP_OR_LEFT,
+                            null /* initialBounds */);
+                }
+
+                if (!task.isActivityTypeStandardOrUndefined()) {
+                    throw new IllegalArgumentException("setTaskWindowingMode: Attempt to move task "
+                            + taskId + " to non-standard windowin mode=" + windowingMode);
+                }
+                final ActivityDisplay display = task.getStack().getDisplay();
+                final ActivityStack stack = display.getOrCreateStack(windowingMode,
+                        task.getStack().getActivityType(), toTop);
+                // TODO: We should just change the windowing mode for the task vs. creating and
+                // moving it to a stack.
+                task.reparent(stack, toTop, REPARENT_KEEP_STACK_AT_FRONT, ANIMATE, !DEFER_RESUME,
+                        "moveTaskToStack");
             } finally {
                 Binder.restoreCallingIdentity(ident);
             }
@@ -10582,10 +10666,6 @@ public class ActivityManagerService extends IActivityManager.Stub
     @Override
     public void moveTaskToStack(int taskId, int stackId, boolean toTop) {
         enforceCallingPermission(MANAGE_ACTIVITY_STACKS, "moveTaskToStack()");
-        if (StackId.isHomeOrRecentsStack(stackId)) {
-            throw new IllegalArgumentException(
-                    "moveTaskToStack: Attempt to move task " + taskId + " to stack " + stackId);
-        }
         synchronized (this) {
             long ident = Binder.clearCallingIdentity();
             try {
@@ -10601,58 +10681,25 @@ public class ActivityManagerService extends IActivityManager.Stub
                     mWindowManager.setDockedStackCreateState(DOCKED_STACK_CREATE_MODE_TOP_OR_LEFT,
                             null /* initialBounds */);
                 }
-                task.reparent(stackId, toTop,
-                        REPARENT_KEEP_STACK_AT_FRONT, ANIMATE, !DEFER_RESUME, "moveTaskToStack");
-            } finally {
-                Binder.restoreCallingIdentity(ident);
-            }
-        }
-    }
 
-    @Override
-    public void swapDockedAndFullscreenStack() throws RemoteException {
-        enforceCallingPermission(MANAGE_ACTIVITY_STACKS, "swapDockedAndFullscreenStack()");
-        synchronized (this) {
-            long ident = Binder.clearCallingIdentity();
-            try {
-                final ActivityStack fullscreenStack = mStackSupervisor.getStack(
-                        FULLSCREEN_WORKSPACE_STACK_ID);
-                final TaskRecord topTask = fullscreenStack != null ? fullscreenStack.topTask()
-                        : null;
-                final ActivityStack dockedStack = mStackSupervisor.getStack(DOCKED_STACK_ID);
-                final ArrayList<TaskRecord> tasks = dockedStack != null ? dockedStack.getAllTasks()
-                        : null;
-                if (topTask == null || tasks == null || tasks.size() == 0) {
-                    Slog.w(TAG,
-                            "Unable to swap tasks, either docked or fullscreen stack is empty.");
-                    return;
-                }
-
-                // TODO: App transition
-                mWindowManager.prepareAppTransition(TRANSIT_ACTIVITY_RELAUNCH, false);
-
-                // Defer the resume until we move all the docked tasks to the fullscreen stack below
-                topTask.reparent(DOCKED_STACK_ID, ON_TOP, REPARENT_KEEP_STACK_AT_FRONT, ANIMATE,
-                        DEFER_RESUME, "swapDockedAndFullscreenStack - DOCKED_STACK");
-                final int size = tasks.size();
-                for (int i = 0; i < size; i++) {
-                    final int id = tasks.get(i).taskId;
-                    if (id == topTask.taskId) {
-                        continue;
+                ActivityStack stack = mStackSupervisor.getStack(stackId);
+                if (stack == null) {
+                    if (!isStaticStack(stackId)) {
+                        throw new IllegalStateException(
+                                "moveTaskToStack: No stack for stackId=" + stackId);
                     }
-
-                    // Defer the resume until after all the tasks have been moved
-                    tasks.get(i).reparent(FULLSCREEN_WORKSPACE_STACK_ID, ON_TOP,
-                            REPARENT_KEEP_STACK_AT_FRONT, ANIMATE, DEFER_RESUME,
-                            "swapDockedAndFullscreenStack - FULLSCREEN_STACK");
+                    final ActivityDisplay display = task.getStack().getDisplay();
+                    final int windowingMode =
+                            getWindowingModeForStackId(stackId, display.hasSplitScreenStack());
+                    stack = display.getOrCreateStack(windowingMode,
+                            task.getStack().getActivityType(), toTop);
                 }
-
-                // Because we deferred the resume to avoid conflicts with stack switches while
-                // resuming, we need to do it after all the tasks are moved.
-                mStackSupervisor.ensureActivitiesVisibleLocked(null, 0, !PRESERVE_WINDOWS);
-                mStackSupervisor.resumeFocusedStackTopActivityLocked();
-
-                mWindowManager.executeAppTransition();
+                if (!stack.isActivityTypeStandardOrUndefined()) {
+                    throw new IllegalArgumentException("moveTaskToStack: Attempt to move task "
+                            + taskId + " to stack " + stackId);
+                }
+                task.reparent(stack, toTop, REPARENT_KEEP_STACK_AT_FRONT, ANIMATE, !DEFER_RESUME,
+                        "moveTaskToStack");
             } finally {
                 Binder.restoreCallingIdentity(ident);
             }
@@ -10685,13 +10732,18 @@ public class ActivityManagerService extends IActivityManager.Stub
                     Slog.w(TAG, "moveTaskToDockedStack: No task for id=" + taskId);
                     return false;
                 }
-
                 if (DEBUG_STACK) Slog.d(TAG_STACK, "moveTaskToDockedStack: moving task=" + taskId
                         + " to createMode=" + createMode + " toTop=" + toTop);
                 mWindowManager.setDockedStackCreateState(createMode, initialBounds);
 
+                final ActivityDisplay display = task.getStack().getDisplay();
+                final ActivityStack stack = display.getOrCreateStack(
+                        WINDOWING_MODE_SPLIT_SCREEN_PRIMARY, task.getStack().getActivityType(),
+                        toTop);
+
                 // Defer resuming until we move the home stack to the front below
-                final boolean moved = task.reparent(DOCKED_STACK_ID, toTop,
+                // TODO: Should just change windowing mode vs. re-parenting...
+                final boolean moved = task.reparent(stack, toTop,
                         REPARENT_KEEP_STACK_AT_FRONT, animate, !DEFER_RESUME,
                         "moveTaskToDockedStack");
                 if (moved) {
@@ -10701,6 +10753,66 @@ public class ActivityManagerService extends IActivityManager.Stub
             } finally {
                 Binder.restoreCallingIdentity(ident);
             }
+        }
+    }
+
+    /**
+     * Dismisses split-screen multi-window mode.
+     * @param toTop If true the current primary split-screen stack will be placed or left on top.
+     */
+    @Override
+    public void dismissSplitScreenMode(boolean toTop) {
+        enforceCallingPermission(MANAGE_ACTIVITY_STACKS, "dismissSplitScreenMode()");
+        final long ident = Binder.clearCallingIdentity();
+        try {
+            synchronized (this) {
+                final ActivityStack stack =
+                        mStackSupervisor.getDefaultDisplay().getSplitScreenStack();
+                if (toTop) {
+                    mStackSupervisor.resizeStackLocked(stack.mStackId, null /* destBounds */,
+                            null /* tempTaskBounds */, null /* tempTaskInsetBounds */,
+                            true /* preserveWindows */, true /* allowResizeInDockedMode */,
+                            !DEFER_RESUME);
+                } else {
+                    mStackSupervisor.moveTasksToFullscreenStackLocked(stack, false /* onTop */);
+                }
+            }
+        } finally {
+            Binder.restoreCallingIdentity(ident);
+        }
+    }
+
+    /**
+     * Dismisses Pip
+     * @param animate True if the dismissal should be animated.
+     * @param animationDuration The duration of the resize animation in milliseconds or -1 if the
+     *                          default animation duration should be used.
+     */
+    @Override
+    public void dismissPip(boolean animate, int animationDuration) {
+        enforceCallingPermission(MANAGE_ACTIVITY_STACKS, "dismissPip()");
+        final long ident = Binder.clearCallingIdentity();
+        try {
+            synchronized (this) {
+                final PinnedActivityStack stack =
+                        mStackSupervisor.getDefaultDisplay().getPinnedStack();
+
+                if (stack == null) {
+                    return;
+                }
+                if (stack.getWindowingMode() != WINDOWING_MODE_PINNED) {
+                    throw new IllegalArgumentException("Stack: " + stack
+                            + " doesn't support animated resize.");
+                }
+                if (animate) {
+                    stack.animateResizePinnedStack(null /* sourceHintBounds */,
+                            null /* destBounds */, animationDuration, false /* fromFullscreen */);
+                } else {
+                    mStackSupervisor.moveTasksToFullscreenStackLocked(stack, true /* onTop */);
+                }
+            }
+        } finally {
+            Binder.restoreCallingIdentity(ident);
         }
     }
 
@@ -10739,17 +10851,16 @@ public class ActivityManagerService extends IActivityManager.Stub
         try {
             synchronized (this) {
                 if (animate) {
-                    if (stackId == PINNED_STACK_ID) {
-                        final PinnedActivityStack pinnedStack =
-                                mStackSupervisor.getStack(PINNED_STACK_ID);
-                        if (pinnedStack != null) {
-                            pinnedStack.animateResizePinnedStack(null /* sourceHintBounds */,
-                                    destBounds, animationDuration, false /* fromFullscreen */);
-                        }
-                    } else {
+                    final PinnedActivityStack stack = mStackSupervisor.getStack(stackId);
+                    if (stack == null) {
+                        return;
+                    }
+                    if (stack.getWindowingMode() != WINDOWING_MODE_PINNED) {
                         throw new IllegalArgumentException("Stack: " + stackId
                                 + " doesn't support animated resize.");
                     }
+                    stack.animateResizePinnedStack(null /* sourceHintBounds */, destBounds,
+                            animationDuration, false /* fromFullscreen */);
                 } else {
                     mStackSupervisor.resizeStackLocked(stackId, destBounds, null /* tempTaskBounds */,
                             null /* tempTaskInsetBounds */, preserveWindows,
@@ -10801,11 +10912,6 @@ public class ActivityManagerService extends IActivityManager.Stub
     @Override
     public void positionTaskInStack(int taskId, int stackId, int position) {
         enforceCallingPermission(MANAGE_ACTIVITY_STACKS, "positionTaskInStack()");
-        if (StackId.isHomeOrRecentsStack(stackId)) {
-            throw new IllegalArgumentException(
-                    "positionTaskInStack: Attempt to change the position of task "
-                    + taskId + " in/to home/recents stack");
-        }
         synchronized (this) {
             long ident = Binder.clearCallingIdentity();
             try {
@@ -10817,8 +10923,16 @@ public class ActivityManagerService extends IActivityManager.Stub
                             + taskId);
                 }
 
-                final ActivityStack stack = mStackSupervisor.getStack(stackId, CREATE_IF_NEEDED,
-                        !ON_TOP);
+                final ActivityStack stack = mStackSupervisor.getStack(stackId);
+
+                if (stack == null) {
+                    throw new IllegalArgumentException("positionTaskInStack: no stack for id="
+                            + stackId);
+                }
+                if (!stack.isActivityTypeStandardOrUndefined()) {
+                    throw new IllegalArgumentException("positionTaskInStack: Attempt to change"
+                            + " the position of task " + taskId + " in/to non-standard stack");
+                }
 
                 // TODO: Have the callers of this API call a separate reparent method if that is
                 // what they intended to do vs. having this method also do reparenting.
@@ -10827,8 +10941,8 @@ public class ActivityManagerService extends IActivityManager.Stub
                     stack.positionChildAt(task, position);
                 } else {
                     // Reparent to new stack.
-                    task.reparent(stackId, position, REPARENT_LEAVE_STACK_IN_PLACE,
-                            !ANIMATE, !DEFER_RESUME, "positionTaskInStack");
+                    task.reparent(stack, position, REPARENT_LEAVE_STACK_IN_PLACE, !ANIMATE,
+                            !DEFER_RESUME, "positionTaskInStack");
                 }
             } finally {
                 Binder.restoreCallingIdentity(ident);
@@ -10850,12 +10964,12 @@ public class ActivityManagerService extends IActivityManager.Stub
     }
 
     @Override
-    public StackInfo getStackInfo(int stackId) {
+    public StackInfo getStackInfo(int windowingMode, int activityType) {
         enforceCallingPermission(MANAGE_ACTIVITY_STACKS, "getStackInfo()");
         long ident = Binder.clearCallingIdentity();
         try {
             synchronized (this) {
-                return mStackSupervisor.getStackInfoLocked(stackId);
+                return mStackSupervisor.getStackInfo(windowingMode, activityType);
             }
         } finally {
             Binder.restoreCallingIdentity(ident);
@@ -10882,7 +10996,6 @@ public class ActivityManagerService extends IActivityManager.Stub
 
     @Override
     public void updateLockTaskPackages(int userId, String[] packages) {
-        // TODO: move this into LockTaskController
         final int callingUid = Binder.getCallingUid();
         if (callingUid != 0 && callingUid != SYSTEM_UID) {
             enforceCallingPermission(android.Manifest.permission.UPDATE_LOCK_TASK_PACKAGES,
@@ -10891,8 +11004,7 @@ public class ActivityManagerService extends IActivityManager.Stub
         synchronized (this) {
             if (DEBUG_LOCKTASK) Slog.w(TAG_LOCKTASK, "Whitelisting " + userId + ":" +
                     Arrays.toString(packages));
-            mLockTaskPackages.put(userId, packages);
-            mLockTaskController.onLockTaskPackagesUpdated();
+            mLockTaskController.updateLockTaskPackages(userId, packages);
         }
     }
 
@@ -10908,11 +11020,7 @@ public class ActivityManagerService extends IActivityManager.Stub
         }
 
         // When a task is locked, dismiss the pinned stack if it exists
-        final PinnedActivityStack pinnedStack = mStackSupervisor.getStack(
-                PINNED_STACK_ID);
-        if (pinnedStack != null) {
-            mStackSupervisor.removeStackLocked(PINNED_STACK_ID);
-        }
+        mStackSupervisor.removeStacksInWindowingModes(WINDOWING_MODE_PINNED);
 
         // isAppPinning is used to distinguish between locked and pinned mode, as pinned mode
         // is initiated by system after the pinning request was shown and locked mode is initiated
@@ -11139,7 +11247,7 @@ public class ActivityManagerService extends IActivityManager.Stub
         boolean checkedGrants = false;
         if (checkUser) {
             // Looking for cross-user grants before enforcing the typical cross-users permissions
-            int tmpTargetUserId = mUserController.unsafeConvertIncomingUserLocked(userId);
+            int tmpTargetUserId = mUserController.unsafeConvertIncomingUser(userId);
             if (tmpTargetUserId != UserHandle.getUserId(callingUid)) {
                 if (checkAuthorityGrants(callingUid, cpi, tmpTargetUserId, checkUser)) {
                     return null;
@@ -11527,7 +11635,7 @@ public class ActivityManagerService extends IActivityManager.Stub
 
                 // Make sure that the user who owns this provider is running.  If not,
                 // we don't want to allow it to run.
-                if (!mUserController.isUserRunningLocked(userId, 0)) {
+                if (!mUserController.isUserRunning(userId, 0)) {
                     Slog.w(TAG, "Unable to launch app "
                             + cpi.applicationInfo.packageName + "/"
                             + cpi.applicationInfo.uid + " for provider "
@@ -12073,7 +12181,7 @@ public class ActivityManagerService extends IActivityManager.Stub
         //mUsageStatsService.monitorPackages();
     }
 
-    private void startPersistentApps(int matchFlags) {
+    void startPersistentApps(int matchFlags) {
         if (mFactoryTest == FactoryTest.FACTORY_TEST_LOW_LEVEL) return;
 
         synchronized (this) {
@@ -12094,7 +12202,7 @@ public class ActivityManagerService extends IActivityManager.Stub
      * When a user is unlocked, we need to install encryption-unaware providers
      * belonging to any running apps.
      */
-    private void installEncryptionUnawareProviders(int userId) {
+    void installEncryptionUnawareProviders(int userId) {
         // We're only interested in providers that are encryption unaware, and
         // we don't care about uninstalled apps, since there's no way they're
         // running at this point.
@@ -12157,9 +12265,7 @@ public class ActivityManagerService extends IActivityManager.Stub
         int callingPid = Binder.getCallingPid();
         long ident = 0;
         boolean clearedIdentity = false;
-        synchronized (this) {
-            userId = mUserController.unsafeConvertIncomingUserLocked(userId);
-        }
+        userId = mUserController.unsafeConvertIncomingUser(userId);
         if (canClearIdentity(callingPid, callingUid, userId)) {
             clearedIdentity = true;
             ident = Binder.clearCallingIdentity();
@@ -12399,19 +12505,14 @@ public class ActivityManagerService extends IActivityManager.Stub
 
     void onWakefulnessChanged(int wakefulness) {
         synchronized(this) {
+            boolean wasAwake = mWakefulness == PowerManagerInternal.WAKEFULNESS_AWAKE;
+            boolean isAwake = wakefulness == PowerManagerInternal.WAKEFULNESS_AWAKE;
             mWakefulness = wakefulness;
 
-            // Also update state in a special way for running foreground services UI.
-            switch (mWakefulness) {
-                case PowerManagerInternal.WAKEFULNESS_ASLEEP:
-                case PowerManagerInternal.WAKEFULNESS_DREAMING:
-                case PowerManagerInternal.WAKEFULNESS_DOZING:
-                    mServices.updateScreenStateLocked(false /* screenOn */);
-                    break;
-                case PowerManagerInternal.WAKEFULNESS_AWAKE:
-                default:
-                    mServices.updateScreenStateLocked(true /* screenOn */);
-                    break;
+            if (wasAwake != isAwake) {
+                // Also update state in a special way for running foreground services UI.
+                mServices.updateScreenStateLocked(isAwake);
+                sendNotifyVrManagerOfSleepState(!isAwake);
             }
         }
     }
@@ -12447,7 +12548,6 @@ public class ActivityManagerService extends IActivityManager.Stub
             }
             mStackSupervisor.applySleepTokensLocked(true /* applyToStacks */);
             if (wasSleeping) {
-                sendNotifyVrManagerOfSleepState(false);
                 updateOomAdjLocked();
             }
         } else if (!mSleeping && shouldSleep) {
@@ -12457,7 +12557,6 @@ public class ActivityManagerService extends IActivityManager.Stub
             }
             mTopProcessState = ActivityManager.PROCESS_STATE_TOP_SLEEPING;
             mStackSupervisor.goingToSleepLocked();
-            sendNotifyVrManagerOfSleepState(true);
             updateOomAdjLocked();
         }
     }
@@ -12551,7 +12650,7 @@ public class ActivityManagerService extends IActivityManager.Stub
     }
 
     @Override
-    public void setLockScreenShown(boolean showing) {
+    public void setLockScreenShown(boolean showing, int secondaryDisplayShowing) {
         if (checkCallingPermission(android.Manifest.permission.DEVICE_POWER)
                 != PackageManager.PERMISSION_GRANTED) {
             throw new SecurityException("Requires permission "
@@ -12561,11 +12660,12 @@ public class ActivityManagerService extends IActivityManager.Stub
         synchronized(this) {
             long ident = Binder.clearCallingIdentity();
             try {
-                mKeyguardController.setKeyguardShown(showing);
+                mKeyguardController.setKeyguardShown(showing, secondaryDisplayShowing);
             } finally {
                 Binder.restoreCallingIdentity(ident);
             }
         }
+        sendNotifyVrManagerOfKeyguardState(showing);
     }
 
     @Override
@@ -12584,7 +12684,7 @@ public class ActivityManagerService extends IActivityManager.Stub
                 if (mUserController.shouldConfirmCredentials(userId)) {
                     if (mKeyguardController.isKeyguardLocked()) {
                         // Showing launcher to avoid user entering credential twice.
-                        final int currentUserId = mUserController.getCurrentUserIdLocked();
+                        final int currentUserId = mUserController.getCurrentUserId();
                         startHomeActivityLocked(currentUserId, "notifyLockedProfile");
                     }
                     mStackSupervisor.lockAllProfileTasks(userId);
@@ -13982,10 +14082,10 @@ public class ActivityManagerService extends IActivityManager.Stub
                 mContext.getPackageManager().hasSystemFeature(FEATURE_FREEFORM_WINDOW_MANAGEMENT)
                         || Settings.Global.getInt(
                                 resolver, DEVELOPMENT_ENABLE_FREEFORM_WINDOWS_SUPPORT, 0) != 0;
-        final boolean supportsPictureInPicture =
-                mContext.getPackageManager().hasSystemFeature(FEATURE_PICTURE_IN_PICTURE);
 
         final boolean supportsMultiWindow = ActivityManager.supportsMultiWindow(mContext);
+        final boolean supportsPictureInPicture = supportsMultiWindow &&
+                mContext.getPackageManager().hasSystemFeature(FEATURE_PICTURE_IN_PICTURE);
         final boolean supportsSplitScreenMultiWindow =
                 ActivityManager.supportsSplitScreenMultiWindow(mContext);
         final boolean supportsMultiDisplay = mContext.getPackageManager()
@@ -14164,9 +14264,8 @@ public class ActivityManagerService extends IActivityManager.Stub
         }
 
         retrieveSettings();
-        final int currentUserId;
+        final int currentUserId = mUserController.getCurrentUserId();
         synchronized (this) {
-            currentUserId = mUserController.getCurrentUserIdLocked();
             readGrantedUriPermissionsLocked();
         }
 
@@ -14245,7 +14344,7 @@ public class ActivityManagerService extends IActivityManager.Stub
                 Binder.restoreCallingIdentity(ident);
             }
             mStackSupervisor.resumeFocusedStackTopActivityLocked();
-            mUserController.sendUserSwitchBroadcastsLocked(-1, currentUserId);
+            mUserController.sendUserSwitchBroadcasts(-1, currentUserId);
             traceLog.traceEnd(); // ActivityManagerStartApps
             traceLog.traceEnd(); // PhaseActivityManagerReady
         }
@@ -14597,6 +14696,9 @@ public class ActivityManagerService extends IActivityManager.Stub
                 }
                 sb.append("\n");
             }
+            if (process.info.isInstantApp()) {
+                sb.append("Instant-App: true\n");
+            }
         }
     }
 
@@ -14943,6 +15045,13 @@ public class ActivityManagerService extends IActivityManager.Stub
 
     @Override
     protected void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
+        PriorityDump.dump(mPriorityDumper, fd, pw, args);
+    }
+
+    /**
+     * Wrapper function to print out debug data filtered by specified arguments.
+    */
+    private void doDump(FileDescriptor fd, PrintWriter pw, String[] args) {
         if (!DumpUtils.checkDumpAndUsageStatsPermission(mContext, TAG, pw)) return;
 
         boolean dumpAll = false;
@@ -14951,6 +15060,7 @@ public class ActivityManagerService extends IActivityManager.Stub
         boolean dumpCheckinFormat = false;
         boolean dumpVisibleStacksOnly = false;
         boolean dumpFocusedStackOnly = false;
+        boolean useProto = false;
         String dumpPackage = null;
 
         int opti = 0;
@@ -14984,12 +15094,26 @@ public class ActivityManagerService extends IActivityManager.Stub
             } else if ("-h".equals(opt)) {
                 ActivityManagerShellCommand.dumpHelp(pw, true);
                 return;
+            } else if ("--proto".equals(opt)) {
+                useProto = true;
             } else {
                 pw.println("Unknown argument: " + opt + "; use -h for help");
             }
         }
 
         long origId = Binder.clearCallingIdentity();
+
+        if (useProto) {
+            //TODO: Options when dumping proto
+            final ProtoOutputStream proto = new ProtoOutputStream(fd);
+            synchronized (this) {
+                writeActivitiesToProtoLocked(proto);
+            }
+            proto.flush();
+            Binder.restoreCallingIdentity(origId);
+            return;
+        }
+
         boolean more = false;
         // Is the caller requesting to dump a particular piece of data?
         if (opti < args.length) {
@@ -15331,6 +15455,10 @@ public class ActivityManagerService extends IActivityManager.Stub
             }
         }
         Binder.restoreCallingIdentity(origId);
+    }
+
+    private void writeActivitiesToProtoLocked(ProtoOutputStream proto) {
+        mStackSupervisor.writeToProto(proto, ACTIVITIES);
     }
 
     private void dumpLastANRLocked(PrintWriter pw) {
@@ -19047,7 +19175,7 @@ public class ActivityManagerService extends IActivityManager.Stub
         // If not, we will just skip it. Make an exception for shutdown broadcasts
         // and upgrade steps.
 
-        if (userId != UserHandle.USER_ALL && !mUserController.isUserRunningLocked(userId, 0)) {
+        if (userId != UserHandle.USER_ALL && !mUserController.isUserRunning(userId, 0)) {
             if ((callingUid != SYSTEM_UID
                     || (intent.getFlags() & Intent.FLAG_RECEIVER_BOOT_UPGRADE) == 0)
                     && !Intent.ACTION_SHUTDOWN.equals(intent.getAction())) {
@@ -19466,7 +19594,7 @@ public class ActivityManagerService extends IActivityManager.Stub
         int[] users;
         if (userId == UserHandle.USER_ALL) {
             // Caller wants broadcast to go to all started users.
-            users = mUserController.getStartedUserArrayLocked();
+            users = mUserController.getStartedUserArray();
         } else {
             // Caller wants broadcast to go to one specific user.
             users = new int[] {userId};
@@ -20092,12 +20220,20 @@ public class ActivityManagerService extends IActivityManager.Stub
     }
 
     @Override
-    public int getFocusedStackId() throws RemoteException {
-        ActivityStack focusedStack = getFocusedStack();
-        if (focusedStack != null) {
-            return focusedStack.getStackId();
+    public StackInfo getFocusedStackInfo() throws RemoteException {
+        enforceCallingPermission(MANAGE_ACTIVITY_STACKS, "getStackInfo()");
+        long ident = Binder.clearCallingIdentity();
+        try {
+            synchronized (this) {
+                ActivityStack focusedStack = getFocusedStack();
+                if (focusedStack != null) {
+                    return mStackSupervisor.getStackInfo(focusedStack.mStackId);
+                }
+                return null;
+            }
+        } finally {
+            Binder.restoreCallingIdentity(ident);
         }
-        return -1;
     }
 
     public Configuration getConfiguration() {
@@ -20123,15 +20259,20 @@ public class ActivityManagerService extends IActivityManager.Stub
      *       activity and clearing the task at the same time.
      */
     @Override
+    // TODO: API should just be about changing windowing modes...
     public void moveTasksToFullscreenStack(int fromStackId, boolean onTop) {
         enforceCallingPermission(MANAGE_ACTIVITY_STACKS, "moveTasksToFullscreenStack()");
-        if (StackId.isHomeOrRecentsStack(fromStackId)) {
-            throw new IllegalArgumentException("You can't move tasks from the home/recents stack.");
-        }
         synchronized (this) {
             final long origId = Binder.clearCallingIdentity();
             try {
-                mStackSupervisor.moveTasksToFullscreenStackLocked(fromStackId, onTop);
+                final ActivityStack stack = mStackSupervisor.getStack(fromStackId);
+                if (stack != null){
+                    if (!stack.isActivityTypeStandardOrUndefined()) {
+                        throw new IllegalArgumentException(
+                                "You can't move tasks from non-standard stacks.");
+                    }
+                    mStackSupervisor.moveTasksToFullscreenStackLocked(stack, onTop);
+                }
             } finally {
                 Binder.restoreCallingIdentity(origId);
             }
@@ -20229,7 +20370,7 @@ public class ActivityManagerService extends IActivityManager.Stub
 
     void updateUserConfigurationLocked() {
         final Configuration configuration = new Configuration(getGlobalConfiguration());
-        final int currentUserId = mUserController.getCurrentUserIdLocked();
+        final int currentUserId = mUserController.getCurrentUserId();
         Settings.System.adjustConfigurationForUser(mContext.getContentResolver(), configuration,
                 currentUserId, Settings.System.canWrite(mContext));
         updateConfigurationLocked(configuration, null /* starting */, false /* initLocale */,
@@ -20340,7 +20481,7 @@ public class ActivityManagerService extends IActivityManager.Stub
         Slog.i(TAG, "Config changes=" + Integer.toHexString(changes) + " " + mTempConfig);
         // TODO(multi-display): Update UsageEvents#Event to include displayId.
         mUsageStatsService.reportConfigurationChange(mTempConfig,
-                mUserController.getCurrentUserIdLocked());
+                mUserController.getCurrentUserId());
 
         // TODO: If our config changes, should we auto dismiss any currently showing dialogs?
         mShowDialogs = shouldShowDialogs(mTempConfig);
@@ -22271,7 +22412,7 @@ public class ActivityManagerService extends IActivityManager.Stub
             String authority) {
         if (app == null) return;
         if (app.curProcState <= ActivityManager.PROCESS_STATE_IMPORTANT_FOREGROUND) {
-            UserState userState = mUserController.getStartedUserStateLocked(app.userId);
+            UserState userState = mUserController.getStartedUserState(app.userId);
             if (userState == null) return;
             final long now = SystemClock.elapsedRealtime();
             Long lastReported = userState.mProviderLastReportedFg.get(authority);
@@ -23566,54 +23707,7 @@ public class ActivityManagerService extends IActivityManager.Stub
 
     @Override
     public boolean switchUser(final int targetUserId) {
-        enforceShellRestriction(UserManager.DISALLOW_DEBUGGING_FEATURES, targetUserId);
-        int currentUserId;
-        UserInfo targetUserInfo;
-        synchronized (this) {
-            currentUserId = mUserController.getCurrentUserIdLocked();
-            targetUserInfo = mUserController.getUserInfo(targetUserId);
-            if (targetUserId == currentUserId) {
-                Slog.i(TAG, "user #" + targetUserId + " is already the current user");
-                return true;
-            }
-            if (targetUserInfo == null) {
-                Slog.w(TAG, "No user info for user #" + targetUserId);
-                return false;
-            }
-            if (!targetUserInfo.isDemo() && UserManager.isDeviceInDemoMode(mContext)) {
-                Slog.w(TAG, "Cannot switch to non-demo user #" + targetUserId
-                        + " when device is in demo mode");
-                return false;
-            }
-            if (!targetUserInfo.supportsSwitchTo()) {
-                Slog.w(TAG, "Cannot switch to User #" + targetUserId + ": not supported");
-                return false;
-            }
-            if (targetUserInfo.isManagedProfile()) {
-                Slog.w(TAG, "Cannot switch to User #" + targetUserId + ": not a full user");
-                return false;
-            }
-            mUserController.setTargetUserIdLocked(targetUserId);
-        }
-        if (mUserController.mUserSwitchUiEnabled) {
-            UserInfo currentUserInfo = mUserController.getUserInfo(currentUserId);
-            Pair<UserInfo, UserInfo> userNames = new Pair<>(currentUserInfo, targetUserInfo);
-            mUiHandler.removeMessages(START_USER_SWITCH_UI_MSG);
-            mUiHandler.sendMessage(mHandler.obtainMessage(
-                    START_USER_SWITCH_UI_MSG, userNames));
-        } else {
-            mHandler.removeMessages(START_USER_SWITCH_FG_MSG);
-            mHandler.sendMessage(mHandler.obtainMessage(
-                    START_USER_SWITCH_FG_MSG, targetUserId, 0));
-        }
-        return true;
-    }
-
-    void scheduleStartProfilesLocked() {
-        if (!mHandler.hasMessages(START_PROFILES_MSG)) {
-            mHandler.sendMessageDelayed(mHandler.obtainMessage(START_PROFILES_MSG),
-                    DateUtils.SECOND_IN_MILLIS);
-        }
+        return mUserController.switchUser(targetUserId);
     }
 
     @Override
@@ -23627,10 +23721,8 @@ public class ActivityManagerService extends IActivityManager.Stub
     }
 
     String getStartedUserState(int userId) {
-        synchronized (this) {
-            final UserState userState = mUserController.getStartedUserStateLocked(userId);
-            return UserState.stateToString(userState.state);
-        }
+        final UserState userState = mUserController.getStartedUserState(userId);
+        return UserState.stateToString(userState.state);
     }
 
     @Override
@@ -23645,9 +23737,7 @@ public class ActivityManagerService extends IActivityManager.Stub
             Slog.w(TAG, msg);
             throw new SecurityException(msg);
         }
-        synchronized (this) {
-            return mUserController.isUserRunningLocked(userId, flags);
-        }
+        return mUserController.isUserRunning(userId, flags);
     }
 
     @Override
@@ -23661,9 +23751,7 @@ public class ActivityManagerService extends IActivityManager.Stub
             Slog.w(TAG, msg);
             throw new SecurityException(msg);
         }
-        synchronized (this) {
-            return mUserController.getStartedUserArrayLocked();
-        }
+        return mUserController.getStartedUserArray();
     }
 
     @Override
@@ -23684,9 +23772,7 @@ public class ActivityManagerService extends IActivityManager.Stub
     }
 
     public boolean isUserStopped(int userId) {
-        synchronized (this) {
-            return mUserController.getStartedUserStateLocked(userId) == null;
-        }
+        return mUserController.getStartedUserState(userId) == null;
     }
 
     ActivityInfo getActivityInfoForUser(ActivityInfo aInfo, int userId) {
@@ -24025,7 +24111,7 @@ public class ActivityManagerService extends IActivityManager.Stub
         @Override
         public void notifyKeyguardTrustedChanged() {
             synchronized (ActivityManagerService.this) {
-                if (mKeyguardController.isKeyguardShowing()) {
+                if (mKeyguardController.isKeyguardShowing(DEFAULT_DISPLAY)) {
                     mStackSupervisor.ensureActivitiesVisibleLocked(null, 0, !PRESERVE_WINDOWS);
                 }
             }
@@ -24274,7 +24360,7 @@ public class ActivityManagerService extends IActivityManager.Stub
                 permission.INTERACT_ACROSS_USERS_FULL, "getLastResumedActivityUserId()");
         synchronized (this) {
             if (mLastResumedActivity == null) {
-                return mUserController.getCurrentUserIdLocked();
+                return mUserController.getCurrentUserId();
             }
             return mLastResumedActivity.userId;
         }
@@ -24481,7 +24567,7 @@ public class ActivityManagerService extends IActivityManager.Stub
                 if (updateFrameworkRes || packagesToUpdate.contains(packageName)) {
                     try {
                         final ApplicationInfo ai = AppGlobals.getPackageManager()
-                                .getApplicationInfo(packageName, 0 /*flags*/, app.userId);
+                                .getApplicationInfo(packageName, STOCK_PM_FLAGS, app.userId);
                         if (ai != null) {
                             app.thread.scheduleApplicationInfoChanged(ai);
                         }

@@ -103,6 +103,7 @@ import com.android.server.restrictions.RestrictionsManagerService;
 import com.android.server.security.KeyAttestationApplicationIdProviderService;
 import com.android.server.security.KeyChainSystemService;
 import com.android.server.soundtrigger.SoundTriggerService;
+import com.android.server.stats.StatsCompanionService;
 import com.android.server.statusbar.StatusBarManagerService;
 import com.android.server.storage.DeviceStorageMonitorService;
 import com.android.server.telecom.TelecomLoaderService;
@@ -151,7 +152,7 @@ public final class SystemServer {
      * them from the build system somehow.
      */
     private static final String BACKUP_MANAGER_SERVICE_CLASS =
-            "com.android.server.backup.BackupManagerService$Lifecycle";
+            "com.android.server.backup.RefactoredBackupManagerService$Lifecycle";
     private static final String APPWIDGET_SERVICE_CLASS =
             "com.android.server.appwidget.AppWidgetService";
     private static final String VOICE_RECOGNITION_MANAGER_SERVICE_CLASS =
@@ -667,9 +668,11 @@ public final class SystemServer {
         traceEnd();
 
         // Tracks whether the updatable WebView is in a ready state and watches for update installs.
-        traceBeginAndSlog("StartWebViewUpdateService");
-        mWebViewUpdateService = mSystemServiceManager.startService(WebViewUpdateService.class);
-        traceEnd();
+        if (mPackageManager.hasSystemFeature(PackageManager.FEATURE_WEBVIEW)) {
+            traceBeginAndSlog("StartWebViewUpdateService");
+            mWebViewUpdateService = mSystemServiceManager.startService(WebViewUpdateService.class);
+            traceEnd();
+        }
     }
 
     /**
@@ -681,6 +684,7 @@ public final class SystemServer {
         VibratorService vibrator = null;
         IStorageManager storageManager = null;
         NetworkManagementService networkManagement = null;
+        IpSecService ipSecService = null;
         NetworkStatsService networkStats = null;
         NetworkPolicyManagerService networkPolicy = null;
         ConnectivityService connectivity = null;
@@ -1030,6 +1034,15 @@ public final class SystemServer {
                     reportWtf("starting NetworkManagement Service", e);
                 }
                 traceEnd();
+
+                traceBeginAndSlog("StartIpSecService");
+                try {
+                    ipSecService = IpSecService.create(context);
+                    ServiceManager.addService(Context.IPSEC_SERVICE, ipSecService);
+                } catch (Throwable e) {
+                    reportWtf("starting IpSec Service", e);
+                }
+                traceEnd();
             }
 
             if (!disableNonCoreServices && !disableTextServices) {
@@ -1080,6 +1093,14 @@ public final class SystemServer {
                     traceBeginAndSlog("StartWifiRtt");
                     mSystemServiceManager.startService("com.android.server.wifi.RttService");
                     traceEnd();
+
+                    if (context.getPackageManager().hasSystemFeature(
+                            PackageManager.FEATURE_WIFI_RTT)) {
+                        traceBeginAndSlog("StartRttService");
+                        mSystemServiceManager.startService(
+                                "com.android.server.wifi.rtt.RttService");
+                        traceEnd();
+                    }
                 }
 
                 if (context.getPackageManager().hasSystemFeature(
@@ -1087,8 +1108,6 @@ public final class SystemServer {
                     traceBeginAndSlog("StartWifiAware");
                     mSystemServiceManager.startService(WIFI_AWARE_SERVICE_CLASS);
                     traceEnd();
-                } else {
-                    Slog.i(TAG, "No Wi-Fi Aware Service (Aware support Not Present)");
                 }
 
                 if (context.getPackageManager().hasSystemFeature(
@@ -1146,20 +1165,6 @@ public final class SystemServer {
                 traceEnd();
             }
 
-            /*
-             * StorageManagerService has a few dependencies: Notification Manager and
-             * AppWidget Provider. Make sure StorageManagerService is completely started
-             * first before continuing.
-             */
-            if (storageManager != null && !mOnlyCore) {
-                traceBeginAndSlog("WaitForAsecScan");
-                try {
-                    storageManager.waitForAsecScan();
-                } catch (RemoteException ignored) {
-                }
-                traceEnd();
-            }
-
             traceBeginAndSlog("StartNotificationManager");
             mSystemServiceManager.startService(NotificationManagerService.class);
             SystemNotificationChannels.createAll(context);
@@ -1206,18 +1211,6 @@ public final class SystemServer {
                         R.bool.config_enableWallpaperService)) {
                 traceBeginAndSlog("StartWallpaperManagerService");
                 mSystemServiceManager.startService(WALLPAPER_SERVICE_CLASS);
-                traceEnd();
-            }
-
-            // timezone.RulesManagerService will prevent a device starting up if the chain of trust
-            // required for safe time zone updates might be broken. RuleManagerService cannot do
-            // this check when mOnlyCore == true, so we don't enable the service in this case.
-            final boolean startRulesManagerService =
-                    !mOnlyCore && context.getResources().getBoolean(
-                            R.bool.config_enableUpdateableTimeZoneRules);
-            if (startRulesManagerService) {
-                traceBeginAndSlog("StartTimeZoneRulesManagerService");
-                mSystemServiceManager.startService(TIME_ZONE_RULES_MANAGER_SERVICE_CLASS);
                 traceEnd();
             }
 
@@ -1360,6 +1353,19 @@ public final class SystemServer {
                 reportWtf("starting DiskStats Service", e);
             }
             traceEnd();
+
+            // timezone.RulesManagerService will prevent a device starting up if the chain of trust
+            // required for safe time zone updates might be broken. RuleManagerService cannot do
+            // this check when mOnlyCore == true, so we don't enable the service in this case.
+            // This service requires that JobSchedulerService is already started when it starts.
+            final boolean startRulesManagerService =
+                    !mOnlyCore && context.getResources().getBoolean(
+                            R.bool.config_enableUpdateableTimeZoneRules);
+            if (startRulesManagerService) {
+                traceBeginAndSlog("StartTimeZoneRulesManagerService");
+                mSystemServiceManager.startService(TIME_ZONE_RULES_MANAGER_SERVICE_CLASS);
+                traceEnd();
+            }
 
             if (!disableNetwork && !disableNetworkTime) {
                 traceBeginAndSlog("StartNetworkTimeUpdateService");
@@ -1536,6 +1542,11 @@ public final class SystemServer {
             traceEnd();
         }
 
+        // Statsd helper
+        traceBeginAndSlog("StartStatsCompanionService");
+        mSystemServiceManager.startService(StatsCompanionService.Lifecycle.class);
+        traceEnd();
+
         // Before things start rolling, be sure we have decided whether
         // we are in safe mode.
         final boolean safeMode = wm.detectSafeMode();
@@ -1661,6 +1672,7 @@ public final class SystemServer {
         final TelephonyRegistry telephonyRegistryF = telephonyRegistry;
         final MediaRouterService mediaRouterF = mediaRouter;
         final MmsServiceBroker mmsServiceF = mmsService;
+        final IpSecService ipSecServiceF = ipSecService;
         final WindowManagerService windowManagerF = wm;
 
         // We now tell the activity manager it is okay to run third party
@@ -1683,10 +1695,10 @@ public final class SystemServer {
             traceEnd();
 
             // No dependency on Webview preparation in system server. But this should
-            // be completed before allowring 3rd party
+            // be completed before allowing 3rd party
             final String WEBVIEW_PREPARATION = "WebViewFactoryPreparation";
             Future<?> webviewPrep = null;
-            if (!mOnlyCore) {
+            if (!mOnlyCore && mWebViewUpdateService != null) {
                 webviewPrep = SystemServerInitThreadPool.get().submit(() -> {
                     Slog.i(TAG, WEBVIEW_PREPARATION);
                     TimingsTraceLog traceLog = new TimingsTraceLog(
@@ -1729,6 +1741,13 @@ public final class SystemServer {
             if (networkPolicyF != null) {
                 networkPolicyInitReadySignal = networkPolicyF
                         .networkScoreAndNetworkManagementServiceReady();
+            }
+            traceEnd();
+            traceBeginAndSlog("MakeIpSecServiceReady");
+            try {
+                if (ipSecServiceF != null) ipSecServiceF.systemReady();
+            } catch (Throwable e) {
+                reportWtf("making IpSec Service ready", e);
             }
             traceEnd();
             traceBeginAndSlog("MakeNetworkStatsServiceReady");

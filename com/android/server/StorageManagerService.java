@@ -111,8 +111,6 @@ import com.android.internal.util.HexDump;
 import com.android.internal.util.IndentingPrintWriter;
 import com.android.internal.util.Preconditions;
 import com.android.internal.widget.LockPatternUtils;
-import com.android.server.NativeDaemonConnector.Command;
-import com.android.server.NativeDaemonConnector.SensitiveArg;
 import com.android.server.pm.PackageManagerService;
 import com.android.server.storage.AppFuseBridge;
 
@@ -138,7 +136,6 @@ import java.security.spec.KeySpec;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
@@ -161,8 +158,7 @@ import javax.crypto.spec.PBEKeySpec;
  * watch for and manage dynamically added storage, such as SD cards and USB mass
  * storage. Also decides how storage should be presented to users on the device.
  */
-class StorageManagerService extends IStorageManager.Stub
-        implements INativeDaemonConnectorCallbacks, Watchdog.Monitor {
+class StorageManagerService extends IStorageManager.Stub implements Watchdog.Monitor {
 
     // Static direct instance pointer for the tightly-coupled idle service to use
     static StorageManagerService sSelf = null;
@@ -206,17 +202,11 @@ class StorageManagerService extends IStorageManager.Stub
         }
     }
 
-    /** Flag to enable binder-based interface to vold */
-    private static final boolean ENABLE_BINDER = true;
-
     private static final boolean DEBUG_EVENTS = false;
     private static final boolean DEBUG_OBB = false;
 
     // Disable this since it messes up long-running cryptfs operations.
     private static final boolean WATCHDOG_ENABLE = false;
-
-    /** Flag to enable ASECs */
-    private static final boolean ASEC_ENABLE = false;
 
     /**
      * Our goal is for all Android devices to be usable as development devices,
@@ -232,65 +222,8 @@ class StorageManagerService extends IStorageManager.Stub
     private static final String TAG_STORAGE_BENCHMARK = "storage_benchmark";
     private static final String TAG_STORAGE_TRIM = "storage_trim";
 
-    private static final String VOLD_TAG = "VoldConnector";
-    private static final String CRYPTD_TAG = "CryptdConnector";
-
-    /** Maximum number of ASEC containers allowed to be mounted. */
-    private static final int MAX_CONTAINERS = 250;
-
     /** Magic value sent by MoveTask.cpp */
     private static final int MOVE_STATUS_COPY_FINISHED = 82;
-
-    /*
-     * Internal vold response code constants
-     */
-    class VoldResponseCode {
-        /*
-         * 100 series - Requestion action was initiated; expect another reply
-         *              before proceeding with a new command.
-         */
-        public static final int VolumeListResult               = 110;
-        public static final int AsecListResult                 = 111;
-        public static final int StorageUsersListResult         = 112;
-        public static final int CryptfsGetfieldResult          = 113;
-
-        /*
-         * 200 series - Requestion action has been successfully completed.
-         */
-        public static final int ShareStatusResult              = 210;
-        public static final int AsecPathResult                 = 211;
-        public static final int ShareEnabledResult             = 212;
-
-        /*
-         * 400 series - Command was accepted, but the requested action
-         *              did not take place.
-         */
-        public static final int OpFailedNoMedia                = 401;
-        public static final int OpFailedMediaBlank             = 402;
-        public static final int OpFailedMediaCorrupt           = 403;
-        public static final int OpFailedVolNotMounted          = 404;
-        public static final int OpFailedStorageBusy            = 405;
-        public static final int OpFailedStorageNotFound        = 406;
-
-        /*
-         * 600 series - Unsolicited broadcasts.
-         */
-        public static final int DISK_CREATED = 640;
-        public static final int DISK_SIZE_CHANGED = 641;
-        public static final int DISK_LABEL_CHANGED = 642;
-        public static final int DISK_SCANNED = 643;
-        public static final int DISK_SYS_PATH_CHANGED = 644;
-        public static final int DISK_DESTROYED = 649;
-
-        public static final int VOLUME_CREATED = 650;
-        public static final int VOLUME_STATE_CHANGED = 651;
-        public static final int VOLUME_FS_TYPE_CHANGED = 652;
-        public static final int VOLUME_FS_UUID_CHANGED = 653;
-        public static final int VOLUME_FS_LABEL_CHANGED = 654;
-        public static final int VOLUME_PATH_CHANGED = 655;
-        public static final int VOLUME_INTERNAL_PATH_CHANGED = 656;
-        public static final int VOLUME_DESTROYED = 659;
-    }
 
     private static final int VERSION_INIT = 1;
     private static final int VERSION_ADD_PRIMARY = 2;
@@ -453,17 +386,6 @@ class StorageManagerService extends IStorageManager.Stub
         }
     }
 
-    private static String escapeNull(String arg) {
-        if (TextUtils.isEmpty(arg)) {
-            return "!";
-        } else {
-            if (arg.indexOf('\0') != -1 || arg.indexOf(' ') != -1) {
-                throw new IllegalArgumentException(arg);
-            }
-            return arg;
-        }
-    }
-
     /** List of crypto types.
       * These must match CRYPT_TYPE_XXX in cryptfs.h AND their
       * corresponding commands in CommandListener.cpp */
@@ -471,12 +393,6 @@ class StorageManagerService extends IStorageManager.Stub
         = { "password", "default", "pattern", "pin" };
 
     private final Context mContext;
-
-    private final NativeDaemonConnector mConnector;
-    private final NativeDaemonConnector mCryptConnector;
-
-    private final Thread mConnectorThread;
-    private final Thread mCryptConnectorThread;
 
     private volatile IVold mVold;
 
@@ -488,20 +404,6 @@ class StorageManagerService extends IStorageManager.Stub
 
     private final Callbacks mCallbacks;
     private final LockPatternUtils mLockPatternUtils;
-
-    // Two connectors - mConnector & mCryptConnector
-    private final CountDownLatch mConnectedSignal = new CountDownLatch(2);
-    private final CountDownLatch mAsecsScanned = new CountDownLatch(1);
-
-    private final Object mUnmountLock = new Object();
-    @GuardedBy("mUnmountLock")
-    private CountDownLatch mUnmountSignal;
-
-    /**
-     * Private hash of currently mounted secure containers.
-     * Used as a lock in methods to manipulate secure containers.
-     */
-    final private HashSet<String> mAsecMountSet = new HashSet<String>();
 
     /**
      * The size of the crypto algorithm key in bits for OBB files. Currently
@@ -616,7 +518,7 @@ class StorageManagerService extends IStorageManager.Stub
             if (DEBUG_OBB)
                 Slog.i(TAG, "onServiceDisconnected");
         }
-    };
+    }
 
     // Used in the ObbActionHandler
     private IMediaContainerService mContainerService = null;
@@ -655,13 +557,6 @@ class StorageManagerService extends IStorageManager.Stub
                     break;
                 }
                 case H_FSTRIM: {
-                    if (!isReady()) {
-                        Slog.i(TAG, "fstrim requested, but no daemon connection yet; trying again");
-                        sendMessageDelayed(obtainMessage(H_FSTRIM, msg.obj),
-                                DateUtils.SECOND_IN_MILLIS);
-                        break;
-                    }
-
                     Slog.i(TAG, "Running fstrim idle maintenance");
 
                     // Remember when we kicked it off
@@ -687,12 +582,8 @@ class StorageManagerService extends IStorageManager.Stub
                     final IStorageShutdownObserver obs = (IStorageShutdownObserver) msg.obj;
                     boolean success = false;
                     try {
-                        if (ENABLE_BINDER) {
-                            mVold.shutdown();
-                            success = true;
-                        } else {
-                            success = mConnector.execute("volume", "shutdown").isClassOk();
-                        }
+                        mVold.shutdown();
+                        success = true;
                     } catch (Exception e) {
                         Slog.wtf(TAG, e);
                     }
@@ -711,12 +602,7 @@ class StorageManagerService extends IStorageManager.Stub
                         break;
                     }
                     try {
-                        if (ENABLE_BINDER) {
-                            mVold.mount(vol.id, vol.mountFlags, vol.mountUserId);
-                        } else {
-                            mConnector.execute("volume", "mount", vol.id, vol.mountFlags,
-                                    vol.mountUserId);
-                        }
+                        mVold.mount(vol.id, vol.mountFlags, vol.mountUserId);
                     } catch (Exception e) {
                         Slog.wtf(TAG, e);
                     }
@@ -778,11 +664,7 @@ class StorageManagerService extends IStorageManager.Stub
                 if (Intent.ACTION_USER_ADDED.equals(action)) {
                     final UserManager um = mContext.getSystemService(UserManager.class);
                     final int userSerialNumber = um.getUserSerialNumber(userId);
-                    if (ENABLE_BINDER) {
-                        mVold.onUserAdded(userId, userSerialNumber);
-                    } else {
-                        mConnector.execute("volume", "user_added", userId, userSerialNumber);
-                    }
+                    mVold.onUserAdded(userId, userSerialNumber);
                 } else if (Intent.ACTION_USER_REMOVED.equals(action)) {
                     synchronized (mVolumes) {
                         final int size = mVolumes.size();
@@ -794,33 +676,13 @@ class StorageManagerService extends IStorageManager.Stub
                             }
                         }
                     }
-                    if (ENABLE_BINDER) {
-                        mVold.onUserRemoved(userId);
-                    } else {
-                        mConnector.execute("volume", "user_removed", userId);
-                    }
+                    mVold.onUserRemoved(userId);
                 }
             } catch (Exception e) {
                 Slog.wtf(TAG, e);
             }
         }
     };
-
-    @Override
-    public void waitForAsecScan() {
-        waitForLatch(mAsecsScanned, "mAsecsScanned");
-    }
-
-    private void waitForReady() {
-        waitForLatch(mConnectedSignal, "mConnectedSignal");
-    }
-
-    private void waitForLatch(CountDownLatch latch, String condition) {
-        try {
-            waitForLatch(latch, condition, -1);
-        } catch (TimeoutException ignored) {
-        }
-    }
 
     private void waitForLatch(CountDownLatch latch, String condition, long timeoutMillis)
             throws TimeoutException {
@@ -840,14 +702,6 @@ class StorageManagerService extends IStorageManager.Stub
                 throw new TimeoutException("Thread " + Thread.currentThread().getName()
                         + " gave up waiting for " + condition + " after " + timeoutMillis + "ms");
             }
-        }
-    }
-
-    private boolean isReady() {
-        try {
-            return mConnectedSignal.await(0, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException e) {
-            return false;
         }
     }
 
@@ -917,19 +771,10 @@ class StorageManagerService extends IStorageManager.Stub
             for (UserInfo user : users) {
                 try {
                     if (initLocked) {
-                        if (ENABLE_BINDER) {
-                            mVold.lockUserKey(user.id);
-                        } else {
-                            mCryptConnector.execute("cryptfs", "lock_user_key", user.id);
-                        }
+                        mVold.lockUserKey(user.id);
                     } else {
-                        if (ENABLE_BINDER) {
-                            mVold.unlockUserKey(user.id, user.serialNumber, encodeBytes(null),
-                                    encodeBytes(null));
-                        } else {
-                            mCryptConnector.execute("cryptfs", "unlock_user_key", user.id,
-                                    user.serialNumber, "!", "!");
-                        }
+                        mVold.unlockUserKey(user.id, user.serialNumber, encodeBytes(null),
+                                encodeBytes(null));
                     }
                 } catch (Exception e) {
                     Slog.wtf(TAG, e);
@@ -956,26 +801,14 @@ class StorageManagerService extends IStorageManager.Stub
             }
 
             try {
-                if (ENABLE_BINDER) {
-                    mVold.reset();
-                } else {
-                    mConnector.execute("volume", "reset");
-                }
+                mVold.reset();
 
                 // Tell vold about all existing and started users
                 for (UserInfo user : users) {
-                    if (ENABLE_BINDER) {
-                        mVold.onUserAdded(user.id, user.serialNumber);
-                    } else {
-                        mConnector.execute("volume", "user_added", user.id, user.serialNumber);
-                    }
+                    mVold.onUserAdded(user.id, user.serialNumber);
                 }
                 for (int userId : systemUnlockedUsers) {
-                    if (ENABLE_BINDER) {
-                        mVold.onUserStarted(userId);
-                    } else {
-                        mConnector.execute("volume", "user_started", userId);
-                    }
+                    mVold.onUserStarted(userId);
                 }
             } catch (Exception e) {
                 Slog.wtf(TAG, e);
@@ -990,11 +823,7 @@ class StorageManagerService extends IStorageManager.Stub
         // staging area is ready so it's ready for zygote-forked apps to
         // bind mount against.
         try {
-            if (ENABLE_BINDER) {
-                mVold.onUserStarted(userId);
-            } else {
-                mConnector.execute("volume", "user_started", userId);
-            }
+            mVold.onUserStarted(userId);
         } catch (Exception e) {
             Slog.wtf(TAG, e);
         }
@@ -1020,11 +849,7 @@ class StorageManagerService extends IStorageManager.Stub
         Slog.d(TAG, "onCleanupUser " + userId);
 
         try {
-            if (ENABLE_BINDER) {
-                mVold.onUserStopped(userId);
-            } else {
-                mConnector.execute("volume", "user_stopped", userId);
-            }
+            mVold.onUserStopped(userId);
         } catch (Exception e) {
             Slog.wtf(TAG, e);
         }
@@ -1050,10 +875,6 @@ class StorageManagerService extends IStorageManager.Stub
         return mLastMaintenance;
     }
 
-    /**
-     * Callback from NativeDaemonConnector
-     */
-    @Override
     public void onDaemonConnected() {
         mDaemonConnected = true;
         mHandler.obtainMessage(H_DAEMON_CONNECTED).sendToTarget();
@@ -1063,29 +884,11 @@ class StorageManagerService extends IStorageManager.Stub
         initIfReadyAndConnected();
         resetIfReadyAndConnected();
 
-        /*
-         * Now that we've done our initialization, release
-         * the hounds!
-         */
-        mConnectedSignal.countDown();
-        if (mConnectedSignal.getCount() != 0) {
-            // More daemons need to connect
-            return;
-        }
-
         // On an encrypted device we can't see system properties yet, so pull
         // the system locale out of the mount service.
         if ("".equals(SystemProperties.get("vold.encrypt_progress"))) {
             copyLocaleFromMountService();
         }
-
-        // Let package manager load internal ASECs.
-        if (ASEC_ENABLE) {
-            mPms.scanAvailableAsecs();
-        }
-
-        // Notify people waiting for ASECs to be scanned that it's done.
-        mAsecsScanned.countDown();
     }
 
     private void copyLocaleFromMountService() {
@@ -1112,148 +915,6 @@ class StorageManagerService extends IStorageManager.Stub
         // Temporary workaround for http://b/17945169.
         Slog.d(TAG, "Setting system properties to " + systemLocale + " from mount service");
         SystemProperties.set("persist.sys.locale", locale.toLanguageTag());
-    }
-
-    /**
-     * Callback from NativeDaemonConnector
-     */
-    @Override
-    public boolean onCheckHoldWakeLock(int code) {
-        return false;
-    }
-
-    /**
-     * Callback from NativeDaemonConnector
-     */
-    @Override
-    public boolean onEvent(int code, String raw, String[] cooked) {
-        synchronized (mLock) {
-            try {
-                return onEventLocked(code, raw, cooked);
-            } catch (RemoteException e) {
-                throw e.rethrowAsRuntimeException();
-            }
-        }
-    }
-
-    private boolean onEventLocked(int code, String raw, String[] cooked) throws RemoteException {
-        switch (code) {
-            case VoldResponseCode.DISK_CREATED: {
-                if (cooked.length != 3) break;
-                final String diskId = cooked[1];
-                final int flags = Integer.parseInt(cooked[2]);
-                mListener.onDiskCreated(diskId, flags);
-                break;
-            }
-            case VoldResponseCode.DISK_SIZE_CHANGED: {
-                if (cooked.length != 3) break;
-                final DiskInfo disk = mDisks.get(cooked[1]);
-                if (disk != null) {
-                    disk.size = Long.parseLong(cooked[2]);
-                }
-                break;
-            }
-            case VoldResponseCode.DISK_LABEL_CHANGED: {
-                final DiskInfo disk = mDisks.get(cooked[1]);
-                if (disk != null) {
-                    final StringBuilder builder = new StringBuilder();
-                    for (int i = 2; i < cooked.length; i++) {
-                        builder.append(cooked[i]).append(' ');
-                    }
-                    disk.label = builder.toString().trim();
-                }
-                break;
-            }
-            case VoldResponseCode.DISK_SCANNED: {
-                if (cooked.length != 2) break;
-                final String diskId = cooked[1];
-                mListener.onDiskScanned(diskId);
-                break;
-            }
-            case VoldResponseCode.DISK_SYS_PATH_CHANGED: {
-                if (cooked.length != 3) break;
-                final DiskInfo disk = mDisks.get(cooked[1]);
-                if (disk != null) {
-                    disk.sysPath = cooked[2];
-                }
-                break;
-            }
-            case VoldResponseCode.DISK_DESTROYED: {
-                if (cooked.length != 2) break;
-                final String diskId = cooked[1];
-                mListener.onDiskDestroyed(diskId);
-                break;
-            }
-
-            case VoldResponseCode.VOLUME_CREATED: {
-                final String volId = cooked[1];
-                final int type = Integer.parseInt(cooked[2]);
-                final String diskId = TextUtils.nullIfEmpty(cooked[3]);
-                final String partGuid = TextUtils.nullIfEmpty(cooked[4]);
-                mListener.onVolumeCreated(volId, type, diskId, partGuid);
-                break;
-            }
-            case VoldResponseCode.VOLUME_STATE_CHANGED: {
-                if (cooked.length != 3) break;
-                final String volId = cooked[1];
-                final int state = Integer.parseInt(cooked[2]);
-                mListener.onVolumeStateChanged(volId, state);
-                break;
-            }
-            case VoldResponseCode.VOLUME_FS_TYPE_CHANGED: {
-                if (cooked.length != 3) break;
-                final VolumeInfo vol = mVolumes.get(cooked[1]);
-                if (vol != null) {
-                    vol.fsType = cooked[2];
-                }
-                break;
-            }
-            case VoldResponseCode.VOLUME_FS_UUID_CHANGED: {
-                if (cooked.length != 3) break;
-                final VolumeInfo vol = mVolumes.get(cooked[1]);
-                if (vol != null) {
-                    vol.fsUuid = cooked[2];
-                }
-                break;
-            }
-            case VoldResponseCode.VOLUME_FS_LABEL_CHANGED: {
-                final VolumeInfo vol = mVolumes.get(cooked[1]);
-                if (vol != null) {
-                    final StringBuilder builder = new StringBuilder();
-                    for (int i = 2; i < cooked.length; i++) {
-                        builder.append(cooked[i]).append(' ');
-                    }
-                    vol.fsLabel = builder.toString().trim();
-                }
-                // TODO: notify listeners that label changed
-                break;
-            }
-            case VoldResponseCode.VOLUME_PATH_CHANGED: {
-                if (cooked.length != 3) break;
-                final String volId = cooked[1];
-                final String path = cooked[2];
-                mListener.onVolumePathChanged(volId, path);
-                break;
-            }
-            case VoldResponseCode.VOLUME_INTERNAL_PATH_CHANGED: {
-                if (cooked.length != 3) break;
-                final String volId = cooked[1];
-                final String internalPath = cooked[2];
-                mListener.onVolumeInternalPathChanged(volId, internalPath);
-                break;
-            }
-            case VoldResponseCode.VOLUME_DESTROYED: {
-                if (cooked.length != 2) break;
-                final String volId = cooked[1];
-                mListener.onVolumeDestroyed(volId);
-                break;
-            }
-            default: {
-                Slog.d(TAG, "Unhandled vold event " + code);
-            }
-        }
-
-        return true;
     }
 
     private final IVoldListener mListener = new IVoldListener.Stub() {
@@ -1654,24 +1315,6 @@ class StorageManagerService extends IStorageManager.Stub
 
         LocalServices.addService(StorageManagerInternal.class, mStorageManagerInternal);
 
-        /*
-         * Create the connection to vold with a maximum queue of twice the
-         * amount of containers we'd ever expect to have. This keeps an
-         * "asec list" from blocking a thread repeatedly.
-         */
-
-        mConnector = new NativeDaemonConnector(this, "vold", MAX_CONTAINERS * 2, VOLD_TAG, 25,
-                null);
-        mConnector.setDebug(true);
-        mConnector.setWarnIfHeld(mLock);
-        mConnectorThread = new Thread(mConnector, VOLD_TAG);
-
-        // Reuse parameters from first connector since they are tested and safe
-        mCryptConnector = new NativeDaemonConnector(this, "cryptd",
-                MAX_CONTAINERS * 2, CRYPTD_TAG, 25, null);
-        mCryptConnector.setDebug(true);
-        mCryptConnectorThread = new Thread(mCryptConnector, CRYPTD_TAG);
-
         final IntentFilter userFilter = new IntentFilter();
         userFilter.addAction(Intent.ACTION_USER_ADDED);
         userFilter.addAction(Intent.ACTION_USER_REMOVED);
@@ -1689,8 +1332,6 @@ class StorageManagerService extends IStorageManager.Stub
 
     private void start() {
         connect();
-        mConnectorThread.start();
-        mCryptConnectorThread.start();
     }
 
     private void connect() {
@@ -1713,6 +1354,7 @@ class StorageManagerService extends IStorageManager.Stub
             mVold = IVold.Stub.asInterface(binder);
             try {
                 mVold.setListener(mListener);
+                onDaemonConnected();
                 return;
             } catch (RemoteException e) {
                 Slog.w(TAG, "vold listener rejected; trying again", e);
@@ -1864,62 +1506,15 @@ class StorageManagerService extends IStorageManager.Stub
     }
 
     @Override
-    public boolean isUsbMassStorageConnected() {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public void setUsbMassStorageEnabled(boolean enable) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public boolean isUsbMassStorageEnabled() {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public String getVolumeState(String mountPoint) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public boolean isExternalStorageEmulated() {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public int mountVolume(String path) {
-        mount(findVolumeIdForPathOrThrow(path));
-        return 0;
-    }
-
-    @Override
-    public void unmountVolume(String path, boolean force, boolean removeEncryption) {
-        unmount(findVolumeIdForPathOrThrow(path));
-    }
-
-    @Override
-    public int formatVolume(String path) {
-        format(findVolumeIdForPathOrThrow(path));
-        return 0;
-    }
-
-    @Override
     public void mount(String volId) {
         enforcePermission(android.Manifest.permission.MOUNT_UNMOUNT_FILESYSTEMS);
-        waitForReady();
 
         final VolumeInfo vol = findVolumeByIdOrThrow(volId);
         if (isMountDisallowed(vol)) {
             throw new SecurityException("Mounting " + volId + " restricted by policy");
         }
         try {
-            if (ENABLE_BINDER) {
-                mVold.mount(vol.id, vol.mountFlags, vol.mountUserId);
-            } else {
-                mConnector.execute("volume", "mount", vol.id, vol.mountFlags, vol.mountUserId);
-            }
+            mVold.mount(vol.id, vol.mountFlags, vol.mountUserId);
         } catch (Exception e) {
             Slog.wtf(TAG, e);
         }
@@ -1928,31 +1523,10 @@ class StorageManagerService extends IStorageManager.Stub
     @Override
     public void unmount(String volId) {
         enforcePermission(android.Manifest.permission.MOUNT_UNMOUNT_FILESYSTEMS);
-        waitForReady();
 
         final VolumeInfo vol = findVolumeByIdOrThrow(volId);
-
-        // TODO: expand PMS to know about multiple volumes
-        if (vol.isPrimaryPhysical()) {
-            final long ident = Binder.clearCallingIdentity();
-            try {
-                synchronized (mUnmountLock) {
-                    mUnmountSignal = new CountDownLatch(1);
-                    mPms.updateExternalMediaStatus(false, true);
-                    waitForLatch(mUnmountSignal, "mUnmountSignal");
-                    mUnmountSignal = null;
-                }
-            } finally {
-                Binder.restoreCallingIdentity(ident);
-            }
-        }
-
         try {
-            if (ENABLE_BINDER) {
-                mVold.unmount(vol.id);
-            } else {
-                mConnector.execute("volume", "unmount", vol.id);
-            }
+            mVold.unmount(vol.id);
         } catch (Exception e) {
             Slog.wtf(TAG, e);
         }
@@ -1961,15 +1535,10 @@ class StorageManagerService extends IStorageManager.Stub
     @Override
     public void format(String volId) {
         enforcePermission(android.Manifest.permission.MOUNT_FORMAT_FILESYSTEMS);
-        waitForReady();
 
         final VolumeInfo vol = findVolumeByIdOrThrow(volId);
         try {
-            if (ENABLE_BINDER) {
-                mVold.format(vol.id, "auto");
-            } else {
-                mConnector.execute("volume", "format", vol.id, "auto");
-            }
+            mVold.format(vol.id, "auto");
         } catch (Exception e) {
             Slog.wtf(TAG, e);
         }
@@ -1978,7 +1547,6 @@ class StorageManagerService extends IStorageManager.Stub
     @Override
     public long benchmark(String volId) {
         enforcePermission(android.Manifest.permission.MOUNT_FORMAT_FILESYSTEMS);
-        waitForReady();
 
         // TODO: refactor for callers to provide a listener
         try {
@@ -2022,15 +1590,10 @@ class StorageManagerService extends IStorageManager.Stub
     @Override
     public void partitionPublic(String diskId) {
         enforcePermission(android.Manifest.permission.MOUNT_FORMAT_FILESYSTEMS);
-        waitForReady();
 
         final CountDownLatch latch = findOrCreateDiskScanLatch(diskId);
         try {
-            if (ENABLE_BINDER) {
-                mVold.partition(diskId, IVold.PARTITION_TYPE_PUBLIC, -1);
-            } else {
-                mConnector.execute("volume", "partition", diskId, "public");
-            }
+            mVold.partition(diskId, IVold.PARTITION_TYPE_PUBLIC, -1);
             waitForLatch(latch, "partitionPublic", 3 * DateUtils.MINUTE_IN_MILLIS);
         } catch (Exception e) {
             Slog.wtf(TAG, e);
@@ -2041,15 +1604,10 @@ class StorageManagerService extends IStorageManager.Stub
     public void partitionPrivate(String diskId) {
         enforcePermission(android.Manifest.permission.MOUNT_FORMAT_FILESYSTEMS);
         enforceAdminUser();
-        waitForReady();
 
         final CountDownLatch latch = findOrCreateDiskScanLatch(diskId);
         try {
-            if (ENABLE_BINDER) {
-                mVold.partition(diskId, IVold.PARTITION_TYPE_PRIVATE, -1);
-            } else {
-                mConnector.execute("volume", "partition", diskId, "private");
-            }
+            mVold.partition(diskId, IVold.PARTITION_TYPE_PRIVATE, -1);
             waitForLatch(latch, "partitionPrivate", 3 * DateUtils.MINUTE_IN_MILLIS);
         } catch (Exception e) {
             Slog.wtf(TAG, e);
@@ -2060,15 +1618,10 @@ class StorageManagerService extends IStorageManager.Stub
     public void partitionMixed(String diskId, int ratio) {
         enforcePermission(android.Manifest.permission.MOUNT_FORMAT_FILESYSTEMS);
         enforceAdminUser();
-        waitForReady();
 
         final CountDownLatch latch = findOrCreateDiskScanLatch(diskId);
         try {
-            if (ENABLE_BINDER) {
-                mVold.partition(diskId, IVold.PARTITION_TYPE_MIXED, ratio);
-            } else {
-                mConnector.execute("volume", "partition", diskId, "mixed", ratio);
-            }
+            mVold.partition(diskId, IVold.PARTITION_TYPE_MIXED, ratio);
             waitForLatch(latch, "partitionMixed", 3 * DateUtils.MINUTE_IN_MILLIS);
         } catch (Exception e) {
             Slog.wtf(TAG, e);
@@ -2078,7 +1631,6 @@ class StorageManagerService extends IStorageManager.Stub
     @Override
     public void setVolumeNickname(String fsUuid, String nickname) {
         enforcePermission(android.Manifest.permission.MOUNT_UNMOUNT_FILESYSTEMS);
-        waitForReady();
 
         Preconditions.checkNotNull(fsUuid);
         synchronized (mLock) {
@@ -2092,7 +1644,6 @@ class StorageManagerService extends IStorageManager.Stub
     @Override
     public void setVolumeUserFlags(String fsUuid, int flags, int mask) {
         enforcePermission(android.Manifest.permission.MOUNT_UNMOUNT_FILESYSTEMS);
-        waitForReady();
 
         Preconditions.checkNotNull(fsUuid);
         synchronized (mLock) {
@@ -2106,7 +1657,6 @@ class StorageManagerService extends IStorageManager.Stub
     @Override
     public void forgetVolume(String fsUuid) {
         enforcePermission(android.Manifest.permission.MOUNT_UNMOUNT_FILESYSTEMS);
-        waitForReady();
 
         Preconditions.checkNotNull(fsUuid);
 
@@ -2131,7 +1681,6 @@ class StorageManagerService extends IStorageManager.Stub
     @Override
     public void forgetAllVolumes() {
         enforcePermission(android.Manifest.permission.MOUNT_UNMOUNT_FILESYSTEMS);
-        waitForReady();
 
         synchronized (mLock) {
             for (int i = 0; i < mRecords.size(); i++) {
@@ -2155,11 +1704,7 @@ class StorageManagerService extends IStorageManager.Stub
 
     private void forgetPartition(String partGuid) {
         try {
-            if (ENABLE_BINDER) {
-                mVold.forgetPartition(partGuid);
-            } else {
-                mConnector.execute("volume", "forget_partition", partGuid);
-            }
+            mVold.forgetPartition(partGuid);
         } catch (Exception e) {
             Slog.wtf(TAG, e);
         }
@@ -2168,14 +1713,6 @@ class StorageManagerService extends IStorageManager.Stub
     @Override
     public void fstrim(int flags) {
         enforcePermission(android.Manifest.permission.MOUNT_FORMAT_FILESYSTEMS);
-        waitForReady();
-
-        String cmd;
-        if ((flags & StorageManager.FSTRIM_FLAG_DEEP) != 0) {
-            cmd = "dodtrim";
-        } else {
-            cmd = "dotrim";
-        }
 
         try {
             mVold.fstrim(flags, new IVoldTaskListener.Stub() {
@@ -2212,27 +1749,8 @@ class StorageManagerService extends IStorageManager.Stub
     }
 
     private void remountUidExternalStorage(int uid, int mode) {
-        waitForReady();
-
-        String modeName = "none";
-        switch (mode) {
-            case Zygote.MOUNT_EXTERNAL_DEFAULT: {
-                modeName = "default";
-            } break;
-            case Zygote.MOUNT_EXTERNAL_READ: {
-                modeName = "read";
-            } break;
-            case Zygote.MOUNT_EXTERNAL_WRITE: {
-                modeName = "write";
-            } break;
-        }
-
         try {
-            if (ENABLE_BINDER) {
-                mVold.remountUid(uid, mode);
-            } else {
-                mConnector.execute("volume", "remount_uid", uid, modeName);
-            }
+            mVold.remountUid(uid, mode);
         } catch (Exception e) {
             Slog.wtf(TAG, e);
         }
@@ -2241,7 +1759,6 @@ class StorageManagerService extends IStorageManager.Stub
     @Override
     public void setDebugFlags(int flags, int mask) {
         enforcePermission(android.Manifest.permission.MOUNT_UNMOUNT_FILESYSTEMS);
-        waitForReady();
 
         if ((mask & StorageManager.DEBUG_EMULATE_FBE) != 0) {
             if (!EMULATE_FBE_SUPPORTED) {
@@ -2331,7 +1848,6 @@ class StorageManagerService extends IStorageManager.Stub
     @Override
     public void setPrimaryStorageUuid(String volumeUuid, IPackageMoveObserver callback) {
         enforcePermission(android.Manifest.permission.MOUNT_UNMOUNT_FILESYSTEMS);
-        waitForReady();
 
         final VolumeInfo from;
         final VolumeInfo to;
@@ -2403,33 +1919,6 @@ class StorageManagerService extends IStorageManager.Stub
         }
     }
 
-    @Override
-    public int[] getStorageUsers(String path) {
-        enforcePermission(android.Manifest.permission.MOUNT_UNMOUNT_FILESYSTEMS);
-        waitForReady();
-        try {
-            final String[] r = NativeDaemonEvent.filterMessageList(
-                    mConnector.executeForList("storage", "users", path),
-                    VoldResponseCode.StorageUsersListResult);
-
-            // FMT: <pid> <process name>
-            int[] data = new int[r.length];
-            for (int i = 0; i < r.length; i++) {
-                String[] tok = r[i].split(" ");
-                try {
-                    data[i] = Integer.parseInt(tok[0]);
-                } catch (NumberFormatException nfe) {
-                    Slog.e(TAG, String.format("Error parsing pid %s", tok[0]));
-                    return new int[0];
-                }
-            }
-            return data;
-        } catch (NativeDaemonConnectorException e) {
-            Slog.e(TAG, "Failed to retrieve storage users list", e);
-            return new int[0];
-        }
-    }
-
     private void warnOnNotMounted() {
         synchronized (mLock) {
             for (int i = 0; i < mVolumes.size(); i++) {
@@ -2442,304 +1931,6 @@ class StorageManagerService extends IStorageManager.Stub
         }
 
         Slog.w(TAG, "No primary storage mounted!");
-    }
-
-    public String[] getSecureContainerList() {
-        if (!ASEC_ENABLE) throw new UnsupportedOperationException();
-        enforcePermission(android.Manifest.permission.ASEC_ACCESS);
-        waitForReady();
-        warnOnNotMounted();
-
-        try {
-            return NativeDaemonEvent.filterMessageList(
-                    mConnector.executeForList("asec", "list"), VoldResponseCode.AsecListResult);
-        } catch (NativeDaemonConnectorException e) {
-            return new String[0];
-        }
-    }
-
-    public int createSecureContainer(String id, int sizeMb, String fstype, String key,
-            int ownerUid, boolean external) {
-        if (!ASEC_ENABLE) throw new UnsupportedOperationException();
-        enforcePermission(android.Manifest.permission.ASEC_CREATE);
-        waitForReady();
-        warnOnNotMounted();
-
-        int rc = StorageResultCode.OperationSucceeded;
-        try {
-            mConnector.execute("asec", "create", id, sizeMb, fstype, new SensitiveArg(key),
-                    ownerUid, external ? "1" : "0");
-        } catch (NativeDaemonConnectorException e) {
-            rc = StorageResultCode.OperationFailedInternalError;
-        }
-
-        if (rc == StorageResultCode.OperationSucceeded) {
-            synchronized (mAsecMountSet) {
-                mAsecMountSet.add(id);
-            }
-        }
-        return rc;
-    }
-
-    @Override
-    public int resizeSecureContainer(String id, int sizeMb, String key) {
-        if (!ASEC_ENABLE) throw new UnsupportedOperationException();
-        enforcePermission(android.Manifest.permission.ASEC_CREATE);
-        waitForReady();
-        warnOnNotMounted();
-
-        int rc = StorageResultCode.OperationSucceeded;
-        try {
-            mConnector.execute("asec", "resize", id, sizeMb, new SensitiveArg(key));
-        } catch (NativeDaemonConnectorException e) {
-            rc = StorageResultCode.OperationFailedInternalError;
-        }
-        return rc;
-    }
-
-    public int finalizeSecureContainer(String id) {
-        if (!ASEC_ENABLE) throw new UnsupportedOperationException();
-        enforcePermission(android.Manifest.permission.ASEC_CREATE);
-        warnOnNotMounted();
-
-        int rc = StorageResultCode.OperationSucceeded;
-        try {
-            mConnector.execute("asec", "finalize", id);
-            /*
-             * Finalization does a remount, so no need
-             * to update mAsecMountSet
-             */
-        } catch (NativeDaemonConnectorException e) {
-            rc = StorageResultCode.OperationFailedInternalError;
-        }
-        return rc;
-    }
-
-    public int fixPermissionsSecureContainer(String id, int gid, String filename) {
-        if (!ASEC_ENABLE) throw new UnsupportedOperationException();
-        enforcePermission(android.Manifest.permission.ASEC_CREATE);
-        warnOnNotMounted();
-
-        int rc = StorageResultCode.OperationSucceeded;
-        try {
-            mConnector.execute("asec", "fixperms", id, gid, filename);
-            /*
-             * Fix permissions does a remount, so no need to update
-             * mAsecMountSet
-             */
-        } catch (NativeDaemonConnectorException e) {
-            rc = StorageResultCode.OperationFailedInternalError;
-        }
-        return rc;
-    }
-
-    public int destroySecureContainer(String id, boolean force) {
-        if (!ASEC_ENABLE) throw new UnsupportedOperationException();
-        enforcePermission(android.Manifest.permission.ASEC_DESTROY);
-        waitForReady();
-        warnOnNotMounted();
-
-        /*
-         * Force a GC to make sure AssetManagers in other threads of the
-         * system_server are cleaned up. We have to do this since AssetManager
-         * instances are kept as a WeakReference and it's possible we have files
-         * open on the external storage.
-         */
-        Runtime.getRuntime().gc();
-
-        int rc = StorageResultCode.OperationSucceeded;
-        try {
-            final Command cmd = new Command("asec", "destroy", id);
-            if (force) {
-                cmd.appendArg("force");
-            }
-            mConnector.execute(cmd);
-        } catch (NativeDaemonConnectorException e) {
-            int code = e.getCode();
-            if (code == VoldResponseCode.OpFailedStorageBusy) {
-                rc = StorageResultCode.OperationFailedStorageBusy;
-            } else {
-                rc = StorageResultCode.OperationFailedInternalError;
-            }
-        }
-
-        if (rc == StorageResultCode.OperationSucceeded) {
-            synchronized (mAsecMountSet) {
-                if (mAsecMountSet.contains(id)) {
-                    mAsecMountSet.remove(id);
-                }
-            }
-        }
-
-        return rc;
-    }
-
-    public int mountSecureContainer(String id, String key, int ownerUid, boolean readOnly) {
-        if (!ASEC_ENABLE) throw new UnsupportedOperationException();
-        enforcePermission(android.Manifest.permission.ASEC_MOUNT_UNMOUNT);
-        waitForReady();
-        warnOnNotMounted();
-
-        synchronized (mAsecMountSet) {
-            if (mAsecMountSet.contains(id)) {
-                return StorageResultCode.OperationFailedStorageMounted;
-            }
-        }
-
-        int rc = StorageResultCode.OperationSucceeded;
-        try {
-            mConnector.execute("asec", "mount", id, new SensitiveArg(key), ownerUid,
-                    readOnly ? "ro" : "rw");
-        } catch (NativeDaemonConnectorException e) {
-            int code = e.getCode();
-            if (code != VoldResponseCode.OpFailedStorageBusy) {
-                rc = StorageResultCode.OperationFailedInternalError;
-            }
-        }
-
-        if (rc == StorageResultCode.OperationSucceeded) {
-            synchronized (mAsecMountSet) {
-                mAsecMountSet.add(id);
-            }
-        }
-        return rc;
-    }
-
-    public int unmountSecureContainer(String id, boolean force) {
-        if (!ASEC_ENABLE) throw new UnsupportedOperationException();
-        enforcePermission(android.Manifest.permission.ASEC_MOUNT_UNMOUNT);
-        waitForReady();
-        warnOnNotMounted();
-
-        synchronized (mAsecMountSet) {
-            if (!mAsecMountSet.contains(id)) {
-                return StorageResultCode.OperationFailedStorageNotMounted;
-            }
-         }
-
-        /*
-         * Force a GC to make sure AssetManagers in other threads of the
-         * system_server are cleaned up. We have to do this since AssetManager
-         * instances are kept as a WeakReference and it's possible we have files
-         * open on the external storage.
-         */
-        Runtime.getRuntime().gc();
-
-        int rc = StorageResultCode.OperationSucceeded;
-        try {
-            final Command cmd = new Command("asec", "unmount", id);
-            if (force) {
-                cmd.appendArg("force");
-            }
-            mConnector.execute(cmd);
-        } catch (NativeDaemonConnectorException e) {
-            int code = e.getCode();
-            if (code == VoldResponseCode.OpFailedStorageBusy) {
-                rc = StorageResultCode.OperationFailedStorageBusy;
-            } else {
-                rc = StorageResultCode.OperationFailedInternalError;
-            }
-        }
-
-        if (rc == StorageResultCode.OperationSucceeded) {
-            synchronized (mAsecMountSet) {
-                mAsecMountSet.remove(id);
-            }
-        }
-        return rc;
-    }
-
-    public boolean isSecureContainerMounted(String id) {
-        if (!ASEC_ENABLE) throw new UnsupportedOperationException();
-        enforcePermission(android.Manifest.permission.ASEC_ACCESS);
-        waitForReady();
-        warnOnNotMounted();
-
-        synchronized (mAsecMountSet) {
-            return mAsecMountSet.contains(id);
-        }
-    }
-
-    public int renameSecureContainer(String oldId, String newId) {
-        if (!ASEC_ENABLE) throw new UnsupportedOperationException();
-        enforcePermission(android.Manifest.permission.ASEC_RENAME);
-        waitForReady();
-        warnOnNotMounted();
-
-        synchronized (mAsecMountSet) {
-            /*
-             * Because a mounted container has active internal state which cannot be
-             * changed while active, we must ensure both ids are not currently mounted.
-             */
-            if (mAsecMountSet.contains(oldId) || mAsecMountSet.contains(newId)) {
-                return StorageResultCode.OperationFailedStorageMounted;
-            }
-        }
-
-        int rc = StorageResultCode.OperationSucceeded;
-        try {
-            mConnector.execute("asec", "rename", oldId, newId);
-        } catch (NativeDaemonConnectorException e) {
-            rc = StorageResultCode.OperationFailedInternalError;
-        }
-
-        return rc;
-    }
-
-    public String getSecureContainerPath(String id) {
-        if (!ASEC_ENABLE) throw new UnsupportedOperationException();
-        enforcePermission(android.Manifest.permission.ASEC_ACCESS);
-        waitForReady();
-        warnOnNotMounted();
-
-        final NativeDaemonEvent event;
-        try {
-            event = mConnector.execute("asec", "path", id);
-            event.checkCode(VoldResponseCode.AsecPathResult);
-            return event.getMessage();
-        } catch (NativeDaemonConnectorException e) {
-            int code = e.getCode();
-            if (code == VoldResponseCode.OpFailedStorageNotFound) {
-                Slog.i(TAG, String.format("Container '%s' not found", id));
-                return null;
-            } else {
-                throw new IllegalStateException(String.format("Unexpected response code %d", code));
-            }
-        }
-    }
-
-    public String getSecureContainerFilesystemPath(String id) {
-        if (!ASEC_ENABLE) throw new UnsupportedOperationException();
-        enforcePermission(android.Manifest.permission.ASEC_ACCESS);
-        waitForReady();
-        warnOnNotMounted();
-
-        final NativeDaemonEvent event;
-        try {
-            event = mConnector.execute("asec", "fspath", id);
-            event.checkCode(VoldResponseCode.AsecPathResult);
-            return event.getMessage();
-        } catch (NativeDaemonConnectorException e) {
-            int code = e.getCode();
-            if (code == VoldResponseCode.OpFailedStorageNotFound) {
-                Slog.i(TAG, String.format("Container '%s' not found", id));
-                return null;
-            } else {
-                throw new IllegalStateException(String.format("Unexpected response code %d", code));
-            }
-        }
-    }
-
-    @Override
-    public void finishMediaUpdate() {
-        if (Binder.getCallingUid() != Process.SYSTEM_UID) {
-            throw new SecurityException("no permission to call finishMediaUpdate()");
-        }
-        if (mUnmountSignal != null) {
-            mUnmountSignal.countDown();
-        } else {
-            Slog.w(TAG, "Odd, nobody asked to unmount?");
-        }
     }
 
     private boolean isUidOwnerOfPackageOrSystem(String packageName, int callerUid) {
@@ -2762,10 +1953,10 @@ class StorageManagerService extends IStorageManager.Stub
         return callerUid == packageUid;
     }
 
+    @Override
     public String getMountedObbPath(String rawPath) {
         Preconditions.checkNotNull(rawPath, "rawPath cannot be null");
 
-        waitForReady();
         warnOnNotMounted();
 
         final ObbState state;
@@ -2777,23 +1968,7 @@ class StorageManagerService extends IStorageManager.Stub
             return null;
         }
 
-        if (ENABLE_BINDER) {
-            return findVolumeByIdOrThrow(state.volId).getPath().getAbsolutePath();
-        }
-
-        final NativeDaemonEvent event;
-        try {
-            event = mConnector.execute("obb", "path", state.canonicalPath);
-            event.checkCode(VoldResponseCode.AsecPathResult);
-            return event.getMessage();
-        } catch (NativeDaemonConnectorException e) {
-            int code = e.getCode();
-            if (code == VoldResponseCode.OpFailedStorageNotFound) {
-                return null;
-            } else {
-                throw new IllegalStateException(String.format("Unexpected response code %d", code));
-            }
-        }
+        return findVolumeByIdOrThrow(state.volId).getPath().getAbsolutePath();
     }
 
     @Override
@@ -2850,28 +2025,10 @@ class StorageManagerService extends IStorageManager.Stub
         mContext.enforceCallingOrSelfPermission(Manifest.permission.CRYPT_KEEPER,
                 "no permission to access the crypt keeper");
 
-        waitForReady();
-
-        if (ENABLE_BINDER) {
-            try {
-                return mVold.fdeComplete();
-            } catch (Exception e) {
-                Slog.wtf(TAG, e);
-                return StorageManager.ENCRYPTION_STATE_ERROR_UNKNOWN;
-            }
-        }
-
-        final NativeDaemonEvent event;
         try {
-            event = mCryptConnector.execute("cryptfs", "cryptocomplete");
-            return Integer.parseInt(event.getMessage());
-        } catch (NumberFormatException e) {
-            // Bad result - unexpected.
-            Slog.w(TAG, "Unable to parse result from cryptfs cryptocomplete");
-            return StorageManager.ENCRYPTION_STATE_ERROR_UNKNOWN;
-        } catch (NativeDaemonConnectorException e) {
-            // Something bad happened.
-            Slog.w(TAG, "Error in communicating with cryptfs in validating");
+            return mVold.fdeComplete();
+        } catch (Exception e) {
+            Slog.wtf(TAG, e);
             return StorageManager.ENCRYPTION_STATE_ERROR_UNKNOWN;
         }
     }
@@ -2881,8 +2038,6 @@ class StorageManagerService extends IStorageManager.Stub
         mContext.enforceCallingOrSelfPermission(Manifest.permission.CRYPT_KEEPER,
                 "no permission to access the crypt keeper");
 
-        waitForReady();
-
         if (TextUtils.isEmpty(password)) {
             throw new IllegalArgumentException("password cannot be empty");
         }
@@ -2891,54 +2046,26 @@ class StorageManagerService extends IStorageManager.Stub
             Slog.i(TAG, "decrypting storage...");
         }
 
-        if (ENABLE_BINDER) {
-            try {
-                mVold.fdeCheckPassword(password);
-                mHandler.postDelayed(() -> {
-                    try {
-                        mVold.fdeRestart();
-                    } catch (Exception e) {
-                        Slog.wtf(TAG, e);
-                    }
-                }, DateUtils.SECOND_IN_MILLIS);
-                return 0;
-            } catch (Exception e) {
-                Slog.wtf(TAG, e);
-                return StorageManager.ENCRYPTION_STATE_ERROR_UNKNOWN;
-            }
-        }
-
-        final NativeDaemonEvent event;
         try {
-            event = mCryptConnector.execute("cryptfs", "checkpw", new SensitiveArg(password));
-
-            final int code = Integer.parseInt(event.getMessage());
-            if (code == 0) {
-                // Decrypt was successful. Post a delayed message before restarting in order
-                // to let the UI to clear itself
-                mHandler.postDelayed(new Runnable() {
-                    public void run() {
-                        try {
-                            mCryptConnector.execute("cryptfs", "restart");
-                        } catch (NativeDaemonConnectorException e) {
-                            Slog.e(TAG, "problem executing in background", e);
-                        }
-                    }
-                }, 1000); // 1 second
-            }
-
-            return code;
-        } catch (NativeDaemonConnectorException e) {
-            // Decryption failed
-            return e.getCode();
+            mVold.fdeCheckPassword(password);
+            mHandler.postDelayed(() -> {
+                try {
+                    mVold.fdeRestart();
+                } catch (Exception e) {
+                    Slog.wtf(TAG, e);
+                }
+            }, DateUtils.SECOND_IN_MILLIS);
+            return 0;
+        } catch (Exception e) {
+            Slog.wtf(TAG, e);
+            return StorageManager.ENCRYPTION_STATE_ERROR_UNKNOWN;
         }
     }
 
+    @Override
     public int encryptStorage(int type, String password) {
         mContext.enforceCallingOrSelfPermission(Manifest.permission.CRYPT_KEEPER,
             "no permission to access the crypt keeper");
-
-        waitForReady();
 
         if (type == StorageManager.CRYPT_TYPE_DEFAULT) {
             password = "";
@@ -2951,17 +2078,7 @@ class StorageManagerService extends IStorageManager.Stub
         }
 
         try {
-            if (ENABLE_BINDER) {
-                mVold.fdeEnable(type, password, IVold.ENCRYPTION_FLAG_IN_PLACE);
-            } else {
-                if (type == StorageManager.CRYPT_TYPE_DEFAULT) {
-                    mCryptConnector.execute("cryptfs", "enablecrypto", "inplace",
-                            CRYPTO_TYPES[type]);
-                } else {
-                    mCryptConnector.execute("cryptfs", "enablecrypto", "inplace",
-                            CRYPTO_TYPES[type], new SensitiveArg(password));
-                }
-            }
+            mVold.fdeEnable(type, password, IVold.ENCRYPTION_FLAG_IN_PLACE);
         } catch (Exception e) {
             Slog.wtf(TAG, e);
             return -1;
@@ -2974,11 +2091,10 @@ class StorageManagerService extends IStorageManager.Stub
      *  @param type One of the CRYPTO_TYPE_XXX consts defined in StorageManager.
      *  @param password The password to set.
      */
+    @Override
     public int changeEncryptionPassword(int type, String password) {
         mContext.enforceCallingOrSelfPermission(Manifest.permission.CRYPT_KEEPER,
             "no permission to access the crypt keeper");
-
-        waitForReady();
 
         if (type == StorageManager.CRYPT_TYPE_DEFAULT) {
             password = "";
@@ -2990,23 +2106,12 @@ class StorageManagerService extends IStorageManager.Stub
             Slog.i(TAG, "changing encryption password...");
         }
 
-        if (ENABLE_BINDER) {
-            try {
-                mVold.fdeChangePassword(type, password);
-                return 0;
-            } catch (Exception e) {
-                Slog.wtf(TAG, e);
-                return -1;
-            }
-        }
-
         try {
-            NativeDaemonEvent event = mCryptConnector.execute("cryptfs", "changepw", CRYPTO_TYPES[type],
-                        new SensitiveArg(password));
-            return Integer.parseInt(event.getMessage());
-        } catch (NativeDaemonConnectorException e) {
-            // Encryption failed
-            return e.getCode();
+            mVold.fdeChangePassword(type, password);
+            return 0;
+        } catch (Exception e) {
+            Slog.wtf(TAG, e);
+            return -1;
         }
     }
 
@@ -3027,30 +2132,16 @@ class StorageManagerService extends IStorageManager.Stub
             throw new IllegalArgumentException("password cannot be empty");
         }
 
-        waitForReady();
-
         if (DEBUG_EVENTS) {
             Slog.i(TAG, "validating encryption password...");
         }
 
-        if (ENABLE_BINDER) {
-            try {
-                mVold.fdeVerifyPassword(password);
-                return 0;
-            } catch (Exception e) {
-                Slog.wtf(TAG, e);
-                return -1;
-            }
-        }
-
-        final NativeDaemonEvent event;
         try {
-            event = mCryptConnector.execute("cryptfs", "verifypw", new SensitiveArg(password));
-            Slog.i(TAG, "cryptfs verifypw => " + event.getMessage());
-            return Integer.parseInt(event.getMessage());
-        } catch (NativeDaemonConnectorException e) {
-            // Encryption failed
-            return e.getCode();
+            mVold.fdeVerifyPassword(password);
+            return 0;
+        } catch (Exception e) {
+            Slog.wtf(TAG, e);
+            return -1;
         }
     }
 
@@ -3063,28 +2154,11 @@ class StorageManagerService extends IStorageManager.Stub
         mContext.enforceCallingOrSelfPermission(Manifest.permission.CRYPT_KEEPER,
             "no permission to access the crypt keeper");
 
-        waitForReady();
-
-        if (ENABLE_BINDER) {
-            try {
-                return mVold.fdeGetPasswordType();
-            } catch (Exception e) {
-                Slog.wtf(TAG, e);
-                return -1;
-            }
-        }
-
-        final NativeDaemonEvent event;
         try {
-            event = mCryptConnector.execute("cryptfs", "getpwtype");
-            for (int i = 0; i < CRYPTO_TYPES.length; ++i) {
-                if (CRYPTO_TYPES[i].equals(event.getMessage()))
-                    return i;
-            }
-
-            throw new IllegalStateException("unexpected return from cryptfs");
-        } catch (NativeDaemonConnectorException e) {
-            throw e.rethrowAsParcelableException();
+            return mVold.fdeGetPasswordType();
+        } catch (Exception e) {
+            Slog.wtf(TAG, e);
+            return -1;
         }
     }
 
@@ -3098,23 +2172,12 @@ class StorageManagerService extends IStorageManager.Stub
         mContext.enforceCallingOrSelfPermission(Manifest.permission.CRYPT_KEEPER,
             "no permission to access the crypt keeper");
 
-        waitForReady();
-
-        if (ENABLE_BINDER) {
-            try {
-                mVold.fdeSetField(field, contents);
-                return;
-            } catch (Exception e) {
-                Slog.wtf(TAG, e);
-                return;
-            }
-        }
-
-        final NativeDaemonEvent event;
         try {
-            event = mCryptConnector.execute("cryptfs", "setfield", field, contents);
-        } catch (NativeDaemonConnectorException e) {
-            throw e.rethrowAsParcelableException();
+            mVold.fdeSetField(field, contents);
+            return;
+        } catch (Exception e) {
+            Slog.wtf(TAG, e);
+            return;
         }
     }
 
@@ -3128,29 +2191,11 @@ class StorageManagerService extends IStorageManager.Stub
         mContext.enforceCallingOrSelfPermission(Manifest.permission.CRYPT_KEEPER,
             "no permission to access the crypt keeper");
 
-        waitForReady();
-
-        if (ENABLE_BINDER) {
-            try {
-                return mVold.fdeGetField(field);
-            } catch (Exception e) {
-                Slog.wtf(TAG, e);
-                return null;
-            }
-        }
-
-        final NativeDaemonEvent event;
         try {
-            final String[] contents = NativeDaemonEvent.filterMessageList(
-                    mCryptConnector.executeForList("cryptfs", "getfield", field),
-                    VoldResponseCode.CryptfsGetfieldResult);
-            String result = new String();
-            for (String content : contents) {
-                result += content;
-            }
-            return result;
-        } catch (NativeDaemonConnectorException e) {
-            throw e.rethrowAsParcelableException();
+            return mVold.fdeGetField(field);
+        } catch (Exception e) {
+            Slog.wtf(TAG, e);
+            return null;
         }
     }
 
@@ -3163,23 +2208,11 @@ class StorageManagerService extends IStorageManager.Stub
         mContext.enforceCallingOrSelfPermission(Manifest.permission.CRYPT_KEEPER,
             "no permission to access the crypt keeper");
 
-        waitForReady();
-
-        if (ENABLE_BINDER) {
-            try {
-                return mVold.isConvertibleToFbe();
-            } catch (Exception e) {
-                Slog.wtf(TAG, e);
-                return false;
-            }
-        }
-
-        final NativeDaemonEvent event;
         try {
-            event = mCryptConnector.execute("cryptfs", "isConvertibleToFBE");
-            return Integer.parseInt(event.getMessage()) != 0;
-        } catch (NativeDaemonConnectorException e) {
-            throw e.rethrowAsParcelableException();
+            return mVold.isConvertibleToFbe();
+        } catch (Exception e) {
+            Slog.wtf(TAG, e);
+            return false;
         }
     }
 
@@ -3188,31 +2221,10 @@ class StorageManagerService extends IStorageManager.Stub
         mContext.enforceCallingOrSelfPermission(Manifest.permission.CRYPT_KEEPER,
                 "only keyguard can retrieve password");
 
-        if (!isReady()) {
-            return new String();
-        }
-
-        if (ENABLE_BINDER) {
-            try {
-                return mVold.fdeGetPassword();
-            } catch (Exception e) {
-                Slog.wtf(TAG, e);
-                return null;
-            }
-        }
-
-        final NativeDaemonEvent event;
         try {
-            event = mCryptConnector.execute("cryptfs", "getpw");
-            if ("-1".equals(event.getMessage())) {
-                // -1 equals no password
-                return null;
-            }
-            return event.getMessage();
-        } catch (NativeDaemonConnectorException e) {
-            throw e.rethrowAsParcelableException();
-        } catch (IllegalArgumentException e) {
-            Slog.e(TAG, "Invalid response to getPassword");
+            return mVold.fdeGetPassword();
+        } catch (Exception e) {
+            Slog.wtf(TAG, e);
             return null;
         }
     }
@@ -3222,40 +2234,21 @@ class StorageManagerService extends IStorageManager.Stub
         mContext.enforceCallingOrSelfPermission(Manifest.permission.CRYPT_KEEPER,
                 "only keyguard can clear password");
 
-        if (!isReady()) {
-            return;
-        }
-
-        if (ENABLE_BINDER) {
-            try {
-                mVold.fdeClearPassword();
-                return;
-            } catch (Exception e) {
-                Slog.wtf(TAG, e);
-                return;
-            }
-        }
-
-        final NativeDaemonEvent event;
         try {
-            event = mCryptConnector.execute("cryptfs", "clearpw");
-        } catch (NativeDaemonConnectorException e) {
-            throw e.rethrowAsParcelableException();
+            mVold.fdeClearPassword();
+            return;
+        } catch (Exception e) {
+            Slog.wtf(TAG, e);
+            return;
         }
     }
 
     @Override
     public void createUserKey(int userId, int serialNumber, boolean ephemeral) {
         enforcePermission(android.Manifest.permission.STORAGE_INTERNAL);
-        waitForReady();
 
         try {
-            if (ENABLE_BINDER) {
-                mVold.createUserKey(userId, serialNumber, ephemeral);
-            } else {
-                mCryptConnector.execute("cryptfs", "create_user_key", userId, serialNumber,
-                        ephemeral ? 1 : 0);
-            }
+            mVold.createUserKey(userId, serialNumber, ephemeral);
         } catch (Exception e) {
             Slog.wtf(TAG, e);
         }
@@ -3264,14 +2257,9 @@ class StorageManagerService extends IStorageManager.Stub
     @Override
     public void destroyUserKey(int userId) {
         enforcePermission(android.Manifest.permission.STORAGE_INTERNAL);
-        waitForReady();
 
         try {
-            if (ENABLE_BINDER) {
-                mVold.destroyUserKey(userId);
-            } else {
-                mCryptConnector.execute("cryptfs", "destroy_user_key", userId);
-            }
+            mVold.destroyUserKey(userId);
         } catch (Exception e) {
             Slog.wtf(TAG, e);
         }
@@ -3295,16 +2283,9 @@ class StorageManagerService extends IStorageManager.Stub
     @Override
     public void addUserKeyAuth(int userId, int serialNumber, byte[] token, byte[] secret) {
         enforcePermission(android.Manifest.permission.STORAGE_INTERNAL);
-        waitForReady();
 
         try {
-            if (ENABLE_BINDER) {
-                mVold.addUserKeyAuth(userId, serialNumber, encodeBytes(token), encodeBytes(secret));
-            } else {
-                mCryptConnector.execute("cryptfs", "add_user_key_auth", userId, serialNumber,
-                        new SensitiveArg(encodeBytes(token)),
-                        new SensitiveArg(encodeBytes(secret)));
-            }
+            mVold.addUserKeyAuth(userId, serialNumber, encodeBytes(token), encodeBytes(secret));
         } catch (Exception e) {
             Slog.wtf(TAG, e);
         }
@@ -3316,14 +2297,9 @@ class StorageManagerService extends IStorageManager.Stub
     @Override
     public void fixateNewestUserKeyAuth(int userId) {
         enforcePermission(android.Manifest.permission.STORAGE_INTERNAL);
-        waitForReady();
 
         try {
-            if (ENABLE_BINDER) {
-                mVold.fixateNewestUserKeyAuth(userId);
-            } else {
-                mCryptConnector.execute("cryptfs", "fixate_newest_user_key_auth", userId);
-            }
+            mVold.fixateNewestUserKeyAuth(userId);
         } catch (Exception e) {
             Slog.wtf(TAG, e);
         }
@@ -3332,7 +2308,6 @@ class StorageManagerService extends IStorageManager.Stub
     @Override
     public void unlockUserKey(int userId, int serialNumber, byte[] token, byte[] secret) {
         enforcePermission(android.Manifest.permission.STORAGE_INTERNAL);
-        waitForReady();
 
         if (StorageManager.isFileEncryptedNativeOrEmulated()) {
             // When a user has secure lock screen, require secret to actually unlock.
@@ -3342,14 +2317,8 @@ class StorageManagerService extends IStorageManager.Stub
             }
 
             try {
-                if (ENABLE_BINDER) {
-                    mVold.unlockUserKey(userId, serialNumber, encodeBytes(token),
-                            encodeBytes(secret));
-                } else {
-                    mCryptConnector.execute("cryptfs", "unlock_user_key", userId, serialNumber,
-                            new SensitiveArg(encodeBytes(token)),
-                            new SensitiveArg(encodeBytes(secret)));
-                }
+                mVold.unlockUserKey(userId, serialNumber, encodeBytes(token),
+                        encodeBytes(secret));
             } catch (Exception e) {
                 Slog.wtf(TAG, e);
                 return;
@@ -3369,14 +2338,9 @@ class StorageManagerService extends IStorageManager.Stub
     @Override
     public void lockUserKey(int userId) {
         enforcePermission(android.Manifest.permission.STORAGE_INTERNAL);
-        waitForReady();
 
         try {
-            if (ENABLE_BINDER) {
-                mVold.lockUserKey(userId);
-            } else {
-                mCryptConnector.execute("cryptfs", "lock_user_key", userId);
-            }
+            mVold.lockUserKey(userId);
         } catch (Exception e) {
             Slog.wtf(TAG, e);
             return;
@@ -3397,15 +2361,9 @@ class StorageManagerService extends IStorageManager.Stub
     @Override
     public void prepareUserStorage(String volumeUuid, int userId, int serialNumber, int flags) {
         enforcePermission(android.Manifest.permission.STORAGE_INTERNAL);
-        waitForReady();
 
         try {
-            if (ENABLE_BINDER) {
-                mVold.prepareUserStorage(volumeUuid, userId, serialNumber, flags);
-            } else {
-                mCryptConnector.execute("cryptfs", "prepare_user_storage", escapeNull(volumeUuid),
-                        userId, serialNumber, flags);
-            }
+            mVold.prepareUserStorage(volumeUuid, userId, serialNumber, flags);
         } catch (Exception e) {
             Slog.wtf(TAG, e);
         }
@@ -3414,15 +2372,9 @@ class StorageManagerService extends IStorageManager.Stub
     @Override
     public void destroyUserStorage(String volumeUuid, int userId, int flags) {
         enforcePermission(android.Manifest.permission.STORAGE_INTERNAL);
-        waitForReady();
 
         try {
-            if (ENABLE_BINDER) {
-                mVold.destroyUserStorage(volumeUuid, userId, flags);
-            } else {
-                mCryptConnector.execute("cryptfs", "destroy_user_storage", escapeNull(volumeUuid),
-                        userId, flags);
-            }
+            mVold.destroyUserStorage(volumeUuid, userId, flags);
         } catch (Exception e) {
             Slog.wtf(TAG, e);
         }
@@ -3431,14 +2383,9 @@ class StorageManagerService extends IStorageManager.Stub
     @Override
     public void secdiscard(String path) {
         enforcePermission(android.Manifest.permission.STORAGE_INTERNAL);
-        waitForReady();
 
         try {
-            if (ENABLE_BINDER) {
-                mVold.secdiscard(path);
-            } else {
-                mCryptConnector.execute("cryptfs", "secdiscard", escapeNull(path));
-            }
+            mVold.secdiscard(path);
         } catch (Exception e) {
             Slog.wtf(TAG, e);
         }
@@ -3453,33 +2400,18 @@ class StorageManagerService extends IStorageManager.Stub
 
         @Override
         public ParcelFileDescriptor open() throws NativeDaemonConnectorException {
-            if (ENABLE_BINDER) {
-                try {
-                    return new ParcelFileDescriptor(
-                            mVold.mountAppFuse(uid, Process.myPid(), mountId));
-                } catch (Exception e) {
-                    throw new NativeDaemonConnectorException("Failed to mount", e);
-                }
-            } else {
-                final NativeDaemonEvent event = mConnector.execute(
-                        "appfuse", "mount", uid, Process.myPid(), mountId);
-                opened = true;
-                if (event.getFileDescriptors() == null ||
-                    event.getFileDescriptors().length == 0) {
-                    throw new NativeDaemonConnectorException("Cannot obtain device FD");
-                }
-                return new ParcelFileDescriptor(event.getFileDescriptors()[0]);
+            try {
+                return new ParcelFileDescriptor(
+                        mVold.mountAppFuse(uid, Process.myPid(), mountId));
+            } catch (Exception e) {
+                throw new NativeDaemonConnectorException("Failed to mount", e);
             }
         }
 
         @Override
         public void close() throws Exception {
             if (opened) {
-                if (ENABLE_BINDER) {
-                    mVold.unmountAppFuse(uid, Process.myPid(), mountId);
-                } else {
-                    mConnector.execute("appfuse", "unmount", uid, Process.myPid(), mountId);
-                }
+                mVold.unmountAppFuse(uid, Process.myPid(), mountId);
                 opened = false;
             }
         }
@@ -3568,11 +2500,7 @@ class StorageManagerService extends IStorageManager.Stub
             }
 
             try {
-                if (ENABLE_BINDER) {
-                    mVold.mkdirs(appPath);
-                } else {
-                    mConnector.execute("volume", "mkdirs", appPath);
-                }
+                mVold.mkdirs(appPath);
                 return 0;
             } catch (Exception e) {
                 Slog.wtf(TAG, e);
@@ -4124,7 +3052,6 @@ class StorageManagerService extends IStorageManager.Stub
 
         @Override
         public void handleExecute() throws IOException, RemoteException {
-            waitForReady();
             warnOnNotMounted();
 
             final ObbInfo obbInfo = getObbInfo();
@@ -4174,19 +3101,9 @@ class StorageManagerService extends IStorageManager.Stub
 
             int rc = StorageResultCode.OperationSucceeded;
             try {
-                if (ENABLE_BINDER) {
-                    mObbState.volId = mVold.createObb(mObbState.canonicalPath, binderKey,
-                            mObbState.ownerGid);
-                    mVold.mount(mObbState.volId, 0, -1);
-                } else {
-                    mConnector.execute("obb", "mount", mObbState.canonicalPath,
-                            new SensitiveArg(hashedKey), mObbState.ownerGid);
-                }
-            } catch (NativeDaemonConnectorException e) {
-                int code = e.getCode();
-                if (code != VoldResponseCode.OpFailedStorageBusy) {
-                    rc = StorageResultCode.OperationFailedInternalError;
-                }
+                mObbState.volId = mVold.createObb(mObbState.canonicalPath, binderKey,
+                        mObbState.ownerGid);
+                mVold.mount(mObbState.volId, 0, -1);
             } catch (Exception e) {
                 Slog.w(TAG, e);
                 rc = StorageResultCode.OperationFailedInternalError;
@@ -4233,7 +3150,6 @@ class StorageManagerService extends IStorageManager.Stub
 
         @Override
         public void handleExecute() throws IOException {
-            waitForReady();
             warnOnNotMounted();
 
             final ObbState existingState;
@@ -4255,27 +3171,9 @@ class StorageManagerService extends IStorageManager.Stub
 
             int rc = StorageResultCode.OperationSucceeded;
             try {
-                if (ENABLE_BINDER) {
-                    mVold.unmount(mObbState.volId);
-                    mVold.destroyObb(mObbState.volId);
-                    mObbState.volId = null;
-                } else {
-                    final Command cmd = new Command("obb", "unmount", mObbState.canonicalPath);
-                    if (mForceUnmount) {
-                        cmd.appendArg("force");
-                    }
-                    mConnector.execute(cmd);
-                }
-            } catch (NativeDaemonConnectorException e) {
-                int code = e.getCode();
-                if (code == VoldResponseCode.OpFailedStorageBusy) {
-                    rc = StorageResultCode.OperationFailedStorageBusy;
-                } else if (code == VoldResponseCode.OpFailedStorageNotFound) {
-                    // If it's not mounted then we've already won.
-                    rc = StorageResultCode.OperationSucceeded;
-                } else {
-                    rc = StorageResultCode.OperationFailedInternalError;
-                }
+                mVold.unmount(mObbState.volId);
+                mVold.destroyObb(mObbState.volId);
+                mObbState.volId = null;
             } catch (Exception e) {
                 Slog.w(TAG, e);
                 rc = StorageResultCode.OperationFailedInternalError;
@@ -4506,18 +3404,6 @@ class StorageManagerService extends IStorageManager.Stub
         }
 
         pw.println();
-        pw.println("mConnector:");
-        pw.increaseIndent();
-        mConnector.dump(fd, pw, args);
-        pw.decreaseIndent();
-
-        pw.println();
-        pw.println("mCryptConnector:");
-        pw.increaseIndent();
-        mCryptConnector.dump(fd, pw, args);
-        pw.decreaseIndent();
-
-        pw.println();
         pw.print("Last maintenance: ");
         pw.println(TimeUtils.formatForLogging(mLastMaintenance));
     }
@@ -4525,11 +3411,10 @@ class StorageManagerService extends IStorageManager.Stub
     /** {@inheritDoc} */
     @Override
     public void monitor() {
-        if (mConnector != null) {
-            mConnector.monitor();
-        }
-        if (mCryptConnector != null) {
-            mCryptConnector.monitor();
+        try {
+            mVold.monitor();
+        } catch (Exception e) {
+            Slog.wtf(TAG, e);
         }
     }
 

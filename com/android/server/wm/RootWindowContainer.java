@@ -16,6 +16,7 @@
 
 package com.android.server.wm;
 
+import android.annotation.CallSuper;
 import android.content.res.Configuration;
 import android.graphics.Rect;
 import android.hardware.power.V1_0.PowerHint;
@@ -89,8 +90,9 @@ import static com.android.server.wm.WindowSurfacePlacer.SET_TURN_ON_SCREEN;
 import static com.android.server.wm.WindowSurfacePlacer.SET_UPDATE_ROTATION;
 import static com.android.server.wm.WindowSurfacePlacer.SET_WALLPAPER_ACTION_PENDING;
 import static com.android.server.wm.WindowSurfacePlacer.SET_WALLPAPER_MAY_CHANGE;
-import static com.android.server.wm.proto.WindowManagerServiceProto.DISPLAYS;
-import static com.android.server.wm.proto.WindowManagerServiceProto.WINDOWS;
+import static com.android.server.wm.proto.RootWindowContainerProto.DISPLAYS;
+import static com.android.server.wm.proto.RootWindowContainerProto.WINDOWS;
+import static com.android.server.wm.proto.RootWindowContainerProto.WINDOW_CONTAINER;
 
 /** Root {@link WindowContainer} for the device. */
 class RootWindowContainer extends WindowContainer<DisplayContent> {
@@ -413,6 +415,17 @@ class RootWindowContainer extends WindowContainer<DisplayContent> {
         for (int i = mChildren.size() - 1; i >= 0; i--) {
             final DisplayContent dc = mChildren.get(i);
             final TaskStack stack = dc.getStackById(stackId);
+            if (stack != null) {
+                return stack;
+            }
+        }
+        return null;
+    }
+
+    TaskStack getStack(int windowingMode, int activityType) {
+        for (int i = mChildren.size() - 1; i >= 0; i--) {
+            final DisplayContent dc = mChildren.get(i);
+            final TaskStack stack = dc.getStack(windowingMode, activityType);
             if (stack != null) {
                 return stack;
             }
@@ -1077,7 +1090,11 @@ class RootWindowContainer extends WindowContainer<DisplayContent> {
         }
     }
 
-    void writeToProto(ProtoOutputStream proto) {
+    @CallSuper
+    @Override
+    public void writeToProto(ProtoOutputStream proto, long fieldId) {
+        final long token = proto.start(fieldId);
+        super.writeToProto(proto, WINDOW_CONTAINER);
         if (mService.mDisplayReady) {
             final int count = mChildren.size();
             for (int i = 0; i < count; ++i) {
@@ -1088,6 +1105,7 @@ class RootWindowContainer extends WindowContainer<DisplayContent> {
         forAllWindows((w) -> {
             w.writeIdentifierToProto(proto, WINDOWS);
         }, true);
+        proto.end(token);
     }
 
     @Override

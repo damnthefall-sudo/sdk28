@@ -17,8 +17,6 @@
 package com.android.server.am;
 
 import static android.app.ActivityManager.LOCK_TASK_MODE_NONE;
-import static android.app.ActivityManager.StackId.ASSISTANT_STACK_ID;
-import static android.app.ActivityManager.StackId.DOCKED_STACK_ID;
 import static android.app.ActivityManager.StackId.FREEFORM_WORKSPACE_STACK_ID;
 import static android.app.ActivityManager.StackId.INVALID_STACK_ID;
 import static android.app.ActivityManager.StackId.PINNED_STACK_ID;
@@ -36,7 +34,6 @@ import static android.app.AppOpsManager.OP_PICTURE_IN_PICTURE;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_ASSISTANT;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_HOME;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_RECENTS;
-import static android.app.WindowConfiguration.ACTIVITY_TYPE_STANDARD;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_UNDEFINED;
 import static android.app.WindowConfiguration.activityTypeToString;
 import static android.content.Intent.ACTION_MAIN;
@@ -89,10 +86,8 @@ import static com.android.server.am.ActivityManagerDebugConfig.DEBUG_SWITCH;
 import static com.android.server.am.ActivityManagerDebugConfig.DEBUG_VISIBILITY;
 import static com.android.server.am.ActivityManagerDebugConfig.POSTFIX_CONFIGURATION;
 import static com.android.server.am.ActivityManagerDebugConfig.POSTFIX_SAVED_STATE;
-import static com.android.server.am.ActivityManagerDebugConfig.POSTFIX_SCREENSHOTS;
 import static com.android.server.am.ActivityManagerDebugConfig.POSTFIX_STATES;
 import static com.android.server.am.ActivityManagerDebugConfig.POSTFIX_SWITCH;
-import static com.android.server.am.ActivityManagerDebugConfig.POSTFIX_THUMBNAILS;
 import static com.android.server.am.ActivityManagerDebugConfig.POSTFIX_VISIBILITY;
 import static com.android.server.am.ActivityManagerDebugConfig.TAG_AM;
 import static com.android.server.am.ActivityManagerDebugConfig.TAG_WITH_CLASS_NAME;
@@ -107,7 +102,6 @@ import static com.android.server.am.ActivityStack.ActivityState.STOPPING;
 import static com.android.server.am.ActivityStack.LAUNCH_TICK;
 import static com.android.server.am.ActivityStack.LAUNCH_TICK_MSG;
 import static com.android.server.am.ActivityStack.PAUSE_TIMEOUT_MSG;
-import static com.android.server.am.ActivityStack.STACK_INVISIBLE;
 import static com.android.server.am.ActivityStack.STOP_TIMEOUT_MSG;
 import static com.android.server.am.EventLogTags.AM_ACTIVITY_FULLY_DRAWN_TIME;
 import static com.android.server.am.EventLogTags.AM_ACTIVITY_LAUNCH_TIME;
@@ -116,6 +110,16 @@ import static com.android.server.am.EventLogTags.AM_RELAUNCH_RESUME_ACTIVITY;
 import static com.android.server.am.TaskPersister.DEBUG;
 import static com.android.server.am.TaskPersister.IMAGE_EXTENSION;
 import static com.android.server.am.TaskRecord.INVALID_TASK_ID;
+import static com.android.server.am.proto.ActivityRecordProto.CONFIGURATION_CONTAINER;
+import static com.android.server.am.proto.ActivityRecordProto.FRONT_OF_TASK;
+import static com.android.server.am.proto.ActivityRecordProto.IDENTIFIER;
+import static com.android.server.am.proto.ActivityRecordProto.PROC_ID;
+import static com.android.server.am.proto.ActivityRecordProto.STATE;
+import static com.android.server.am.proto.ActivityRecordProto.VISIBLE;
+import static com.android.server.wm.proto.IdentifierProto.HASH_CODE;
+import static com.android.server.wm.proto.IdentifierProto.TITLE;
+import static com.android.server.wm.proto.IdentifierProto.USER_ID;
+
 import static org.xmlpull.v1.XmlPullParser.END_DOCUMENT;
 import static org.xmlpull.v1.XmlPullParser.END_TAG;
 import static org.xmlpull.v1.XmlPullParser.START_TAG;
@@ -153,6 +157,7 @@ import android.util.Log;
 import android.util.MergedConfiguration;
 import android.util.Slog;
 import android.util.TimeUtils;
+import android.util.proto.ProtoOutputStream;
 import android.view.AppTransitionAnimationSpec;
 import android.view.IAppTransitionAnimationSpecsFuture;
 import android.view.IApplicationToken;
@@ -1038,7 +1043,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
             }
         } else if (realActivity.getClassName().contains(RECENTS_PACKAGE_NAME)) {
             activityType = ACTIVITY_TYPE_RECENTS;
-        } else if (options != null && options.getLaunchStackId() == ASSISTANT_STACK_ID
+        } else if (options != null && options.getLaunchActivityType() == ACTIVITY_TYPE_ASSISTANT
                 && canLaunchAssistActivity(launchedFromPackage)) {
             activityType = ACTIVITY_TYPE_ASSISTANT;
         }
@@ -1060,6 +1065,11 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
 
     int getStackId() {
         return getStack() != null ? getStack().mStackId : INVALID_STACK_ID;
+    }
+
+    ActivityDisplay getDisplay() {
+        final ActivityStack stack = getStack();
+        return stack != null ? stack.getDisplay() : null;
     }
 
     boolean changeWindowTranslucency(boolean toOpaque) {
@@ -1127,10 +1137,12 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
      * @return whether this activity supports split-screen multi-window and can be put in the docked
      *         stack.
      */
-    boolean supportsSplitScreen() {
+    @Override
+    public boolean supportsSplitScreenWindowingMode() {
         // An activity can not be docked even if it is considered resizeable because it only
         // supports picture-in-picture mode but has a non-resizeable resizeMode
-        return service.mSupportsSplitScreenMultiWindow && supportsResizeableMultiWindow();
+        return super.supportsSplitScreenWindowingMode()
+                && service.mSupportsSplitScreenMultiWindow && supportsResizeableMultiWindow();
     }
 
     /**
@@ -1157,8 +1169,15 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
      *         can be put a secondary screen.
      */
     boolean canBeLaunchedOnDisplay(int displayId) {
+        final TaskRecord task = getTask();
+
+        // The resizeability of an Activity's parent task takes precendence over the ActivityInfo.
+        // This allows for a non resizable activity to be launched into a resizeable task.
+        final boolean resizeable =
+                task != null ? task.isResizeable() : supportsResizeableMultiWindow();
+
         return service.mStackSupervisor.canPlaceEntityOnDisplay(displayId,
-                supportsResizeableMultiWindow(), launchedFromPid, launchedFromUid, info);
+                resizeable, launchedFromPid, launchedFromUid, info);
     }
 
     /**
@@ -1184,7 +1203,8 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
 
         boolean isKeyguardLocked = service.isKeyguardLocked();
         boolean isCurrentAppLocked = service.getLockTaskModeState() != LOCK_TASK_MODE_NONE;
-        boolean hasPinnedStack = mStackSupervisor.getStack(PINNED_STACK_ID) != null;
+        final ActivityDisplay display = getDisplay();
+        boolean hasPinnedStack = display != null && display.hasPinnedStack();
         // Don't return early if !isNotLocked, since we want to throw an exception if the activity
         // is in an incorrect state
         boolean isNotLockedOrOnKeyguard = !isKeyguardLocked && !isCurrentAppLocked;
@@ -1530,8 +1550,9 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
         if (service.mSupportsLeanbackOnly && isVisible && isActivityTypeRecents()) {
             // On devices that support leanback only (Android TV), Recents activity can only be
             // visible if the home stack is the focused stack or we are in split-screen mode.
-            isVisible = mStackSupervisor.getStack(DOCKED_STACK_ID) != null
-                    || mStackSupervisor.isFocusedStack(getStack());
+            final ActivityDisplay display = getDisplay();
+            boolean hasSplitScreenStack = display != null && display.hasSplitScreenStack();
+            isVisible = hasSplitScreenStack || mStackSupervisor.isFocusedStack(getStack());
         }
 
         return isVisible;
@@ -1934,7 +1955,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
 
         return (info.flags & FLAG_SHOW_FOR_ALL_USERS) != 0
                 || (mStackSupervisor.isCurrentProfileLocked(userId)
-                && service.mUserController.isUserRunningLocked(userId, 0 /* flags */));
+                && service.mUserController.isUserRunning(userId, 0 /* flags */));
     }
 
     /**
@@ -2298,7 +2319,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
         // be visible based on the stack, task, and lockscreen state and use that here instead. The
         // method should be based on the logic in ActivityStack.ensureActivitiesVisibleLocked().
         // Skip updating configuration for activity is a stack that shouldn't be visible.
-        if (stack.shouldBeVisible(null /* starting */) == STACK_INVISIBLE) {
+        if (!stack.shouldBeVisible(null /* starting */)) {
             if (DEBUG_SWITCH || DEBUG_CONFIGURATION) Slog.v(TAG_CONFIGURATION,
                     "Skipping config check invisible stack: " + this);
             return true;
@@ -2769,5 +2790,26 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
         sb.append(intent.getComponent().flattenToShortString());
         stringName = sb.toString();
         return toString();
+    }
+
+    void writeIdentifierToProto(ProtoOutputStream proto, long fieldId) {
+        final long token = proto.start(fieldId);
+        proto.write(HASH_CODE, System.identityHashCode(this));
+        proto.write(USER_ID, userId);
+        proto.write(TITLE, intent.getComponent().flattenToShortString());
+        proto.end(token);
+    }
+
+    public void writeToProto(ProtoOutputStream proto, long fieldId) {
+        final long token = proto.start(fieldId);
+        super.writeToProto(proto, CONFIGURATION_CONTAINER);
+        writeIdentifierToProto(proto, IDENTIFIER);
+        proto.write(STATE, state.toString());
+        proto.write(VISIBLE, visible);
+        proto.write(FRONT_OF_TASK, frontOfTask);
+        if (app != null) {
+            proto.write(PROC_ID, app.pid);
+        }
+        proto.end(token);
     }
 }

@@ -19,8 +19,11 @@ package com.android.server.wm;
 import static android.app.ActivityManager.DOCKED_STACK_CREATE_MODE_TOP_OR_LEFT;
 import static android.app.ActivityManager.DOCKED_STACK_CREATE_MODE_BOTTOM_OR_RIGHT;
 import static android.app.ActivityManager.StackId.DOCKED_STACK_ID;
-import static android.app.ActivityManager.StackId.HOME_STACK_ID;
 import static android.app.ActivityManager.StackId.PINNED_STACK_ID;
+import static android.app.WindowConfiguration.ACTIVITY_TYPE_ASSISTANT;
+import static android.app.WindowConfiguration.ACTIVITY_TYPE_HOME;
+import static android.app.WindowConfiguration.ACTIVITY_TYPE_RECENTS;
+import static android.app.WindowConfiguration.WINDOWING_MODE_FULLSCREEN;
 import static android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSET;
 import static android.content.res.Configuration.DENSITY_DPI_UNDEFINED;
 import static android.content.res.Configuration.ORIENTATION_PORTRAIT;
@@ -41,8 +44,9 @@ import static com.android.server.wm.proto.StackProto.BOUNDS;
 import static com.android.server.wm.proto.StackProto.FILLS_PARENT;
 import static com.android.server.wm.proto.StackProto.ID;
 import static com.android.server.wm.proto.StackProto.TASKS;
+import static com.android.server.wm.proto.StackProto.WINDOW_CONTAINER;
 
-import android.app.ActivityManager.StackId;
+import android.annotation.CallSuper;
 import android.content.res.Configuration;
 import android.graphics.Rect;
 import android.graphics.Region;
@@ -147,9 +151,10 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
 
     Rect mPreAnimationBounds = new Rect();
 
-    TaskStack(WindowManagerService service, int stackId) {
+    TaskStack(WindowManagerService service, int stackId, StackWindowController controller) {
         mService = service;
         mStackId = stackId;
+        setController(controller);
         mDockedStackMinimizeThickness = service.mContext.getResources().getDimensionPixelSize(
                 com.android.internal.R.dimen.docked_stack_minimize_thickness);
         EventLog.writeEvent(EventLogTags.WM_STACK_CREATED, stackId);
@@ -733,7 +738,7 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
         outTempTaskBounds.setEmpty();
 
         // When the home stack is resizable, should always have the same stack and task bounds
-        if (mStackId == HOME_STACK_ID) {
+        if (isActivityTypeHome()) {
             final Task homeTask = findHomeTask();
             if (homeTask != null && homeTask.isResizeable()) {
                 // Calculate the home stack bounds when in docked mode and the home stack is
@@ -918,7 +923,9 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
 
     void resetAnimationBackgroundAnimator() {
         mAnimationBackgroundAnimator = null;
-        mAnimationBackgroundSurface.hide();
+        if (mAnimationBackgroundSurface != null) {
+            mAnimationBackgroundSurface.hide();
+        }
     }
 
     void setAnimationBackground(WindowStateAnimator winAnimator, int color) {
@@ -1005,7 +1012,7 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
             mAdjustImeAmount = 0f;
             mAdjustDividerAmount = 0f;
             updateAdjustedBounds();
-            mService.setResizeDimLayer(false, mStackId, 1.0f);
+            mService.setResizeDimLayer(false, getWindowingMode(), 1.0f);
         } else {
             mImeGoingAway |= mAdjustedForIme;
         }
@@ -1201,7 +1208,7 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
         if (mAdjustedForIme && adjust && !isImeTarget) {
             final float alpha = Math.max(mAdjustImeAmount, mAdjustDividerAmount)
                     * IME_ADJUST_DIM_AMOUNT;
-            mService.setResizeDimLayer(true, mStackId, alpha);
+            mService.setResizeDimLayer(true, getWindowingMode(), alpha);
         }
     }
 
@@ -1219,8 +1226,11 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
         return mMinimizeAmount != 0f;
     }
 
-    void writeToProto(ProtoOutputStream proto, long fieldId) {
+    @CallSuper
+    @Override
+    public void writeToProto(ProtoOutputStream proto, long fieldId) {
         final long token = proto.start(fieldId);
+        super.writeToProto(proto, WINDOW_CONTAINER);
         proto.write(ID, mStackId);
         for (int taskNdx = mChildren.size() - 1; taskNdx >= 0; taskNdx--) {
             mChildren.get(taskNdx).writeToProto(proto, TASKS);
@@ -1277,7 +1287,7 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
 
     @Override
     public boolean dimFullscreen() {
-        return StackId.isHomeOrRecentsStack(mStackId) || fillsParent();
+        return !isActivityTypeStandard() || fillsParent();
     }
 
     @Override
@@ -1657,7 +1667,15 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
 
     @Override
     int getOrientation() {
-        return (StackId.canSpecifyOrientation(mStackId))
-                ? super.getOrientation() : SCREEN_ORIENTATION_UNSET;
+        return (canSpecifyOrientation()) ? super.getOrientation() : SCREEN_ORIENTATION_UNSET;
+    }
+
+    private boolean canSpecifyOrientation() {
+        final int windowingMode = getWindowingMode();
+        final int activityType = getActivityType();
+        return windowingMode == WINDOWING_MODE_FULLSCREEN
+                || activityType == ACTIVITY_TYPE_HOME
+                || activityType == ACTIVITY_TYPE_RECENTS
+                || activityType == ACTIVITY_TYPE_ASSISTANT;
     }
 }

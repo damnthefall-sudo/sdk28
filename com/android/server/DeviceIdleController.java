@@ -307,6 +307,12 @@ public class DeviceIdleController extends SystemService
      */
     private int[] mTempWhitelistAppIdArray = new int[0];
 
+    /**
+     * Apps in the system whitelist that have been taken out (probably because the user wanted to).
+     * They can be restored back by calling restoreAppToSystemWhitelist(String).
+     */
+    private ArrayMap<String, Integer> mRemovedFromSystemWhitelistApps = new ArrayMap<>();
+
     private static final int EVENT_NULL = 0;
     private static final int EVENT_NORMAL = 1;
     private static final int EVENT_LIGHT_IDLE = 2;
@@ -760,17 +766,15 @@ public class DeviceIdleController extends SystemService
         public long NOTIFICATION_WHITELIST_DURATION;
 
         private final ContentResolver mResolver;
-        private final boolean mHasWatch;
+        private final boolean mSmallBatteryDevice;
         private final KeyValueListParser mParser = new KeyValueListParser(',');
 
         public Constants(Handler handler, ContentResolver resolver) {
             super(handler);
             mResolver = resolver;
-            mHasWatch = getContext().getPackageManager().hasSystemFeature(
-                    PackageManager.FEATURE_WATCH);
-            mResolver.registerContentObserver(Settings.Global.getUriFor(
-                    mHasWatch ? Settings.Global.DEVICE_IDLE_CONSTANTS_WATCH
-                              : Settings.Global.DEVICE_IDLE_CONSTANTS),
+            mSmallBatteryDevice = ActivityManager.isSmallBatteryDevice();
+            mResolver.registerContentObserver(
+                    Settings.Global.getUriFor(Settings.Global.DEVICE_IDLE_CONSTANTS),
                     false, this);
             updateConstants();
         }
@@ -784,8 +788,7 @@ public class DeviceIdleController extends SystemService
             synchronized (DeviceIdleController.this) {
                 try {
                     mParser.setString(Settings.Global.getString(mResolver,
-                            mHasWatch ? Settings.Global.DEVICE_IDLE_CONSTANTS_WATCH
-                                      : Settings.Global.DEVICE_IDLE_CONSTANTS));
+                            Settings.Global.DEVICE_IDLE_CONSTANTS));
                 } catch (IllegalArgumentException e) {
                     // Failed to parse the settings string, log this and move on
                     // with defaults.
@@ -815,7 +818,7 @@ public class DeviceIdleController extends SystemService
                 MIN_DEEP_MAINTENANCE_TIME = mParser.getLong(
                         KEY_MIN_DEEP_MAINTENANCE_TIME,
                         !COMPRESS_TIME ? 30 * 1000L : 5 * 1000L);
-                long inactiveTimeoutDefault = (mHasWatch ? 15 : 30) * 60 * 1000L;
+                long inactiveTimeoutDefault = (mSmallBatteryDevice ? 15 : 30) * 60 * 1000L;
                 INACTIVE_TIMEOUT = mParser.getLong(KEY_INACTIVE_TIMEOUT,
                         !COMPRESS_TIME ? inactiveTimeoutDefault : (inactiveTimeoutDefault / 10));
                 SENSING_TIMEOUT = mParser.getLong(KEY_SENSING_TIMEOUT,
@@ -825,7 +828,7 @@ public class DeviceIdleController extends SystemService
                 LOCATION_ACCURACY = mParser.getFloat(KEY_LOCATION_ACCURACY, 20);
                 MOTION_INACTIVE_TIMEOUT = mParser.getLong(KEY_MOTION_INACTIVE_TIMEOUT,
                         !COMPRESS_TIME ? 10 * 60 * 1000L : 60 * 1000L);
-                long idleAfterInactiveTimeout = (mHasWatch ? 15 : 30) * 60 * 1000L;
+                long idleAfterInactiveTimeout = (mSmallBatteryDevice ? 15 : 30) * 60 * 1000L;
                 IDLE_AFTER_INACTIVE_TIMEOUT = mParser.getLong(KEY_IDLE_AFTER_INACTIVE_TIMEOUT,
                         !COMPRESS_TIME ? idleAfterInactiveTimeout
                                        : (idleAfterInactiveTimeout / 10));
@@ -1160,6 +1163,38 @@ public class DeviceIdleController extends SystemService
             } finally {
                 Binder.restoreCallingIdentity(ident);
             }
+        }
+
+        @Override public void removeSystemPowerWhitelistApp(String name) {
+            if (DEBUG) {
+                Slog.d(TAG, "removeAppFromSystemWhitelist(name = " + name + ")");
+            }
+            getContext().enforceCallingOrSelfPermission(android.Manifest.permission.DEVICE_POWER,
+                    null);
+            long ident = Binder.clearCallingIdentity();
+            try {
+                removeSystemPowerWhitelistAppInternal(name);
+            } finally {
+                Binder.restoreCallingIdentity(ident);
+            }
+        }
+
+        @Override public void restoreSystemPowerWhitelistApp(String name) {
+            if (DEBUG) {
+                Slog.d(TAG, "restoreAppToSystemWhitelist(name = " + name + ")");
+            }
+            getContext().enforceCallingOrSelfPermission(android.Manifest.permission.DEVICE_POWER,
+                    null);
+            long ident = Binder.clearCallingIdentity();
+            try {
+                restoreSystemPowerWhitelistAppInternal(name);
+            } finally {
+                Binder.restoreCallingIdentity(ident);
+            }
+        }
+
+        public String[] getRemovedSystemPowerWhitelistApps() {
+            return getRemovedSystemPowerWhitelistAppsInternal();
         }
 
         @Override public String[] getSystemPowerWhitelistExceptIdle() {
@@ -1504,6 +1539,42 @@ public class DeviceIdleController extends SystemService
         }
     }
 
+    void resetSystemPowerWhitelistInternal() {
+        synchronized (this) {
+            mPowerSaveWhitelistApps.putAll(mRemovedFromSystemWhitelistApps);
+            mRemovedFromSystemWhitelistApps.clear();
+            reportPowerSaveWhitelistChangedLocked();
+            updateWhitelistAppIdsLocked();
+            writeConfigFileLocked();
+        }
+    }
+
+    public boolean restoreSystemPowerWhitelistAppInternal(String name) {
+        synchronized (this) {
+            if (!mRemovedFromSystemWhitelistApps.containsKey(name)) {
+                return false;
+            }
+            mPowerSaveWhitelistApps.put(name, mRemovedFromSystemWhitelistApps.remove(name));
+            reportPowerSaveWhitelistChangedLocked();
+            updateWhitelistAppIdsLocked();
+            writeConfigFileLocked();
+            return true;
+        }
+    }
+
+    public boolean removeSystemPowerWhitelistAppInternal(String name) {
+        synchronized (this) {
+            if (!mPowerSaveWhitelistApps.containsKey(name)) {
+                return false;
+            }
+            mRemovedFromSystemWhitelistApps.put(name, mPowerSaveWhitelistApps.remove(name));
+            reportPowerSaveWhitelistChangedLocked();
+            updateWhitelistAppIdsLocked();
+            writeConfigFileLocked();
+            return true;
+        }
+    }
+
     public boolean addPowerSaveWhitelistExceptIdleInternal(String name) {
         synchronized (this) {
             try {
@@ -1560,6 +1631,17 @@ public class DeviceIdleController extends SystemService
             String[] apps = new String[size];
             for (int i = 0; i < size; i++) {
                 apps[i] = mPowerSaveWhitelistApps.keyAt(i);
+            }
+            return apps;
+        }
+    }
+
+    public String[] getRemovedSystemPowerWhitelistAppsInternal() {
+        synchronized (this) {
+            int size = mRemovedFromSystemWhitelistApps.size();
+            final String[] apps = new String[size];
+            for (int i = 0; i < size; i++) {
+                apps[i] = mRemovedFromSystemWhitelistApps.keyAt(i);
             }
             return apps;
         }
@@ -2481,21 +2563,31 @@ public class DeviceIdleController extends SystemService
                 }
 
                 String tagName = parser.getName();
-                if (tagName.equals("wl")) {
-                    String name = parser.getAttributeValue(null, "n");
-                    if (name != null) {
-                        try {
-                            ApplicationInfo ai = pm.getApplicationInfo(name,
-                                    PackageManager.MATCH_ANY_USER);
-                            mPowerSaveWhitelistUserApps.put(ai.packageName,
-                                    UserHandle.getAppId(ai.uid));
-                        } catch (PackageManager.NameNotFoundException e) {
+                switch (tagName) {
+                    case "wl":
+                        String name = parser.getAttributeValue(null, "n");
+                        if (name != null) {
+                            try {
+                                ApplicationInfo ai = pm.getApplicationInfo(name,
+                                        PackageManager.MATCH_ANY_USER);
+                                mPowerSaveWhitelistUserApps.put(ai.packageName,
+                                        UserHandle.getAppId(ai.uid));
+                            } catch (PackageManager.NameNotFoundException e) {
+                            }
                         }
-                    }
-                } else {
-                    Slog.w(TAG, "Unknown element under <config>: "
-                            + parser.getName());
-                    XmlUtils.skipCurrentTag(parser);
+                        break;
+                    case "un-wl":
+                        final String packageName = parser.getAttributeValue(null, "n");
+                        if (mPowerSaveWhitelistApps.containsKey(packageName)) {
+                            mRemovedFromSystemWhitelistApps.put(packageName,
+                                    mPowerSaveWhitelistApps.remove(packageName));
+                        }
+                        break;
+                    default:
+                        Slog.w(TAG, "Unknown element under <config>: "
+                                + parser.getName());
+                        XmlUtils.skipCurrentTag(parser);
+                        break;
                 }
             }
 
@@ -2556,6 +2648,11 @@ public class DeviceIdleController extends SystemService
             out.attribute(null, "n", name);
             out.endTag(null, "wl");
         }
+        for (int i = 0; i < mRemovedFromSystemWhitelistApps.size(); i++) {
+            out.startTag(null, "un-wl");
+            out.attribute(null, "n", mRemovedFromSystemWhitelistApps.keyAt(i));
+            out.endTag(null, "un-wl");
+        }
         out.endTag(null, "config");
         out.endDocument();
     }
@@ -2584,6 +2681,13 @@ public class DeviceIdleController extends SystemService
         pw.println("    Print currently whitelisted apps.");
         pw.println("  whitelist [package ...]");
         pw.println("    Add (prefix with +) or remove (prefix with -) packages.");
+        pw.println("  sys-whitelist [package ...|reset]");
+        pw.println("    Prefix the package with '-' to remove it from the system whitelist or '+'"
+                + " to put it back in the system whitelist.");
+        pw.println("    Note that only packages that were"
+                + " earlier removed from the system whitelist can be added back.");
+        pw.println("    reset will reset the whitelist to the original state");
+        pw.println("    Prints the system whitelist if no arguments are specified");
         pw.println("  except-idle-whitelist [package ...|reset]");
         pw.println("    Prefix the package with '+' to add it to whitelist or "
                 + "'=' to check if it is already whitelisted");
@@ -2944,6 +3048,50 @@ public class DeviceIdleController extends SystemService
             } finally {
                 Binder.restoreCallingIdentity(token);
             }
+        } else if ("sys-whitelist".equals(cmd)) {
+            String arg = shell.getNextArg();
+            if (arg != null) {
+                getContext().enforceCallingOrSelfPermission(
+                        android.Manifest.permission.DEVICE_POWER, null);
+                final long token = Binder.clearCallingIdentity();
+                try {
+                    if ("reset".equals(arg)) {
+                        resetSystemPowerWhitelistInternal();
+                    } else {
+                        do {
+                            if (arg.length() < 1
+                                    || (arg.charAt(0) != '-' && arg.charAt(0) != '+')) {
+                                pw.println("Package must be prefixed with + or - " + arg);
+                                return -1;
+                            }
+                            final char op = arg.charAt(0);
+                            final String pkg = arg.substring(1);
+                            switch (op) {
+                                case '+':
+                                    if (restoreSystemPowerWhitelistAppInternal(pkg)) {
+                                        pw.println("Restored " + pkg);
+                                    }
+                                    break;
+                                case '-':
+                                    if (removeSystemPowerWhitelistAppInternal(pkg)) {
+                                        pw.println("Removed " + pkg);
+                                    }
+                                    break;
+                            }
+                        } while ((arg = shell.getNextArg()) != null);
+                    }
+                } finally {
+                    Binder.restoreCallingIdentity(token);
+                }
+            } else {
+                synchronized (this) {
+                    for (int j=0; j<mPowerSaveWhitelistApps.size(); j++) {
+                        pw.print(mPowerSaveWhitelistApps.keyAt(j));
+                        pw.print(",");
+                        pw.println(mPowerSaveWhitelistApps.valueAt(j));
+                    }
+                }
+            }
         } else {
             return shell.handleDefaultCommands(cmd);
         }
@@ -3025,6 +3173,14 @@ public class DeviceIdleController extends SystemService
                 for (int i = 0; i < size; i++) {
                     pw.print("    ");
                     pw.println(mPowerSaveWhitelistApps.keyAt(i));
+                }
+            }
+            size = mRemovedFromSystemWhitelistApps.size();
+            if (size > 0) {
+                pw.println("  Removed from whitelist system apps:");
+                for (int i = 0; i < size; i++) {
+                    pw.print("    ");
+                    pw.println(mRemovedFromSystemWhitelistApps.keyAt(i));
                 }
             }
             size = mPowerSaveWhitelistUserApps.size();

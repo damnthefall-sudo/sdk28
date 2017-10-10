@@ -173,6 +173,7 @@ public class RadialGradient_Delegate extends Gradient_Delegate {
                 int index = 0;
                 float[] pt1 = new float[2];
                 float[] pt2 = new float[2];
+
                 for (int iy = 0 ; iy < h ; iy++) {
                     for (int ix = 0 ; ix < w ; ix++) {
                         // handle the canvas transform
@@ -181,12 +182,12 @@ public class RadialGradient_Delegate extends Gradient_Delegate {
                         mCanvasMatrix.transform(pt1, 0, pt2, 0, 1);
 
                         // handle the local matrix
-                        pt1[0] = pt2[0] - mX;
-                        pt1[1] = pt2[1] - mY;
+                        pt1[0] = pt2[0];
+                        pt1[1] = pt2[1];
                         mLocalMatrix.transform(pt1, 0, pt2, 0, 1);
 
-                        float _x = pt2[0];
-                        float _y = pt2[1];
+                        float _x = pt2[0] - mX;
+                        float _y = pt2[1] - mY;
                         float distance = (float) Math.hypot(_x, _y);
 
                         data[index++] = getGradientColor(distance / mRadius);

@@ -2162,6 +2162,15 @@ public final class ActiveServices {
             }
         }
 
+        if (r.fgRequired) {
+            if (DEBUG_FOREGROUND_SERVICE) {
+                Slog.v(TAG, "Whitelisting " + UserHandle.formatUid(r.appInfo.uid)
+                        + " for fg-service launch");
+            }
+            mAm.tempWhitelistUidLocked(r.appInfo.uid,
+                    SERVICE_START_FOREGROUND_TIMEOUT, "fg-service-launch");
+        }
+
         if (!mPendingServices.contains(r)) {
             mPendingServices.add(r);
         }
@@ -3141,7 +3150,7 @@ public final class ActiveServices {
                         sr.userId, sr.crashCount, sr.shortName, app.pid);
                 bringDownServiceLocked(sr);
             } else if (!allowRestart
-                    || !mAm.mUserController.isUserRunningLocked(sr.userId, 0)) {
+                    || !mAm.mUserController.isUserRunning(sr.userId, 0)) {
                 bringDownServiceLocked(sr);
             } else {
                 boolean canceled = scheduleServiceRestartLocked(sr, true);

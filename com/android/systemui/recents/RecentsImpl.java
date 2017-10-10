@@ -16,9 +16,9 @@
 
 package com.android.systemui.recents;
 
-import static android.app.ActivityManager.StackId.FREEFORM_WORKSPACE_STACK_ID;
-import static android.app.ActivityManager.StackId.INVALID_STACK_ID;
-import static android.app.ActivityManager.StackId.isHomeOrRecentsStack;
+import static android.app.WindowConfiguration.ACTIVITY_TYPE_HOME;
+import static android.app.WindowConfiguration.ACTIVITY_TYPE_RECENTS;
+import static android.app.WindowConfiguration.WINDOWING_MODE_FREEFORM;
 import static android.view.View.MeasureSpec;
 
 import android.app.ActivityManager;
@@ -173,7 +173,7 @@ public class RecentsImpl implements ActivityOptions.OnAnimationFinishedListener 
         }
 
         @Override
-        public void onActivityPinned(String packageName, int taskId) {
+        public void onActivityPinned(String packageName, int userId, int taskId, int stackId) {
             // Check this is for the right user
             if (!checkCurrentUserId(mContext, false /* debug */)) {
                 return;
@@ -533,7 +533,9 @@ public class RecentsImpl implements ActivityOptions.OnAnimationFinishedListener 
         if (runningTask == null) return;
 
         // Find the task in the recents list
-        boolean isRunningTaskInHomeStack = SystemServicesProxy.isHomeStack(runningTask.stackId);
+        boolean isRunningTaskInHomeStack =
+                runningTask.configuration.windowConfiguration.getActivityType()
+                        == ACTIVITY_TYPE_HOME;
         ArrayList<Task> tasks = focusedStack.getStackTasks();
         Task toTask = null;
         ActivityOptions launchOpts = null;
@@ -565,8 +567,7 @@ public class RecentsImpl implements ActivityOptions.OnAnimationFinishedListener 
 
         // Launch the task
         ssp.startActivityFromRecents(
-                mContext, toTask.key, toTask.title, launchOpts, INVALID_STACK_ID,
-                null /* resultListener */);
+                mContext, toTask.key, toTask.title, launchOpts, null /* resultListener */);
     }
 
     /**
@@ -584,9 +585,10 @@ public class RecentsImpl implements ActivityOptions.OnAnimationFinishedListener 
 
         // Return early if there is no running task (can't determine affiliated tasks in this case)
         ActivityManager.RunningTaskInfo runningTask = ssp.getRunningTask();
+        final int activityType = runningTask.configuration.windowConfiguration.getActivityType();
         if (runningTask == null) return;
         // Return early if the running task is in the home/recents stack (optimization)
-        if (isHomeOrRecentsStack(runningTask.stackId)) return;
+        if (activityType == ACTIVITY_TYPE_HOME || activityType == ACTIVITY_TYPE_RECENTS) return;
 
         // Find the task in the recents list
         ArrayList<Task> tasks = focusedStack.getStackTasks();
@@ -639,8 +641,7 @@ public class RecentsImpl implements ActivityOptions.OnAnimationFinishedListener 
 
         // Launch the task
         ssp.startActivityFromRecents(
-                mContext, toTask.key, toTask.title, launchOpts, INVALID_STACK_ID,
-                null /* resultListener */);
+                mContext, toTask.key, toTask.title, launchOpts, null /* resultListener */);
     }
 
     public void showNextAffiliatedTask() {
@@ -872,7 +873,9 @@ public class RecentsImpl implements ActivityOptions.OnAnimationFinishedListener 
             getThumbnailTransitionActivityOptions(ActivityManager.RunningTaskInfo runningTask,
                     Rect windowOverrideRect) {
         final boolean isLowRamDevice = Recents.getConfiguration().isLowRamDevice;
-        if (runningTask != null && runningTask.stackId == FREEFORM_WORKSPACE_STACK_ID) {
+        if (runningTask != null
+                && runningTask.configuration.windowConfiguration.getWindowingMode()
+                == WINDOWING_MODE_FREEFORM) {
             ArrayList<AppTransitionAnimationSpec> specs = new ArrayList<>();
             ArrayList<Task> tasks = mDummyStackView.getStack().getStackTasks();
             TaskStackLayoutAlgorithm stackLayout = mDummyStackView.getStackAlgorithm();

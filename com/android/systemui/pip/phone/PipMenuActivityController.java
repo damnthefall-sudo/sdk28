@@ -16,7 +16,8 @@
 
 package com.android.systemui.pip.phone;
 
-import static android.app.ActivityManager.StackId.PINNED_STACK_ID;
+import static android.app.WindowConfiguration.ACTIVITY_TYPE_UNDEFINED;
+import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED;
 
 import android.app.ActivityManager.StackInfo;
 import android.app.ActivityOptions;
@@ -223,7 +224,7 @@ public class PipMenuActivityController {
         }
     }
 
-    public void onActivityUnpinned(ComponentName topPipActivity) {
+    public void onActivityUnpinned() {
         hideMenu();
         setStartActivityRequested(false);
     }
@@ -383,7 +384,8 @@ public class PipMenuActivityController {
     private void startMenuActivity(int menuState, Rect stackBounds, Rect movementBounds,
             boolean allowMenuTimeout, boolean willResizeMenu) {
         try {
-            StackInfo pinnedStackInfo = mActivityManager.getStackInfo(PINNED_STACK_ID);
+            StackInfo pinnedStackInfo = mActivityManager.getStackInfo(
+                    WINDOWING_MODE_PINNED, ACTIVITY_TYPE_UNDEFINED);
             if (pinnedStackInfo != null && pinnedStackInfo.taskIds != null &&
                     pinnedStackInfo.taskIds.length > 0) {
                 Intent intent = new Intent(mContext, PipMenuActivity.class);
@@ -421,7 +423,8 @@ public class PipMenuActivityController {
             // Fetch the pinned stack bounds
             Rect stackBounds = null;
             try {
-                StackInfo pinnedStackInfo = mActivityManager.getStackInfo(PINNED_STACK_ID);
+                StackInfo pinnedStackInfo = mActivityManager.getStackInfo(
+                        WINDOWING_MODE_PINNED, ACTIVITY_TYPE_UNDEFINED);
                 if (pinnedStackInfo != null) {
                     stackBounds = pinnedStackInfo.bounds;
                 }

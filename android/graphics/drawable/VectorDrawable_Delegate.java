@@ -35,6 +35,7 @@ import android.graphics.Path;
 import android.graphics.PathMeasure;
 import android.graphics.Path_Delegate;
 import android.graphics.Rect;
+import android.graphics.Region;
 import android.graphics.Region.Op;
 import android.graphics.Shader_Delegate;
 import android.util.ArrayMap;
@@ -144,6 +145,9 @@ public class VectorDrawable_Delegate {
         VPathRenderer_Delegate nativePathRenderer = VNativeObject.getDelegate(rendererPtr);
 
         Canvas_Delegate.nSave(canvasWrapperPtr, MATRIX_SAVE_FLAG | CLIP_SAVE_FLAG);
+        Canvas_Delegate.nClipRect(canvasWrapperPtr,
+                bounds.left, bounds.top, bounds.right, bounds.bottom,
+                Region.Op.INTERSECT.nativeInt);
         Canvas_Delegate.nTranslate(canvasWrapperPtr, bounds.left, bounds.top);
 
         if (needsMirroring) {

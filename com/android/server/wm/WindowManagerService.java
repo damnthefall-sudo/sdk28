@@ -109,6 +109,7 @@ import static com.android.server.wm.proto.WindowManagerServiceProto.FOCUSED_WIND
 import static com.android.server.wm.proto.WindowManagerServiceProto.INPUT_METHOD_WINDOW;
 import static com.android.server.wm.proto.WindowManagerServiceProto.LAST_ORIENTATION;
 import static com.android.server.wm.proto.WindowManagerServiceProto.POLICY;
+import static com.android.server.wm.proto.WindowManagerServiceProto.ROOT_WINDOW_CONTAINER;
 import static com.android.server.wm.proto.WindowManagerServiceProto.ROTATION;
 
 import android.Manifest;
@@ -246,6 +247,7 @@ import com.android.server.Watchdog;
 import com.android.server.input.InputManagerService;
 import com.android.server.power.BatterySaverPolicy.ServiceType;
 import com.android.server.power.ShutdownThread;
+import com.android.server.utils.PriorityDump;
 
 import java.io.BufferedWriter;
 import java.io.DataInputStream;
@@ -389,6 +391,18 @@ public class WindowManagerService extends IWindowManager.Stub
         }
     };
     final WindowSurfacePlacer mWindowPlacerLocked;
+
+    private final PriorityDump.PriorityDumper mPriorityDumper = new PriorityDump.PriorityDumper() {
+        @Override
+        public void dumpCritical(FileDescriptor fd, PrintWriter pw, String[] args) {
+            doDump(fd, pw, new String[] {"-a"});
+        }
+
+        @Override
+        public void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
+            doDump(fd, pw, args);
+        }
+    };
 
     /**
      * Current user when multi-user is enabled. Don't show windows of
@@ -2029,10 +2043,14 @@ public class WindowManagerService extends IWindowManager.Stub
                 Slog.i(TAG_WM, "Relayout " + win + ": oldVis=" + oldVisibility
                         + " newVis=" + viewVisibility, stack);
             }
-            if (viewVisibility == View.VISIBLE &&
-                    (win.mAppToken == null || win.mAttrs.type == TYPE_APPLICATION_STARTING
-                            || !win.mAppToken.isClientHidden())) {
 
+            // We should only relayout if the view is visible, it is a starting window, or the
+            // associated appToken is not hidden.
+            final boolean shouldRelayout = viewVisibility == View.VISIBLE &&
+                (win.mAppToken == null || win.mAttrs.type == TYPE_APPLICATION_STARTING
+                    || !win.mAppToken.isClientHidden());
+
+            if (shouldRelayout) {
                 Trace.traceBegin(TRACE_TAG_WINDOW_MANAGER, "relayoutWindow: viewVisibility_1");
 
                 // We are about to create a surface, but we didn't run a layout yet. So better run
@@ -2179,8 +2197,18 @@ public class WindowManagerService extends IWindowManager.Stub
             // and needs process it before handling the corresponding window frame. the variable
             // {@code mergedConfiguration} is an out parameter that will be passed back to the
             // client over IPC and checked there.
-            win.getMergedConfiguration(mergedConfiguration);
-            win.setReportedConfiguration(mergedConfiguration);
+            // Note: in the cases where the window is tied to an activity, we should not send a
+            // configuration update when the window has requested to be hidden. Doing so can lead
+            // to the client erroneously accepting a configuration that would have otherwise caused
+            // an activity restart. We instead hand back the last reported
+            // {@link MergedConfiguration}.
+            if (shouldRelayout) {
+                win.getMergedConfiguration(mergedConfiguration);
+            } else {
+                win.getLastReportedMergedConfiguration(mergedConfiguration);
+            }
+
+            win.setLastReportedMergedConfiguration(mergedConfiguration);
 
             outFrame.set(win.mCompatFrame);
             outOverscanInsets.set(win.mOverscanInsets);
@@ -2881,9 +2909,9 @@ public class WindowManagerService extends IWindowManager.Stub
     }
 
     @Override
-    public void getStackBounds(int stackId, Rect bounds) {
+    public void getStackBounds(int windowingMode, int activityType, Rect bounds) {
         synchronized (mWindowMap) {
-            final TaskStack stack = mRoot.getStackById(stackId);
+            final TaskStack stack = mRoot.getStack(windowingMode, activityType);
             if (stack != null) {
                 stack.getBounds(bounds);
                 return;
@@ -6505,7 +6533,7 @@ public class WindowManagerService extends IWindowManager.Stub
 
     private void writeToProtoLocked(ProtoOutputStream proto) {
         mPolicy.writeToProto(proto, POLICY);
-        mRoot.writeToProto(proto);
+        mRoot.writeToProto(proto, ROOT_WINDOW_CONTAINER);
         if (mCurrentFocus != null) {
             mCurrentFocus.writeIdentifierToProto(proto, FOCUSED_WINDOW);
         }
@@ -6793,8 +6821,11 @@ public class WindowManagerService extends IWindowManager.Stub
 
     @Override
     public void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
-        if (!DumpUtils.checkDumpPermission(mContext, TAG, pw)) return;
+        PriorityDump.dump(mPriorityDumper, fd, pw, args);
+    }
 
+    private void doDump(FileDescriptor fd, PrintWriter pw, String[] args) {
+        if (!DumpUtils.checkDumpPermission(mContext, TAG, pw)) return;
         boolean dumpAll = false;
         boolean useProto = false;
 
@@ -7124,10 +7155,10 @@ public class WindowManagerService extends IWindowManager.Stub
     }
 
     @Override
-    public void setResizeDimLayer(boolean visible, int targetStackId, float alpha) {
+    public void setResizeDimLayer(boolean visible, int targetWindowingMode, float alpha) {
         synchronized (mWindowMap) {
             getDefaultDisplayContentLocked().getDockedDividerController().setResizeDimLayer(
-                    visible, targetStackId, alpha);
+                    visible, targetWindowingMode, alpha);
         }
     }
 
