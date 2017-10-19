@@ -17,6 +17,7 @@
 package com.android.server.wm;
 
 
+import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_SURFACE_TRACE;
 import static com.android.server.wm.WindowManagerDebugConfig.TAG_WITH_CLASS_NAME;
 import static com.android.server.wm.WindowManagerDebugConfig.TAG_WM;
 
@@ -56,8 +57,14 @@ class EmulatorDisplayOverlay {
 
         SurfaceControl ctrl = null;
         try {
-            ctrl = new SurfaceControl(session, "EmulatorDisplayOverlay", mScreenSize.x,
-                    mScreenSize.y, PixelFormat.TRANSLUCENT, SurfaceControl.HIDDEN);
+            if (DEBUG_SURFACE_TRACE) {
+                ctrl = new WindowSurfaceController.SurfaceTrace(session, "EmulatorDisplayOverlay",
+                        mScreenSize.x, mScreenSize.y, PixelFormat.TRANSLUCENT,
+                        SurfaceControl.HIDDEN);
+            } else {
+                ctrl = new SurfaceControl(session, "EmulatorDisplayOverlay", mScreenSize.x,
+                        mScreenSize.y, PixelFormat.TRANSLUCENT, SurfaceControl.HIDDEN);
+            }
             ctrl.setLayerStack(display.getLayerStack());
             ctrl.setLayer(zOrder);
             ctrl.setPosition(0, 0);

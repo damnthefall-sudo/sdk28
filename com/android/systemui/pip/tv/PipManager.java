@@ -20,6 +20,7 @@ import android.app.ActivityManager;
 import android.app.ActivityManager.RunningTaskInfo;
 import android.app.ActivityManager.StackInfo;
 import android.app.IActivityManager;
+import android.app.RemoteAction;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
@@ -46,7 +47,7 @@ import android.view.WindowManagerGlobal;
 import com.android.systemui.R;
 import com.android.systemui.pip.BasePipManager;
 import com.android.systemui.recents.misc.SystemServicesProxy;
-import com.android.systemui.recents.misc.TaskStackChangeListener;
+import com.android.systemui.recents.misc.SystemServicesProxy.TaskStackListener;
 
 import java.io.PrintWriter;
 import java.util.ArrayList;
@@ -620,7 +621,7 @@ public class PipManager implements BasePipManager {
         return false;
     }
 
-    private TaskStackChangeListener mTaskStackListener = new TaskStackChangeListener() {
+    private TaskStackListener mTaskStackListener = new TaskStackListener() {
         @Override
         public void onTaskStackChanged() {
             if (DEBUG) Log.d(TAG, "onTaskStackChanged()");

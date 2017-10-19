@@ -66,7 +66,7 @@ import com.android.systemui.UiOffloadThread;
 import com.android.systemui.qs.tiles.DndTile;
 import com.android.systemui.qs.tiles.RotationLockTile;
 import com.android.systemui.recents.misc.SystemServicesProxy;
-import com.android.systemui.recents.misc.TaskStackChangeListener;
+import com.android.systemui.recents.misc.SystemServicesProxy.TaskStackListener;
 import com.android.systemui.statusbar.CommandQueue;
 import com.android.systemui.statusbar.CommandQueue.Callbacks;
 import com.android.systemui.statusbar.policy.BluetoothController;
@@ -639,17 +639,12 @@ public class PhoneStatusBarPolicy implements Callback, Callbacks,
     }
 
     private Intent getTaskIntent(int taskId, int userId) {
-        try {
-            final List<ActivityManager.RecentTaskInfo> tasks =
-                    ActivityManager.getService().getRecentTasks(
-                            NUM_TASKS_FOR_INSTANT_APP_INFO, 0, userId).getList();
-            for (int i = 0; i < tasks.size(); i++) {
-                if (tasks.get(i).id == taskId) {
-                    return tasks.get(i).baseIntent;
-                }
+        List<ActivityManager.RecentTaskInfo> tasks = mContext.getSystemService(ActivityManager.class)
+                .getRecentTasksForUser(NUM_TASKS_FOR_INSTANT_APP_INFO, 0, userId);
+        for (int i = 0; i < tasks.size(); i++) {
+            if (tasks.get(i).id == taskId) {
+                return tasks.get(i).baseIntent;
             }
-        } catch (RemoteException e) {
-            // Fall through
         }
         return null;
     }
@@ -768,7 +763,7 @@ public class PhoneStatusBarPolicy implements Callback, Callbacks,
         mIconController.setIconVisibility(mSlotDataSaver, isDataSaving);
     }
 
-    private final TaskStackChangeListener mTaskListener = new TaskStackChangeListener() {
+    private final TaskStackListener mTaskListener = new TaskStackListener() {
         @Override
         public void onTaskStackChanged() {
             // Listen for changes to stacks and then check which instant apps are foreground.

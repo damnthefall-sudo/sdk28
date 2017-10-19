@@ -16,10 +16,6 @@
 
 package com.android.internal.telephony;
 
-import static android.preference.PreferenceManager.getDefaultSharedPreferences;
-
-import static java.nio.charset.StandardCharsets.UTF_8;
-
 import android.app.AlarmManager;
 import android.app.DownloadManager;
 import android.app.PendingIntent;
@@ -57,7 +53,8 @@ import java.security.PublicKey;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.Date;
-import java.util.zip.GZIPInputStream;
+
+import static android.preference.PreferenceManager.getDefaultSharedPreferences;
 
 /**
  * This class contains logic to get Certificates and keep them current.
@@ -85,7 +82,7 @@ public class CarrierKeyDownloadManager {
     private static final String SEPARATOR = ":";
 
     private static final String JSON_CERTIFICATE = "certificate";
-    // This is a hack to accommodate certain Carriers who insists on using the public-key
+    // This is a hack to accomodate Verizon. Verizon insists on using the public-key
     // field to store the certificate. We'll just use which-ever is not null.
     private static final String JSON_CERTIFICATE_ALTERNATE = "public-key";
     private static final String JSON_TYPE = "key-type";
@@ -299,7 +296,6 @@ public class CarrierKeyDownloadManager {
         DownloadManager.Query query = new DownloadManager.Query();
         query.setFilterById(carrierKeyDownloadIdentifier);
         Cursor cursor = mDownloadManager.query(query);
-        InputStream source = null;
 
         if (cursor == null) {
             return;
@@ -308,7 +304,7 @@ public class CarrierKeyDownloadManager {
             int columnIndex = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS);
             if (DownloadManager.STATUS_SUCCESSFUL == cursor.getInt(columnIndex)) {
                 try {
-                    source = new FileInputStream(
+                    final InputStream source = new FileInputStream(
                             mDownloadManager.openDownloadedFile(carrierKeyDownloadIdentifier)
                                     .getFileDescriptor());
                     jsonStr = convertToString(source);
@@ -318,11 +314,6 @@ public class CarrierKeyDownloadManager {
                             + ". " + e);
                 } finally {
                     mDownloadManager.remove(carrierKeyDownloadIdentifier);
-                    try {
-                        source.close();
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                    }
                 }
             }
             Log.d(LOG_TAG, "Completed downloading keys");
@@ -362,23 +353,24 @@ public class CarrierKeyDownloadManager {
     }
 
     private static String convertToString(InputStream is) {
-        try {
-            // The current implementation at certain Carriers has the data gzipped, which requires
-            // us to unzip the contents. Longer term, we want to add a flag in carrier config which
-            // determines if the data needs to be zipped or not.
-            GZIPInputStream gunzip = new GZIPInputStream(is);
-            BufferedReader reader = new BufferedReader(new InputStreamReader(gunzip, UTF_8));
-            StringBuilder sb = new StringBuilder();
+        BufferedReader reader = new BufferedReader(new InputStreamReader(is));
+        StringBuilder sb = new StringBuilder();
 
-            String line;
+        String line;
+        try {
             while ((line = reader.readLine()) != null) {
                 sb.append(line).append('\n');
             }
-            return sb.toString();
         } catch (IOException e) {
             e.printStackTrace();
+        } finally {
+            try {
+                is.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
         }
-        return null;
+        return sb.toString();
     }
 
     /**
@@ -409,7 +401,7 @@ public class CarrierKeyDownloadManager {
             JSONArray keys = jsonObj.getJSONArray(JSON_CARRIER_KEYS);
             for (int i = 0; i < keys.length(); i++) {
                 JSONObject key = keys.getJSONObject(i);
-                // This is a hack to accommodate certain carriers who insist on using the public-key
+                // This is a hack to accomodate Verizon. Verizon insists on using the public-key
                 // field to store the certificate. We'll just use which-ever is not null.
                 String cert = null;
                 if (key.has(JSON_CERTIFICATE)) {

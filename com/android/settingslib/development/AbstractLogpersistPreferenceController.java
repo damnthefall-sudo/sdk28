@@ -68,7 +68,7 @@ public abstract class AbstractLogpersistPreferenceController extends
 
     public AbstractLogpersistPreferenceController(Context context, Lifecycle lifecycle) {
         super(context);
-        if (isAvailable() && lifecycle != null) {
+        if (isAvailable()) {
             lifecycle.addObserver(this);
         }
     }

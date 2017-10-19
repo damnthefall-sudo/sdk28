@@ -19,6 +19,7 @@ package com.android.server.am;
 import static android.app.ActivityManager.LOCK_TASK_MODE_LOCKED;
 import static android.app.ActivityManager.LOCK_TASK_MODE_NONE;
 import static android.app.ActivityManager.LOCK_TASK_MODE_PINNED;
+import static android.app.ActivityManager.StackId.INVALID_STACK_ID;
 import static android.app.StatusBarManager.DISABLE_BACK;
 import static android.app.StatusBarManager.DISABLE_HOME;
 import static android.app.StatusBarManager.DISABLE_MASK;
@@ -58,6 +59,7 @@ import android.provider.Settings;
 import android.util.Slog;
 import android.util.SparseArray;
 
+import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.statusbar.IStatusBarService;
 import com.android.internal.widget.LockPatternUtils;
@@ -431,7 +433,7 @@ public class LockTaskController {
             mWindowManager.executeAppTransition();
         } else if (lockTaskModeState != LOCK_TASK_MODE_NONE) {
             mSupervisor.handleNonResizableTaskIfNeeded(task, WINDOWING_MODE_UNDEFINED,
-                    DEFAULT_DISPLAY, task.getStack(), true /* forceNonResizable */);
+                    DEFAULT_DISPLAY, task.getStackId(), true /* forceNonResizable */);
         }
     }
 
@@ -492,7 +494,11 @@ public class LockTaskController {
         }
 
         for (int displayNdx = mSupervisor.getChildCount() - 1; displayNdx >= 0; --displayNdx) {
-            mSupervisor.getChildAt(displayNdx).onLockTaskPackagesUpdated();
+            ArrayList<ActivityStack> stacks = mSupervisor.getChildAt(displayNdx).mStacks;
+            for (int stackNdx = stacks.size() - 1; stackNdx >= 0; --stackNdx) {
+                final ActivityStack stack = stacks.get(stackNdx);
+                stack.onLockTaskPackagesUpdatedLocked();
+            }
         }
 
         final ActivityRecord r = mSupervisor.topRunningActivityLocked();

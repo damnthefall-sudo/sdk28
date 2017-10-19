@@ -59,7 +59,6 @@ import android.util.SparseArray;
 import android.util.proto.ProtoOutputStream;
 
 import com.android.internal.R;
-import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.logging.MetricsLogger;
 import com.android.server.LocalServices;
 
@@ -88,7 +87,7 @@ public class ZenModeHelper {
     private final Context mContext;
     private final H mHandler;
     private final SettingsObserver mSettingsObserver;
-    @VisibleForTesting protected final AppOpsManager mAppOps;
+    private final AppOpsManager mAppOps;
     protected ZenModeConfig mDefaultConfig;
     private final ArrayList<Callback> mCallbacks = new ArrayList<Callback>();
     private final ZenModeFiltering mFiltering;
@@ -103,9 +102,9 @@ public class ZenModeHelper {
     private final String SCHEDULED_DEFAULT_RULE_1 = "SCHEDULED_DEFAULT_RULE_1";
     private final String SCHEDULED_DEFAULT_RULE_2 = "SCHEDULED_DEFAULT_RULE_2";
 
-    @VisibleForTesting protected int mZenMode;
+    private int mZenMode;
     private int mUser = UserHandle.USER_SYSTEM;
-    @VisibleForTesting protected ZenModeConfig mConfig;
+    protected ZenModeConfig mConfig;
     private AudioManagerInternal mAudioManager;
     protected PackageManager mPm;
     private long mSuppressedEffects;
@@ -596,9 +595,8 @@ public class ZenModeHelper {
             pw.println(config);
             return;
         }
-        pw.printf("allow(alarms=%b,media=%bcalls=%b,callsFrom=%s,repeatCallers=%b,messages=%b,messagesFrom=%s,"
+        pw.printf("allow(calls=%b,callsFrom=%s,repeatCallers=%b,messages=%b,messagesFrom=%s,"
                 + "events=%b,reminders=%b,whenScreenOff=%b,whenScreenOn=%b)\n",
-                config.allowAlarms, config.allowMediaSystemOther,
                 config.allowCalls, ZenModeConfig.sourceToString(config.allowCallsFrom),
                 config.allowRepeatCallers, config.allowMessages,
                 ZenModeConfig.sourceToString(config.allowMessagesFrom),
@@ -815,8 +813,7 @@ public class ZenModeHelper {
         }
     }
 
-    @VisibleForTesting
-    protected void applyRestrictions() {
+    private void applyRestrictions() {
         final boolean zen = mZenMode != Global.ZEN_MODE_OFF;
 
         // notification restrictions
@@ -825,10 +822,6 @@ public class ZenModeHelper {
         // call restrictions
         final boolean muteCalls = zen && !mConfig.allowCalls && !mConfig.allowRepeatCallers
                 || (mSuppressedEffects & SUPPRESSED_EFFECT_CALLS) != 0;
-        // alarm restrictions
-        final boolean muteAlarms = zen && !mConfig.allowAlarms;
-        // alarm restrictions
-        final boolean muteMediaAndSystemSounds = zen && !mConfig.allowMediaSystemOther;
         // total silence restrictions
         final boolean muteEverything = mZenMode == Global.ZEN_MODE_NO_INTERRUPTIONS;
 
@@ -840,18 +833,13 @@ public class ZenModeHelper {
                 applyRestrictions(muteNotifications || muteEverything, usage);
             } else if (suppressionBehavior == AudioAttributes.SUPPRESSIBLE_CALL) {
                 applyRestrictions(muteCalls || muteEverything, usage);
-            } else if (suppressionBehavior == AudioAttributes.SUPPRESSIBLE_ALARM) {
-                applyRestrictions(muteAlarms || muteEverything, usage);
-            } else if (suppressionBehavior == AudioAttributes.SUPPRESSIBLE_MEDIA_SYSTEM_OTHER) {
-                applyRestrictions(muteMediaAndSystemSounds || muteEverything, usage);
             } else {
                 applyRestrictions(muteEverything, usage);
             }
         }
     }
 
-    @VisibleForTesting
-    protected void applyRestrictions(boolean mute, int usage) {
+    private void applyRestrictions(boolean mute, int usage) {
         final String[] exceptionPackages = null; // none (for now)
         mAppOps.setRestriction(AppOpsManager.OP_VIBRATE, usage,
                 mute ? AppOpsManager.MODE_IGNORED : AppOpsManager.MODE_ALLOWED,

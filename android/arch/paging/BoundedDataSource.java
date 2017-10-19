@@ -21,6 +21,7 @@ import android.support.annotation.RestrictTo;
 import android.support.annotation.WorkerThread;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -74,6 +75,7 @@ public abstract class BoundedDataSource<Value> extends PositionalDataSource<Valu
             if (result.size() != loadSize) {
                 throw new IllegalStateException("invalid number of items returned.");
             }
+            Collections.reverse(result);
         }
         return result;
     }

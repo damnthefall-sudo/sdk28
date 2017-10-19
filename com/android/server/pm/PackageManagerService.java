@@ -398,7 +398,7 @@ public class PackageManagerService extends IPackageManager.Stub
     static final boolean DEBUG_DOMAIN_VERIFICATION = false;
     private static final boolean DEBUG_BACKUP = false;
     private static final boolean DEBUG_INSTALL = false;
-    public static final boolean DEBUG_REMOVE = false;
+    private static final boolean DEBUG_REMOVE = false;
     private static final boolean DEBUG_BROADCASTS = false;
     private static final boolean DEBUG_SHOW_INFO = false;
     private static final boolean DEBUG_PACKAGE_INFO = false;
@@ -406,7 +406,7 @@ public class PackageManagerService extends IPackageManager.Stub
     public static final boolean DEBUG_PACKAGE_SCANNING = false;
     private static final boolean DEBUG_VERIFY = false;
     private static final boolean DEBUG_FILTERS = false;
-    public static final boolean DEBUG_PERMISSIONS = false;
+    private static final boolean DEBUG_PERMISSIONS = false;
     private static final boolean DEBUG_SHARED_LIBRARIES = false;
     private static final boolean DEBUG_COMPRESSION = Build.IS_DEBUGGABLE;
 
@@ -953,6 +953,9 @@ public class PackageManagerService extends IPackageManager.Stub
     /** List of packages waiting for verification. */
     final SparseArray<PackageVerificationState> mPendingVerification
             = new SparseArray<PackageVerificationState>();
+
+    /** Set of packages associated with each app op permission. */
+    final ArrayMap<String, ArraySet<String>> mAppOpPermissionPackages = new ArrayMap<>();
 
     final PackageInstallerService mInstallerService;
 
@@ -2878,7 +2881,7 @@ public class PackageManagerService extends IPackageManager.Stub
                         + mSdkVersion + "; regranting permissions for internal storage");
                 updateFlags |= UPDATE_PERMISSIONS_REPLACE_PKG | UPDATE_PERMISSIONS_REPLACE_ALL;
             }
-            updatePermissionsLocked(null, null, StorageManager.UUID_PRIVATE_INTERNAL, updateFlags);
+            updatePermissionsLPw(null, null, StorageManager.UUID_PRIVATE_INTERNAL, updateFlags);
             ver.sdkVersion = mSdkVersion;
 
             // If this is the first boot or an update from pre-M, and it is a normal
@@ -3261,6 +3264,23 @@ public class PackageManagerService extends IPackageManager.Stub
             return null;
         }
 
+        // If we have a profile for a compressed APK, copy it to the reference location.
+        // Since the package is the stub one, remove the stub suffix to get the normal package and
+        // APK name.
+        File profileFile = new File(getPrebuildProfilePath(pkg).replace(STUB_SUFFIX, ""));
+        if (profileFile.exists()) {
+            try {
+                // We could also do this lazily before calling dexopt in
+                // PackageDexOptimizer to prevent this happening on first boot. The issue
+                // is that we don't have a good way to say "do this only once".
+                if (!mInstaller.copySystemProfile(profileFile.getAbsolutePath(),
+                        pkg.applicationInfo.uid, pkg.packageName)) {
+                    Log.e(TAG, "decompressPackage failed to copy system profile!");
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to copy profile " + profileFile.getAbsolutePath() + " ", e);
+            }
+        }
         return dstCodePath;
     }
 
@@ -3348,9 +3368,7 @@ public class PackageManagerService extends IPackageManager.Stub
     @Override
     public boolean isUpgrade() {
         // allow instant applications
-        // The system property allows testing ota flow when upgraded to the same image.
-        return mIsUpgrade || SystemProperties.getBoolean(
-                "persist.pm.mock-upgrade", false /* default */);
+        return mIsUpgrade;
     }
 
     private @Nullable String getRequiredButNotReallyRequiredVerifierLPr() {
@@ -5164,7 +5182,7 @@ public class PackageManagerService extends IPackageManager.Stub
                 final PermissionsState permissionsState = settingBase.getPermissionsState();
                 if (permissionsState.hasPermission(permName, userId)) {
                     if (isUidInstantApp) {
-                        if (mSettings.mPermissions.isPermissionInstant(permName)) {
+                        if (mPermissionManager.isPermissionInstant(permName)) {
                             return PackageManager.PERMISSION_GRANTED;
                         }
                     } else {
@@ -5233,8 +5251,8 @@ public class PackageManagerService extends IPackageManager.Stub
         }
     }
 
-    private boolean addDynamicPermission(PermissionInfo info, final boolean async) {
-        return mPermissionManager.addDynamicPermission(
+    boolean addPermission(PermissionInfo info, final boolean async) {
+        return mPermissionManager.addPermission(
                 info, async, getCallingUid(), new PermissionCallback() {
                     @Override
                     public void onPermissionChanged() {
@@ -5250,20 +5268,20 @@ public class PackageManagerService extends IPackageManager.Stub
     @Override
     public boolean addPermission(PermissionInfo info) {
         synchronized (mPackages) {
-            return addDynamicPermission(info, false);
+            return addPermission(info, false);
         }
     }
 
     @Override
     public boolean addPermissionAsync(PermissionInfo info) {
         synchronized (mPackages) {
-            return addDynamicPermission(info, true);
+            return addPermission(info, true);
         }
     }
 
     @Override
     public void removePermission(String permName) {
-        mPermissionManager.removeDynamicPermission(permName, getCallingUid(), mPermissionCallback);
+        mPermissionManager.removePermission(permName, getCallingUid(), mPermissionCallback);
     }
 
     @Override
@@ -5924,8 +5942,17 @@ public class PackageManagerService extends IPackageManager.Stub
     }
 
     @Override
-    public String[] getAppOpPermissionPackages(String permName) {
-        return mPermissionManager.getAppOpPermissionPackages(permName);
+    public String[] getAppOpPermissionPackages(String permissionName) {
+        if (getInstantAppPackageName(Binder.getCallingUid()) != null) {
+            return null;
+        }
+        synchronized (mPackages) {
+            ArraySet<String> pkgs = mAppOpPermissionPackages.get(permissionName);
+            if (pkgs == null) {
+                return null;
+            }
+            return pkgs.toArray(new String[pkgs.size()]);
+        }
     }
 
     @Override
@@ -9097,30 +9124,10 @@ public class PackageManagerService extends IPackageManager.Stub
                         // package and APK names.
                         String systemProfilePath =
                                 getPrebuildProfilePath(disabledPs.pkg).replace(STUB_SUFFIX, "");
-                        profileFile = new File(systemProfilePath);
-                        // If we have a profile for a compressed APK, copy it to the reference
-                        // location.
-                        // Note that copying the profile here will cause it to override the
-                        // reference profile every OTA even though the existing reference profile
-                        // may have more data. We can't copy during decompression since the
-                        // directories are not set up at that point.
-                        if (profileFile.exists()) {
-                            try {
-                                // We could also do this lazily before calling dexopt in
-                                // PackageDexOptimizer to prevent this happening on first boot. The
-                                // issue is that we don't have a good way to say "do this only
-                                // once".
-                                if (!mInstaller.copySystemProfile(profileFile.getAbsolutePath(),
-                                        pkg.applicationInfo.uid, pkg.packageName)) {
-                                    Log.e(TAG, "Failed to copy system profile for stub package!");
-                                } else {
-                                    useProfileForDexopt = true;
-                                }
-                            } catch (Exception e) {
-                                Log.e(TAG, "Failed to copy profile " +
-                                        profileFile.getAbsolutePath() + " ", e);
-                            }
-                        }
+                        File systemProfile = new File(systemProfilePath);
+                        // Use the profile for compilation if there exists one for the same package
+                        // in the system partition.
+                        useProfileForDexopt = systemProfile.exists();
                     }
                 }
             }
@@ -10339,7 +10346,7 @@ public class PackageManagerService extends IPackageManager.Stub
                             Slog.i(TAG, "Adopting permissions from " + origName + " to "
                                     + pkg.packageName);
                             // SIDE EFFECTS; updates permissions system state; move elsewhere
-                            mSettings.mPermissions.transferPermissions(origName, pkg.packageName);
+                            mSettings.transferPermissionsLPw(origName, pkg.packageName);
                         }
                     }
                 }
@@ -11187,13 +11194,54 @@ public class PackageManagerService extends IPackageManager.Stub
                 if (DEBUG_PACKAGE_SCANNING) Log.d(TAG, "  Permission Groups: " + r);
             }
 
+            N = pkg.permissions.size();
+            r = null;
+            for (i=0; i<N; i++) {
+                PackageParser.Permission p = pkg.permissions.get(i);
 
-            // Dont allow ephemeral apps to define new permissions.
-            if ((scanFlags & SCAN_AS_INSTANT_APP) != 0) {
-                Slog.w(TAG, "Permissions from package " + pkg.packageName
-                        + " ignored: instant apps cannot define new permissions.");
-            } else {
-                mPermissionManager.addAllPermissions(pkg, chatty);
+                // Dont allow ephemeral apps to define new permissions.
+                if ((scanFlags & SCAN_AS_INSTANT_APP) != 0) {
+                    Slog.w(TAG, "Permission " + p.info.name + " from package "
+                            + p.info.packageName
+                            + " ignored: instant apps cannot define new permissions.");
+                    continue;
+                }
+
+                // Assume by default that we did not install this permission into the system.
+                p.info.flags &= ~PermissionInfo.FLAG_INSTALLED;
+
+                // Now that permission groups have a special meaning, we ignore permission
+                // groups for legacy apps to prevent unexpected behavior. In particular,
+                // permissions for one app being granted to someone just because they happen
+                // to be in a group defined by another app (before this had no implications).
+                if (pkg.applicationInfo.targetSdkVersion > Build.VERSION_CODES.LOLLIPOP_MR1) {
+                    p.group = mPermissionGroups.get(p.info.group);
+                    // Warn for a permission in an unknown group.
+                    if (DEBUG_PERMISSIONS && p.info.group != null && p.group == null) {
+                        Slog.i(TAG, "Permission " + p.info.name + " from package "
+                                + p.info.packageName + " in an unknown group " + p.info.group);
+                    }
+                }
+
+                // TODO Move to PermissionManager once mPermissionTrees moves there.
+//                        p.tree ? mSettings.mPermissionTrees
+//                                : mSettings.mPermissions;
+//                final BasePermission bp = BasePermission.createOrUpdate(
+//                        permissionMap.get(p.info.name), p, pkg, mSettings.mPermissionTrees, chatty);
+//                permissionMap.put(p.info.name, bp);
+                if (p.tree) {
+                    final ArrayMap<String, BasePermission> permissionMap =
+                            mSettings.mPermissionTrees;
+                    final BasePermission bp = BasePermission.createOrUpdate(
+                            permissionMap.get(p.info.name), p, pkg, mSettings.mPermissionTrees,
+                            chatty);
+                    permissionMap.put(p.info.name, bp);
+                } else {
+                    final BasePermission bp = BasePermission.createOrUpdate(
+                            (BasePermission) mPermissionManager.getPermissionTEMP(p.info.name),
+                            p, pkg, mSettings.mPermissionTrees, chatty);
+                    mPermissionManager.putPermissionTEMP(p.info.name, bp);
+                }
             }
 
             N = pkg.instrumentation.size();
@@ -11919,7 +11967,53 @@ public class PackageManagerService extends IPackageManager.Stub
             if (DEBUG_REMOVE) Log.d(TAG, "  Activities: " + r);
         }
 
-        mPermissionManager.removeAllPermissions(pkg, chatty);
+        N = pkg.permissions.size();
+        r = null;
+        for (i=0; i<N; i++) {
+            PackageParser.Permission p = pkg.permissions.get(i);
+            BasePermission bp = (BasePermission) mPermissionManager.getPermissionTEMP(p.info.name);
+            if (bp == null) {
+                bp = mSettings.mPermissionTrees.get(p.info.name);
+            }
+            if (bp != null && bp.isPermission(p)) {
+                bp.setPermission(null);
+                if (DEBUG_REMOVE && chatty) {
+                    if (r == null) {
+                        r = new StringBuilder(256);
+                    } else {
+                        r.append(' ');
+                    }
+                    r.append(p.info.name);
+                }
+            }
+            if ((p.info.protectionLevel&PermissionInfo.PROTECTION_FLAG_APPOP) != 0) {
+                ArraySet<String> appOpPkgs = mAppOpPermissionPackages.get(p.info.name);
+                if (appOpPkgs != null) {
+                    appOpPkgs.remove(pkg.packageName);
+                }
+            }
+        }
+        if (r != null) {
+            if (DEBUG_REMOVE) Log.d(TAG, "  Permissions: " + r);
+        }
+
+        N = pkg.requestedPermissions.size();
+        r = null;
+        for (i=0; i<N; i++) {
+            String perm = pkg.requestedPermissions.get(i);
+            if (mPermissionManager.isPermissionAppOp(perm)) {
+                ArraySet<String> appOpPkgs = mAppOpPermissionPackages.get(perm);
+                if (appOpPkgs != null) {
+                    appOpPkgs.remove(pkg.packageName);
+                    if (appOpPkgs.isEmpty()) {
+                        mAppOpPermissionPackages.remove(perm);
+                    }
+                }
+            }
+        }
+        if (r != null) {
+            if (DEBUG_REMOVE) Log.d(TAG, "  Permissions: " + r);
+        }
 
         N = pkg.instrumentation.size();
         r = null;
@@ -11980,9 +12074,18 @@ public class PackageManagerService extends IPackageManager.Stub
         }
     }
 
-    public static final int UPDATE_PERMISSIONS_ALL = 1<<0;
-    public static final int UPDATE_PERMISSIONS_REPLACE_PKG = 1<<1;
-    public static final int UPDATE_PERMISSIONS_REPLACE_ALL = 1<<2;
+    private static boolean hasPermission(PackageParser.Package pkgInfo, String perm) {
+        for (int i=pkgInfo.permissions.size()-1; i>=0; i--) {
+            if (pkgInfo.permissions.get(i).info.name.equals(perm)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static final int UPDATE_PERMISSIONS_ALL = 1<<0;
+    static final int UPDATE_PERMISSIONS_REPLACE_PKG = 1<<1;
+    static final int UPDATE_PERMISSIONS_REPLACE_ALL = 1<<2;
 
     private void updatePermissionsLPw(PackageParser.Package pkg, int flags) {
         // Update the parent permissions
@@ -11998,10 +12101,10 @@ public class PackageManagerService extends IPackageManager.Stub
     private void updatePermissionsLPw(String changingPkg, PackageParser.Package pkgInfo,
             int flags) {
         final String volumeUuid = (pkgInfo != null) ? getVolumeUuidForPackage(pkgInfo) : null;
-        updatePermissionsLocked(changingPkg, pkgInfo, volumeUuid, flags);
+        updatePermissionsLPw(changingPkg, pkgInfo, volumeUuid, flags);
     }
 
-    private void updatePermissionsLocked(String changingPkg,
+    private void updatePermissionsLPw(String changingPkg,
             PackageParser.Package pkgInfo, String replaceVolumeUuid, int flags) {
         // TODO: Most of the methods exposing BasePermission internals [source package name,
         // etc..] shouldn't be needed. Instead, when we've parsed a permission that doesn't
@@ -12013,11 +12116,55 @@ public class PackageManagerService extends IPackageManager.Stub
         // normal permissions. Today, we need two separate loops because these BasePermission
         // objects are stored separately.
         // Make sure there are no dangling permission trees.
-        flags = mPermissionManager.updatePermissionTrees(changingPkg, pkgInfo, flags);
+        Iterator<BasePermission> it = mSettings.mPermissionTrees.values().iterator();
+        while (it.hasNext()) {
+            final BasePermission bp = it.next();
+            if (bp.getSourcePackageSetting() == null) {
+                // We may not yet have parsed the package, so just see if
+                // we still know about its settings.
+                bp.setSourcePackageSetting(mSettings.mPackages.get(bp.getSourcePackageName()));
+            }
+            if (bp.getSourcePackageSetting() == null) {
+                Slog.w(TAG, "Removing dangling permission tree: " + bp.getName()
+                        + " from package " + bp.getSourcePackageName());
+                it.remove();
+            } else if (changingPkg != null && changingPkg.equals(bp.getSourcePackageName())) {
+                if (pkgInfo == null || !hasPermission(pkgInfo, bp.getName())) {
+                    Slog.i(TAG, "Removing old permission tree: " + bp.getName()
+                            + " from package " + bp.getSourcePackageName());
+                    flags |= UPDATE_PERMISSIONS_ALL;
+                    it.remove();
+                }
+            }
+        }
 
         // Make sure all dynamic permissions have been assigned to a package,
         // and make sure there are no dangling permissions.
-        flags = mPermissionManager.updatePermissions(changingPkg, pkgInfo, flags);
+        final Iterator<BasePermission> permissionIter =
+                mPermissionManager.getPermissionIteratorTEMP();
+        while (permissionIter.hasNext()) {
+            final BasePermission bp = permissionIter.next();
+            if (bp.isDynamic()) {
+                bp.updateDynamicPermission(mSettings.mPermissionTrees);
+            }
+            if (bp.getSourcePackageSetting() == null) {
+                // We may not yet have parsed the package, so just see if
+                // we still know about its settings.
+                bp.setSourcePackageSetting(mSettings.mPackages.get(bp.getSourcePackageName()));
+            }
+            if (bp.getSourcePackageSetting() == null) {
+                Slog.w(TAG, "Removing dangling permission: " + bp.getName()
+                        + " from package " + bp.getSourcePackageName());
+                permissionIter.remove();
+            } else if (changingPkg != null && changingPkg.equals(bp.getSourcePackageName())) {
+                if (pkgInfo == null || !hasPermission(pkgInfo, bp.getName())) {
+                    Slog.i(TAG, "Removing old permission: " + bp.getName()
+                            + " from package " + bp.getSourcePackageName());
+                    flags |= UPDATE_PERMISSIONS_ALL;
+                    permissionIter.remove();
+                }
+            }
+        }
 
         Trace.traceBegin(TRACE_TAG_PACKAGE_MANAGER, "grantPermissions");
         // Now update the permissions for all packages, in particular
@@ -12139,7 +12286,12 @@ public class PackageManagerService extends IPackageManager.Stub
 
             // Keep track of app op permissions.
             if (bp.isAppOp()) {
-                mSettings.addAppOpPackage(perm, pkg.packageName);
+                ArraySet<String> pkgs = mAppOpPermissionPackages.get(perm);
+                if (pkgs == null) {
+                    pkgs = new ArraySet<>();
+                    mAppOpPermissionPackages.put(perm, pkgs);
+                }
+                pkgs.add(pkg.packageName);
             }
 
             if (bp.isNormal()) {
@@ -21086,7 +21238,7 @@ Slog.v(TAG, ":: stepped forward, applying functor at tag " + parser.getName());
         // permissions, ensure permissions are updated. Beware of dragons if you
         // try optimizing this.
         synchronized (mPackages) {
-            updatePermissionsLocked(null, null, StorageManager.UUID_PRIVATE_INTERNAL,
+            updatePermissionsLPw(null, null, StorageManager.UUID_PRIVATE_INTERNAL,
                     UPDATE_PERMISSIONS_ALL);
         }
 
@@ -21137,8 +21289,9 @@ Slog.v(TAG, ":: stepped forward, applying functor at tag " + parser.getName());
         reconcileApps(StorageManager.UUID_PRIVATE_INTERNAL);
 
         if (mPrivappPermissionsViolations != null) {
-            throw new IllegalStateException("Signature|privileged permissions not in "
+            Slog.wtf(TAG,"Signature|privileged permissions not in "
                     + "privapp-permissions whitelist: " + mPrivappPermissionsViolations);
+            mPrivappPermissionsViolations = null;
         }
     }
 
@@ -21631,6 +21784,22 @@ Slog.v(TAG, ":: stepped forward, applying functor at tag " + parser.getName());
 
             if (!checkin && dumpState.isDumping(DumpState.DUMP_PERMISSIONS)) {
                 mSettings.dumpPermissionsLPr(pw, packageName, permissionNames, dumpState);
+                if (packageName == null && permissionNames == null) {
+                    for (int iperm=0; iperm<mAppOpPermissionPackages.size(); iperm++) {
+                        if (iperm == 0) {
+                            if (dumpState.onTitlePrinted())
+                                pw.println();
+                            pw.println("AppOp Permissions:");
+                        }
+                        pw.print("  AppOp Permission ");
+                        pw.print(mAppOpPermissionPackages.keyAt(iperm));
+                        pw.println(":");
+                        ArraySet<String> pkgs = mAppOpPermissionPackages.valueAt(iperm);
+                        for (int ipkg=0; ipkg<pkgs.size(); ipkg++) {
+                            pw.print("    "); pw.println(pkgs.valueAt(ipkg));
+                        }
+                    }
+                }
             }
 
             if (!checkin && dumpState.isDumping(DumpState.DUMP_PROVIDERS)) {
@@ -21860,7 +22029,11 @@ Slog.v(TAG, ":: stepped forward, applying functor at tag " + parser.getName());
         synchronized (mAvailableFeatures) {
             final int count = mAvailableFeatures.size();
             for (int i = 0; i < count; i++) {
-                mAvailableFeatures.valueAt(i).writeToProto(proto, PackageServiceDumpProto.FEATURES);
+                final FeatureInfo feat = mAvailableFeatures.valueAt(i);
+                final long featureToken = proto.start(PackageServiceDumpProto.FEATURES);
+                proto.write(PackageServiceDumpProto.FeatureProto.NAME, feat.name);
+                proto.write(PackageServiceDumpProto.FeatureProto.VERSION, feat.version);
+                proto.end(featureToken);
             }
         }
     }
@@ -21892,7 +22065,7 @@ Slog.v(TAG, ":: stepped forward, applying functor at tag " + parser.getName());
     }
 
     private void dumpDexoptStateLPr(PrintWriter pw, String packageName) {
-        final IndentingPrintWriter ipw = new IndentingPrintWriter(pw, "  ");
+        final IndentingPrintWriter ipw = new IndentingPrintWriter(pw, "  ", 120);
         ipw.println();
         ipw.println("Dexopt state:");
         ipw.increaseIndent();
@@ -21919,7 +22092,7 @@ Slog.v(TAG, ":: stepped forward, applying functor at tag " + parser.getName());
     }
 
     private void dumpCompilerStatsLPr(PrintWriter pw, String packageName) {
-        final IndentingPrintWriter ipw = new IndentingPrintWriter(pw, "  ");
+        final IndentingPrintWriter ipw = new IndentingPrintWriter(pw, "  ", 120);
         ipw.println();
         ipw.println("Compiler stats:");
         ipw.increaseIndent();
@@ -22130,7 +22303,7 @@ Slog.v(TAG, ":: stepped forward, applying functor at tag " + parser.getName());
                         + mSdkVersion + "; regranting permissions for " + volumeUuid);
                 updateFlags |= UPDATE_PERMISSIONS_REPLACE_PKG | UPDATE_PERMISSIONS_REPLACE_ALL;
             }
-            updatePermissionsLocked(null, null, volumeUuid, updateFlags);
+            updatePermissionsLPw(null, null, volumeUuid, updateFlags);
 
             // Yay, everything is now upgraded
             ver.forceCurrent();
@@ -23138,15 +23311,15 @@ Slog.v(TAG, ":: stepped forward, applying functor at tag " + parser.getName());
     void onNewUserCreated(final int userId) {
         synchronized(mPackages) {
             mDefaultPermissionPolicy.grantDefaultPermissions(mPackages.values(), userId);
-            // If permission review for legacy apps is required, we represent
-            // dagerous permissions for such apps as always granted runtime
-            // permissions to keep per user flag state whether review is needed.
-            // Hence, if a new user is added we have to propagate dangerous
-            // permission grants for these legacy apps.
-            if (mPermissionReviewRequired) {
-                updatePermissionsLPw(null, null, UPDATE_PERMISSIONS_ALL
-                        | UPDATE_PERMISSIONS_REPLACE_ALL);
-            }
+        }
+        // If permission review for legacy apps is required, we represent
+        // dagerous permissions for such apps as always granted runtime
+        // permissions to keep per user flag state whether review is needed.
+        // Hence, if a new user is added we have to propagate dangerous
+        // permission grants for these legacy apps.
+        if (mPermissionReviewRequired) {
+            updatePermissionsLPw(null, null, UPDATE_PERMISSIONS_ALL
+                    | UPDATE_PERMISSIONS_REPLACE_ALL);
         }
     }
 
@@ -23590,12 +23763,12 @@ Slog.v(TAG, ":: stepped forward, applying functor at tag " + parser.getName());
         }
 
         @Override
-        public PackageParser.PermissionGroup getPermissionGroupTEMP(String groupName) {
+        public Object enforcePermissionTreeTEMP(String permName, int callingUid) {
             synchronized (mPackages) {
-                return mPermissionGroups.get(groupName);
+                return BasePermission.enforcePermissionTreeLP(
+                        mSettings.mPermissionTrees, permName, callingUid);
             }
         }
-
         @Override
         public boolean isInstantApp(String packageName, int userId) {
             return PackageManagerService.this.isInstantApp(packageName, userId);

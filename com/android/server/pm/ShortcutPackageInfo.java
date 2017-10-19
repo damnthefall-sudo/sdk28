@@ -18,7 +18,6 @@ package com.android.server.pm;
 import android.annotation.NonNull;
 import android.annotation.UserIdInt;
 import android.content.pm.PackageInfo;
-import android.content.pm.ShortcutInfo;
 import android.util.Slog;
 
 import com.android.internal.annotations.VisibleForTesting;
@@ -46,32 +45,21 @@ class ShortcutPackageInfo {
     static final String TAG_ROOT = "package-info";
     private static final String ATTR_VERSION = "version";
     private static final String ATTR_LAST_UPDATE_TIME = "last_udpate_time";
-    private static final String ATTR_BACKUP_SOURCE_VERSION = "bk_src_version";
-    private static final String ATTR_BACKUP_ALLOWED = "allow-backup";
-    private static final String ATTR_BACKUP_SOURCE_BACKUP_ALLOWED = "bk_src_backup-allowed";
     private static final String ATTR_SHADOW = "shadow";
 
     private static final String TAG_SIGNATURE = "signature";
     private static final String ATTR_SIGNATURE_HASH = "hash";
+
+    private static final int VERSION_UNKNOWN = -1;
 
     /**
      * When true, this package information was restored from the previous device, and the app hasn't
      * been installed yet.
      */
     private boolean mIsShadow;
-    private int mVersionCode = ShortcutInfo.VERSION_CODE_UNKNOWN;
-    private int mBackupSourceVersionCode = ShortcutInfo.VERSION_CODE_UNKNOWN;
+    private int mVersionCode = VERSION_UNKNOWN;
     private long mLastUpdateTime;
     private ArrayList<byte[]> mSigHashes;
-
-    // mBackupAllowed didn't used to be parsisted, so we don't restore it from a file.
-    // mBackupAllowed will always start with false, and will have been updated before making a
-    // backup next time, which works file.
-    // We just don't want to print an uninitialzied mBackupAlldowed value on dumpsys, so
-    // we use this boolean to control dumpsys.
-    private boolean mBackupAllowedInitialized;
-    private boolean mBackupAllowed;
-    private boolean mBackupSourceBackupAllowed;
 
     private ShortcutPackageInfo(int versionCode, long lastUpdateTime,
             ArrayList<byte[]> sigHashes, boolean isShadow) {
@@ -79,12 +67,10 @@ class ShortcutPackageInfo {
         mLastUpdateTime = lastUpdateTime;
         mIsShadow = isShadow;
         mSigHashes = sigHashes;
-        mBackupAllowed = false; // By default, we assume false.
-        mBackupSourceBackupAllowed = false;
     }
 
     public static ShortcutPackageInfo newEmpty() {
-        return new ShortcutPackageInfo(ShortcutInfo.VERSION_CODE_UNKNOWN, /* last update time =*/ 0,
+        return new ShortcutPackageInfo(VERSION_UNKNOWN, /* last update time =*/ 0,
                 new ArrayList<>(0), /* isShadow */ false);
     }
 
@@ -100,33 +86,15 @@ class ShortcutPackageInfo {
         return mVersionCode;
     }
 
-    public int getBackupSourceVersionCode() {
-        return mBackupSourceVersionCode;
-    }
-
-    @VisibleForTesting
-    public boolean isBackupSourceBackupAllowed() {
-        return mBackupSourceBackupAllowed;
-    }
-
     public long getLastUpdateTime() {
         return mLastUpdateTime;
     }
 
-    public boolean isBackupAllowed() {
-        return mBackupAllowed;
-    }
-
-    /**
-     * Set {@link #mVersionCode}, {@link #mLastUpdateTime} and {@link #mBackupAllowed}
-     * from a {@link PackageInfo}.
-     */
-    public void updateFromPackageInfo(@NonNull PackageInfo pi) {
+    /** Set {@link #mVersionCode} and {@link #mLastUpdateTime} from a {@link PackageInfo}. */
+    public void updateVersionInfo(@NonNull PackageInfo pi) {
         if (pi != null) {
             mVersionCode = pi.versionCode;
             mLastUpdateTime = pi.lastUpdateTime;
-            mBackupAllowed = ShortcutService.shouldBackupApp(pi);
-            mBackupAllowedInitialized = true;
         }
     }
 
@@ -134,24 +102,23 @@ class ShortcutPackageInfo {
         return mSigHashes.size() > 0;
     }
 
-    //@DisabledReason
-    public int canRestoreTo(ShortcutService s, PackageInfo currentPackage, boolean anyVersionOkay) {
-        if (!BackupUtils.signaturesMatch(mSigHashes, currentPackage)) {
-            Slog.w(TAG, "Can't restore: Package signature mismatch");
-            return ShortcutInfo.DISABLED_REASON_SIGNATURE_MISMATCH;
-        }
-        if (!ShortcutService.shouldBackupApp(currentPackage) || !mBackupSourceBackupAllowed) {
+    public boolean canRestoreTo(ShortcutService s, PackageInfo target) {
+        if (!s.shouldBackupApp(target)) {
             // "allowBackup" was true when backed up, but now false.
-            Slog.w(TAG, "Can't restore: package didn't or doesn't allow backup");
-            return ShortcutInfo.DISABLED_REASON_BACKUP_NOT_SUPPORTED;
+            Slog.w(TAG, "Can't restore: package no longer allows backup");
+            return false;
         }
-        if (!anyVersionOkay && (currentPackage.versionCode < mBackupSourceVersionCode)) {
+        if (target.versionCode < mVersionCode) {
             Slog.w(TAG, String.format(
                     "Can't restore: package current version %d < backed up version %d",
-                    currentPackage.versionCode, mBackupSourceVersionCode));
-            return ShortcutInfo.DISABLED_REASON_VERSION_LOWER;
+                    target.versionCode, mVersionCode));
+            return false;
         }
-        return ShortcutInfo.DISABLED_REASON_NOT_DISABLED;
+        if (!BackupUtils.signaturesMatch(mSigHashes, target)) {
+            Slog.w(TAG, "Can't restore: Package signature mismatch");
+            return false;
+        }
+        return true;
     }
 
     @VisibleForTesting
@@ -165,8 +132,6 @@ class ShortcutPackageInfo {
         final ShortcutPackageInfo ret = new ShortcutPackageInfo(pi.versionCode, pi.lastUpdateTime,
                 BackupUtils.hashSignatureArray(pi.signatures), /* shadow=*/ false);
 
-        ret.mBackupSourceBackupAllowed = s.shouldBackupApp(pi);
-        ret.mBackupSourceVersionCode = pi.versionCode;
         return ret;
     }
 
@@ -186,19 +151,13 @@ class ShortcutPackageInfo {
         mSigHashes = BackupUtils.hashSignatureArray(pi.signatures);
     }
 
-    public void saveToXml(XmlSerializer out, boolean forBackup) throws IOException {
+    public void saveToXml(XmlSerializer out) throws IOException {
 
         out.startTag(null, TAG_ROOT);
 
         ShortcutService.writeAttr(out, ATTR_VERSION, mVersionCode);
         ShortcutService.writeAttr(out, ATTR_LAST_UPDATE_TIME, mLastUpdateTime);
         ShortcutService.writeAttr(out, ATTR_SHADOW, mIsShadow);
-        ShortcutService.writeAttr(out, ATTR_BACKUP_ALLOWED, mBackupAllowed);
-
-        ShortcutService.writeAttr(out, ATTR_BACKUP_SOURCE_VERSION, mBackupSourceVersionCode);
-        ShortcutService.writeAttr(out,
-                ATTR_BACKUP_SOURCE_BACKUP_ALLOWED, mBackupSourceBackupAllowed);
-
 
         for (int i = 0; i < mSigHashes.size(); i++) {
             out.startTag(null, TAG_SIGNATURE);
@@ -212,9 +171,7 @@ class ShortcutPackageInfo {
     public void loadFromXml(XmlPullParser parser, boolean fromBackup)
             throws IOException, XmlPullParserException {
 
-        // Don't use the version code from the backup file.
-        final int versionCode = ShortcutService.parseIntAttribute(parser, ATTR_VERSION,
-                ShortcutInfo.VERSION_CODE_UNKNOWN);
+        final int versionCode = ShortcutService.parseIntAttribute(parser, ATTR_VERSION);
 
         final long lastUpdateTime = ShortcutService.parseLongAttribute(
                 parser, ATTR_LAST_UPDATE_TIME);
@@ -222,20 +179,6 @@ class ShortcutPackageInfo {
         // When restoring from backup, it's always shadow.
         final boolean shadow =
                 fromBackup || ShortcutService.parseBooleanAttribute(parser, ATTR_SHADOW);
-
-        // We didn't used to save these attributes, and all backed up shortcuts were from
-        // apps that support backups, so the default values take this fact into consideration.
-        final int backupSourceVersion = ShortcutService.parseIntAttribute(parser,
-                ATTR_BACKUP_SOURCE_VERSION, ShortcutInfo.VERSION_CODE_UNKNOWN);
-
-        // Note the only time these "true" default value is used is when restoring from an old
-        // build that didn't save ATTR_BACKUP_ALLOWED, and that means all the data included in
-        // a backup file were from apps that support backup, so we can just use "true" as the
-        // default.
-        final boolean backupAllowed = ShortcutService.parseBooleanAttribute(
-                parser, ATTR_BACKUP_ALLOWED, true);
-        final boolean backupSourceBackupAllowed = ShortcutService.parseBooleanAttribute(
-                parser, ATTR_BACKUP_SOURCE_BACKUP_ALLOWED, true);
 
         final ArrayList<byte[]> hashes = new ArrayList<>();
 
@@ -264,28 +207,11 @@ class ShortcutPackageInfo {
             ShortcutService.warnForInvalidTag(depth, tag);
         }
 
-        // Successfully loaded; replace the fields.
-        if (fromBackup) {
-            mVersionCode = ShortcutInfo.VERSION_CODE_UNKNOWN;
-            mBackupSourceVersionCode = versionCode;
-            mBackupSourceBackupAllowed = backupAllowed;
-        } else {
-            mVersionCode = versionCode;
-            mBackupSourceVersionCode = backupSourceVersion;
-            mBackupSourceBackupAllowed = backupSourceBackupAllowed;
-        }
+        // Successfully loaded; replace the feilds.
+        mVersionCode = versionCode;
         mLastUpdateTime = lastUpdateTime;
         mIsShadow = shadow;
         mSigHashes = hashes;
-
-        // Note we don't restore it from the file because it didn't used to be saved.
-        // We always start by assuming backup is disabled for the current package,
-        // and this field will have been updated before we actually create a backup, at the same
-        // time when we update the version code.
-        // Until then, the value of mBackupAllowed shouldn't matter, but we don't want to print
-        // a false flag on dumpsys, so set mBackupAllowedInitialized to false.
-        mBackupAllowed = false;
-        mBackupAllowedInitialized = false;
     }
 
     public void dump(PrintWriter pw, String prefix) {
@@ -297,32 +223,12 @@ class ShortcutPackageInfo {
         pw.print(prefix);
         pw.print("  IsShadow: ");
         pw.print(mIsShadow);
-        pw.print(mIsShadow ? " (not installed)" : " (installed)");
         pw.println();
 
         pw.print(prefix);
         pw.print("  Version: ");
         pw.print(mVersionCode);
         pw.println();
-
-        if (mBackupAllowedInitialized) {
-            pw.print(prefix);
-            pw.print("  Backup Allowed: ");
-            pw.print(mBackupAllowed);
-            pw.println();
-        }
-
-        if (mBackupSourceVersionCode != ShortcutInfo.VERSION_CODE_UNKNOWN) {
-            pw.print(prefix);
-            pw.print("  Backup source version: ");
-            pw.print(mBackupSourceVersionCode);
-            pw.println();
-
-            pw.print(prefix);
-            pw.print("  Backup source backup allowed: ");
-            pw.print(mBackupSourceBackupAllowed);
-            pw.println();
-        }
 
         pw.print(prefix);
         pw.print("  Last package update time: ");

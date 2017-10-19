@@ -121,7 +121,8 @@ public class MediaRouteButton extends View {
     }
 
     public MediaRouteButton(Context context, AttributeSet attrs, int defStyleAttr) {
-        super(MediaRouterThemeHelper.createThemedButtonContext(context), attrs, defStyleAttr);
+        super(MediaRouterThemeHelper.createThemedContext(context, defStyleAttr), attrs,
+                defStyleAttr);
         context = getContext();
 
         mRouter = MediaRouter.getInstance(context);

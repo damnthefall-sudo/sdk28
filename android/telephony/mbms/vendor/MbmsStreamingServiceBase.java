@@ -65,10 +65,6 @@ public class MbmsStreamingServiceBase extends IMbmsStreamingService.Stub {
     @Override
     public final int initialize(final IMbmsStreamingSessionCallback callback,
             final int subscriptionId) throws RemoteException {
-        if (callback == null) {
-            throw new NullPointerException("Callback must not be null");
-        }
-
         final int uid = Binder.getCallingUid();
         callback.asBinder().linkToDeath(new DeathRecipient() {
             @Override
@@ -156,10 +152,6 @@ public class MbmsStreamingServiceBase extends IMbmsStreamingService.Stub {
     @Override
     public int startStreaming(final int subscriptionId, String serviceId,
             final IStreamingServiceCallback callback) throws RemoteException {
-        if (callback == null) {
-            throw new NullPointerException("Callback must not be null");
-        }
-
         final int uid = Binder.getCallingUid();
         callback.asBinder().linkToDeath(new DeathRecipient() {
             @Override

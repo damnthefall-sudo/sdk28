@@ -303,9 +303,6 @@ public class FontsContractCompat {
                     final ArrayList<ReplyCallback<TypefaceResult>> replies;
                     synchronized (sLock) {
                         replies = sPendingReplies.get(id);
-                        if (replies == null) {
-                            return;  // Nobody requested replies. Do nothing.
-                        }
                         sPendingReplies.remove(id);
                     }
                     for (int i = 0; i < replies.size(); ++i) {

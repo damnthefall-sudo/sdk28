@@ -41,7 +41,8 @@ import com.android.systemui.pip.BasePipManager;
 import com.android.systemui.recents.events.EventBus;
 import com.android.systemui.recents.events.component.ExpandPipEvent;
 import com.android.systemui.recents.misc.SystemServicesProxy;
-import com.android.systemui.recents.misc.TaskStackChangeListener;
+import com.android.systemui.recents.misc.SystemServicesProxy.TaskStackListener;
+import com.android.systemui.statusbar.CommandQueue;
 
 import java.io.PrintWriter;
 
@@ -69,7 +70,7 @@ public class PipManager implements BasePipManager {
     /**
      * Handler for system task stack changes.
      */
-    TaskStackChangeListener mTaskStackListener = new TaskStackChangeListener() {
+    TaskStackListener mTaskStackListener = new TaskStackListener() {
         @Override
         public void onActivityPinned(String packageName, int userId, int taskId, int stackId) {
             mTouchHandler.onActivityPinned();

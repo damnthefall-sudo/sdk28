@@ -21,6 +21,7 @@ import android.animation.ValueAnimator;
 import android.content.Context;
 import android.content.res.Resources;
 import android.graphics.Path;
+import android.graphics.Rect;
 import android.util.ArrayMap;
 import android.util.MutableBoolean;
 import android.view.InputDevice;
@@ -44,9 +45,9 @@ import com.android.systemui.recents.events.activity.HideRecentsEvent;
 import com.android.systemui.recents.events.ui.StackViewScrolledEvent;
 import com.android.systemui.recents.events.ui.TaskViewDismissedEvent;
 import com.android.systemui.recents.misc.FreePathInterpolator;
-import com.android.systemui.shared.recents.utilities.AnimationProps;
-import com.android.systemui.shared.recents.utilities.Utilities;
-import com.android.systemui.shared.recents.model.Task;
+import com.android.systemui.recents.misc.SystemServicesProxy;
+import com.android.systemui.recents.misc.Utilities;
+import com.android.systemui.recents.model.Task;
 import com.android.systemui.statusbar.FlingAnimationUtils;
 
 import java.util.ArrayList;
@@ -400,6 +401,18 @@ class TaskStackViewTouchHandler implements SwipeHelper.Callback {
         // Disallow tapping above and below the stack to dismiss recents
         if (x > mSv.mLayoutAlgorithm.mStackRect.left && x < mSv.mLayoutAlgorithm.mStackRect.right) {
             return;
+        }
+
+        // If tapping on the freeform workspace background, just launch the first freeform task
+        SystemServicesProxy ssp = Recents.getSystemServices();
+        if (ssp.hasFreeformWorkspaceSupport()) {
+            Rect freeformRect = mSv.mLayoutAlgorithm.mFreeformRect;
+            if (freeformRect.top <= y && y <= freeformRect.bottom) {
+                if (mSv.launchFreeformTasks()) {
+                    // TODO: Animate Recents away as we launch the freeform tasks
+                    return;
+                }
+            }
         }
 
         // The user intentionally tapped on the background, which is like a tap on the "desktop".

@@ -16,7 +16,6 @@
 
 package com.android.server.wifi;
 
-import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.net.apf.ApfCapabilities;
 import android.net.wifi.IApInterface;
@@ -110,12 +109,12 @@ public class WifiNative {
     * @return Pair of <Integer, IClientInterface> to indicate the status and the associated wificond
     * client interface binder handler (will be null on failure).
     */
-    public Pair<Integer, IClientInterface> setupForClientMode(@NonNull String ifaceName) {
+    public Pair<Integer, IClientInterface> setupForClientMode() {
         if (!startHalIfNecessary(true)) {
             Log.e(mTAG, "Failed to start HAL for client mode");
             return Pair.create(SETUP_FAILURE_HAL, null);
         }
-        IClientInterface iClientInterface = mWificondControl.setupDriverForClientMode(ifaceName);
+        IClientInterface iClientInterface = mWificondControl.setupDriverForClientMode();
         if (iClientInterface == null) {
             return Pair.create(SETUP_FAILURE_WIFICOND, null);
         }
@@ -131,12 +130,12 @@ public class WifiNative {
      * @return Pair of <Integer, IApInterface> to indicate the status and the associated wificond
      * AP interface binder handler (will be null on failure).
      */
-    public Pair<Integer, IApInterface> setupForSoftApMode(@NonNull String ifaceName) {
+    public Pair<Integer, IApInterface> setupForSoftApMode() {
         if (!startHalIfNecessary(false)) {
             Log.e(mTAG, "Failed to start HAL for AP mode");
             return Pair.create(SETUP_FAILURE_HAL, null);
         }
-        IApInterface iApInterface = mWificondControl.setupDriverForSoftApMode(ifaceName);
+        IApInterface iApInterface = mWificondControl.setupDriverForSoftApMode();
         if (iApInterface == null) {
             return Pair.create(SETUP_FAILURE_WIFICOND, null);
         }

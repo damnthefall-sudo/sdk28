@@ -16,9 +16,7 @@
 
 package android.arch.lifecycle;
 
-import android.annotation.SuppressLint;
 import android.app.Application;
-import android.support.annotation.NonNull;
 
 /**
  * Application context aware {@link ViewModel}.
@@ -27,19 +25,16 @@ import android.support.annotation.NonNull;
  * <p>
  */
 public class AndroidViewModel extends ViewModel {
-    @SuppressLint("StaticFieldLeak")
     private Application mApplication;
 
-    public AndroidViewModel(@NonNull Application application) {
+    public AndroidViewModel(Application application) {
         mApplication = application;
     }
 
     /**
      * Return the application.
      */
-    @NonNull
     public <T extends Application> T getApplication() {
-        //noinspection unchecked
         return (T) mApplication;
     }
 }

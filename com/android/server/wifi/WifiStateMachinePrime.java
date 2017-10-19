@@ -290,8 +290,7 @@ public class WifiStateMachinePrime {
                 }
 
                 try {
-                    mApInterface = mWificond.createApInterface(
-                            mWifiInjector.getWifiNative().getInterfaceName());
+                    mApInterface = mWificond.createApInterface();
                 } catch (RemoteException e1) { }
 
                 if (mApInterface == null) {

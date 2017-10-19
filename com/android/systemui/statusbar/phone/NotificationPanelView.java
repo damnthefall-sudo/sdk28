@@ -704,7 +704,7 @@ public class NotificationPanelView extends PanelView implements
                     mInitialHeightOnTouch = mQsExpansionHeight;
                     mQsTracking = true;
                     mIntercepting = false;
-                    mNotificationStackScroller.cancelLongPress();
+                    mNotificationStackScroller.removeLongPressCallback();
                 }
                 break;
             case MotionEvent.ACTION_POINTER_UP:
@@ -740,7 +740,7 @@ public class NotificationPanelView extends PanelView implements
                     mInitialTouchY = y;
                     mInitialTouchX = x;
                     mIntercepting = false;
-                    mNotificationStackScroller.cancelLongPress();
+                    mNotificationStackScroller.removeLongPressCallback();
                     return true;
                 }
                 break;

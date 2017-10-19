@@ -31,6 +31,7 @@ import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_LAYOUT_REPEAT
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_ORIENTATION;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_STARTING_WINDOW;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_STARTING_WINDOW_VERBOSE;
+import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_SURFACE_TRACE;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_VISIBILITY;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_WALLPAPER;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_WINDOW_CROP;
@@ -508,7 +509,7 @@ class WindowStateAnimator {
         boolean layoutNeeded = false;
 
         if (mDrawState == DRAW_PENDING) {
-            if (DEBUG_ANIM || SHOW_TRANSACTIONS || DEBUG_ORIENTATION)
+            if (DEBUG_SURFACE_TRACE || DEBUG_ANIM || SHOW_TRANSACTIONS || DEBUG_ORIENTATION)
                 Slog.v(TAG, "finishDrawingLocked: mDrawState=COMMIT_DRAW_PENDING " + mWin + " in "
                         + mSurfaceController);
             if (DEBUG_STARTING_WINDOW && startingWindow) {
@@ -531,7 +532,7 @@ class WindowStateAnimator {
         if (mDrawState != COMMIT_DRAW_PENDING && mDrawState != READY_TO_SHOW) {
             return false;
         }
-        if (DEBUG_ANIM) {
+        if (DEBUG_SURFACE_TRACE || DEBUG_ANIM) {
             Slog.i(TAG, "commitFinishDrawingLocked: mDrawState=READY_TO_SHOW " + mSurfaceController);
         }
         mDrawState = READY_TO_SHOW;
@@ -1032,7 +1033,7 @@ class WindowStateAnimator {
                 //Slog.i(TAG_WM, "Not applying alpha transform");
             }
 
-            if ((DEBUG_ANIM || WindowManagerService.localLOGV)
+            if ((DEBUG_SURFACE_TRACE || WindowManagerService.localLOGV)
                     && (mShownAlpha == 1.0 || mShownAlpha == 0.0)) Slog.v(
                     TAG, "computeShownFrameLocked: Animating " + this + " mAlpha=" + mAlpha
                     + " self=" + (selfTransformation ? mTransformation.getAlpha() : "null")
@@ -1111,7 +1112,7 @@ class WindowStateAnimator {
      */
     private boolean useFinalClipRect() {
         return (isAnimationSet() && resolveStackClip() == STACK_CLIP_AFTER_ANIM)
-                || mDestroyPreservedSurfaceUponRedraw || mWin.inPinnedWindowingMode();
+                || mDestroyPreservedSurfaceUponRedraw || mWin.inPinnedWorkspace();
     }
 
     /**
@@ -1176,7 +1177,7 @@ class WindowStateAnimator {
             return false;
         }
 
-        if (w.inPinnedWindowingMode()) {
+        if (w.inPinnedWorkspace()) {
             return false;
         }
 

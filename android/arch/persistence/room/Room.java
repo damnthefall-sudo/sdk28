@@ -43,7 +43,6 @@ public class Room {
      * @return A {@code RoomDatabaseBuilder<T>} which you can use to create the database.
      */
     @SuppressWarnings("WeakerAccess")
-    @NonNull
     public static <T extends RoomDatabase> RoomDatabase.Builder<T> databaseBuilder(
             @NonNull Context context, @NonNull Class<T> klass, @NonNull String name) {
         //noinspection ConstantConditions
@@ -66,7 +65,6 @@ public class Room {
      * @param <T>     The type of the database class.
      * @return A {@code RoomDatabaseBuilder<T>} which you can use to create the database.
      */
-    @NonNull
     public static <T extends RoomDatabase> RoomDatabase.Builder<T> inMemoryDatabaseBuilder(
             @NonNull Context context, @NonNull Class<T> klass) {
         return new RoomDatabase.Builder<>(context, klass, null);

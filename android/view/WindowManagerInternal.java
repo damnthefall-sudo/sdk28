@@ -335,8 +335,8 @@ public abstract class WindowManagerInternal {
     public abstract void setOnHardKeyboardStatusChangeListener(
         OnHardKeyboardStatusChangeListener listener);
 
-    /** Returns true if a stack in the windowing mode is currently visible. */
-    public abstract boolean isStackVisible(int windowingMode);
+    /** Returns true if the stack with the input Id is currently visible. */
+    public abstract boolean isStackVisible(int stackId);
 
     /**
      * @return True if and only if the docked divider is currently in resize mode.

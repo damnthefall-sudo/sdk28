@@ -216,12 +216,9 @@ final class AutofillManagerServiceImpl {
                 serviceComponent = ComponentName.unflattenFromString(componentName);
                 serviceInfo = AppGlobals.getPackageManager().getServiceInfo(serviceComponent,
                         0, mUserId);
-                if (serviceInfo == null) {
-                    Slog.e(TAG, "Bad AutofillService name: " + componentName);
-                }
             } catch (RuntimeException | RemoteException e) {
-                Slog.e(TAG, "Error getting service info for '" + componentName + "': " + e);
-                serviceInfo = null;
+                Slog.e(TAG, "Bad autofill service name " + componentName + ": " + e);
+                return;
             }
         }
         try {
@@ -231,24 +228,21 @@ final class AutofillManagerServiceImpl {
                 if (sDebug) Slog.d(TAG, "Set component for user " + mUserId + " as " + mInfo);
             } else {
                 mInfo = null;
-                if (sDebug) {
-                    Slog.d(TAG, "Reset component for user " + mUserId + " (" + componentName + ")");
+                if (sDebug) Slog.d(TAG, "Reset component for user " + mUserId);
+            }
+            final boolean isEnabled = isEnabled();
+            if (wasEnabled != isEnabled) {
+                if (!isEnabled) {
+                    final int sessionCount = mSessions.size();
+                    for (int i = sessionCount - 1; i >= 0; i--) {
+                        final Session session = mSessions.valueAt(i);
+                        session.removeSelfLocked();
+                    }
                 }
+                sendStateToClients(false);
             }
         } catch (Exception e) {
-            Slog.e(TAG, "Bad AutofillServiceInfo for '" + componentName + "': " + e);
-            mInfo = null;
-        }
-        final boolean isEnabled = isEnabled();
-        if (wasEnabled != isEnabled) {
-            if (!isEnabled) {
-                final int sessionCount = mSessions.size();
-                for (int i = sessionCount - 1; i >= 0; i--) {
-                    final Session session = mSessions.valueAt(i);
-                    session.removeSelfLocked();
-                }
-            }
-            sendStateToClients(false);
+            Slog.e(TAG, "Bad AutofillService '" + componentName + "': " + e);
         }
     }
 

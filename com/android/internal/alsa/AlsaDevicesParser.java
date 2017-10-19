@@ -46,12 +46,6 @@ public class AlsaDevicesParser {
     private boolean mHasPlaybackDevices = false;
     private boolean mHasMIDIDevices = false;
 
-    public static final int SCANSTATUS_NOTSCANNED = -1;
-    public static final int SCANSTATUS_SUCCESS = 0;
-    public static final int SCANSTATUS_FAIL = 1;
-    public static final int SCANSTATUS_EMPTY = 2;
-    private int mScanStatus = SCANSTATUS_NOTSCANNED;
-
     public class AlsaDeviceRecord {
         public static final int kDeviceType_Unknown = -1;
         public static final int kDeviceType_Audio = 0;
@@ -264,11 +258,7 @@ public class AlsaDevicesParser {
         return line.charAt(kIndex_CardDeviceField) == '[';
     }
 
-    public int scan() {
-        if (DEBUG) {
-            Slog.i(TAG, "AlsaDevicesParser.scan()....");
-        }
-
+    public boolean scan() {
         mDeviceRecords.clear();
 
         File devicesFile = new File(kDevicesFilePath);
@@ -284,27 +274,13 @@ public class AlsaDevicesParser {
                 }
             }
             reader.close();
-            // success if we add at least 1 record
-            if (mDeviceRecords.size() > 0) {
-                mScanStatus = SCANSTATUS_SUCCESS;
-            } else {
-                mScanStatus = SCANSTATUS_EMPTY;
-            }
+            return true;
         } catch (FileNotFoundException e) {
             e.printStackTrace();
-            mScanStatus = SCANSTATUS_FAIL;
         } catch (IOException e) {
             e.printStackTrace();
-            mScanStatus = SCANSTATUS_FAIL;
         }
-        if (DEBUG) {
-            Slog.i(TAG, "  status:" + mScanStatus);
-        }
-        return mScanStatus;
-    }
-
-    public int getScanStatus() {
-        return mScanStatus;
+        return false;
     }
 
     //

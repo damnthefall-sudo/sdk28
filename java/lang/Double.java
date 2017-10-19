@@ -137,8 +137,6 @@ public final class Double extends Number implements Comparable<Double> {
      * @since JDK1.1
      */
     @SuppressWarnings("unchecked")
-    // Android-changed: Avoid use of removed Class.getPrimitiveClass method.
-    // public static final Class<Double>   TYPE = (Class<Double>) Class.getPrimitiveClass("double");
     public static final Class<Double>   TYPE = (Class<Double>) double[].class.getComponentType();
 
     /**

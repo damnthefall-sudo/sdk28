@@ -18,6 +18,8 @@ package com.android.server.wm;
 
 import static android.app.ActivityManager.DOCKED_STACK_CREATE_MODE_TOP_OR_LEFT;
 import static android.app.ActivityManager.DOCKED_STACK_CREATE_MODE_BOTTOM_OR_RIGHT;
+import static android.app.ActivityManager.StackId.DOCKED_STACK_ID;
+import static android.app.ActivityManager.StackId.PINNED_STACK_ID;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_ASSISTANT;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_HOME;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_RECENTS;
@@ -294,7 +296,7 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
         if (mFillsParent
                 || !inSplitScreenSecondaryWindowingMode()
                 || mDisplayContent == null
-                || mDisplayContent.getSplitScreenPrimaryStackStack() != null) {
+                || mDisplayContent.getDockedStackLocked() != null) {
             return true;
         }
         return false;
@@ -407,7 +409,7 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
             return false;
         }
 
-        if (inPinnedWindowingMode()) {
+        if (mStackId == PINNED_STACK_ID) {
             getAnimationOrCurrentBounds(mTmpRect2);
             boolean updated = mDisplayContent.mPinnedStackControllerLocked.onTaskStackBoundsChanged(
                     mTmpRect2, mTmpRect3);
@@ -441,19 +443,21 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
 
         mTmpRect2.set(mBounds);
         mDisplayContent.rotateBounds(mRotation, newRotation, mTmpRect2);
-        if (inSplitScreenPrimaryWindowingMode()) {
-            repositionDockedStackAfterRotation(mTmpRect2);
-            snapDockedStackAfterRotation(mTmpRect2);
-            final int newDockSide = getDockSide(mTmpRect2);
+        switch (mStackId) {
+            case DOCKED_STACK_ID:
+                repositionDockedStackAfterRotation(mTmpRect2);
+                snapDockedStackAfterRotation(mTmpRect2);
+                final int newDockSide = getDockSide(mTmpRect2);
 
-            // Update the dock create mode and clear the dock create bounds, these
-            // might change after a rotation and the original values will be invalid.
-            mService.setDockedStackCreateStateLocked(
-                    (newDockSide == DOCKED_LEFT || newDockSide == DOCKED_TOP)
-                            ? DOCKED_STACK_CREATE_MODE_TOP_OR_LEFT
-                            : DOCKED_STACK_CREATE_MODE_BOTTOM_OR_RIGHT,
-                    null);
-            mDisplayContent.getDockedDividerController().notifyDockSideChanged(newDockSide);
+                // Update the dock create mode and clear the dock create bounds, these
+                // might change after a rotation and the original values will be invalid.
+                mService.setDockedStackCreateStateLocked(
+                        (newDockSide == DOCKED_LEFT || newDockSide == DOCKED_TOP)
+                                ? DOCKED_STACK_CREATE_MODE_TOP_OR_LEFT
+                                : DOCKED_STACK_CREATE_MODE_BOTTOM_OR_RIGHT,
+                        null);
+                mDisplayContent.getDockedDividerController().notifyDockSideChanged(newDockSide);
+                break;
         }
 
         mBoundsAfterRotation.set(mTmpRect2);
@@ -673,16 +677,6 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
         }
     }
 
-    @Override
-    public void onConfigurationChanged(Configuration newParentConfig) {
-        final int prevWindowingMode = getWindowingMode();
-        super.onConfigurationChanged(newParentConfig);
-        if (mDisplayContent != null && prevWindowingMode != getWindowingMode()) {
-            mDisplayContent.onStackWindowingModeChanged(this);
-        }
-    }
-
-    @Override
     void onDisplayChanged(DisplayContent dc) {
         if (mDisplayContent != null) {
             throw new IllegalStateException("onDisplayChanged: Already attached");
@@ -693,8 +687,8 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
                 "animation background stackId=" + mStackId);
 
         Rect bounds = null;
-        final TaskStack dockedStack = dc.getSplitScreenPrimaryStackStackIgnoringVisibility();
-        if (inSplitScreenPrimaryWindowingMode()
+        final TaskStack dockedStack = dc.getDockedStackIgnoringVisibility();
+        if (mStackId == DOCKED_STACK_ID
                 || (dockedStack != null && inSplitScreenSecondaryWindowingMode()
                         && !dockedStack.fillsParent())) {
             // The existence of a docked stack affects the size of other static stack created since
@@ -709,10 +703,10 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
             }
             final boolean dockedOnTopOrLeft = mService.mDockedStackCreateMode
                     == DOCKED_STACK_CREATE_MODE_TOP_OR_LEFT;
-            getStackDockedModeBounds(mTmpRect, bounds, mTmpRect2,
+            getStackDockedModeBounds(mTmpRect, bounds, mStackId, mTmpRect2,
                     mDisplayContent.mDividerControllerLocked.getContentWidth(),
                     dockedOnTopOrLeft);
-        } else if (inPinnedWindowingMode()) {
+        } else if (mStackId == PINNED_STACK_ID) {
             // Update the bounds based on any changes to the display info
             getAnimationOrCurrentBounds(mTmpRect2);
             boolean updated = mDisplayContent.mPinnedStackControllerLocked.onTaskStackBoundsChanged(
@@ -772,8 +766,7 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
             return;
         }
 
-        final TaskStack dockedStack =
-                mDisplayContent.getSplitScreenPrimaryStackStackIgnoringVisibility();
+        final TaskStack dockedStack = mDisplayContent.getDockedStackIgnoringVisibility();
         if (dockedStack == null) {
             // Not sure why you are calling this method when there is no docked stack...
             throw new IllegalStateException(
@@ -798,7 +791,7 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
         mDisplayContent.getLogicalDisplayRect(mTmpRect);
         dockedStack.getRawBounds(mTmpRect2);
         final boolean dockedOnTopOrLeft = dockedSide == DOCKED_TOP || dockedSide == DOCKED_LEFT;
-        getStackDockedModeBounds(mTmpRect, outStackBounds, mTmpRect2,
+        getStackDockedModeBounds(mTmpRect, outStackBounds, mStackId, mTmpRect2,
                 mDisplayContent.mDividerControllerLocked.getContentWidth(), dockedOnTopOrLeft);
 
     }
@@ -807,15 +800,16 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
      * Outputs the bounds a stack should be given the presence of a docked stack on the display.
      * @param displayRect The bounds of the display the docked stack is on.
      * @param outBounds Output bounds that should be used for the stack.
+     * @param stackId Id of stack we are calculating the bounds for.
      * @param dockedBounds Bounds of the docked stack.
      * @param dockDividerWidth We need to know the width of the divider make to the output bounds
      *                         close to the side of the dock.
      * @param dockOnTopOrLeft If the docked stack is on the top or left side of the screen.
      */
     private void getStackDockedModeBounds(
-            Rect displayRect, Rect outBounds, Rect dockedBounds, int dockDividerWidth,
+            Rect displayRect, Rect outBounds, int stackId, Rect dockedBounds, int dockDividerWidth,
             boolean dockOnTopOrLeft) {
-        final boolean dockedStack = inSplitScreenPrimaryWindowingMode();
+        final boolean dockedStack = stackId == DOCKED_STACK_ID;
         final boolean splitHorizontally = displayRect.width() > displayRect.height();
 
         outBounds.set(displayRect);
@@ -872,7 +866,7 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
     }
 
     void resetDockedStackToMiddle() {
-        if (inSplitScreenPrimaryWindowingMode()) {
+        if (mStackId != DOCKED_STACK_ID) {
             throw new IllegalStateException("Not a docked stack=" + this);
         }
 
@@ -900,12 +894,17 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
     }
 
     @Override
-    void onParentSet() {
-        if (getParent() != null || mDisplayContent == null) {
-            return;
-        }
+    void removeImmediately() {
+        super.removeImmediately();
 
-        // Looks like the stack was removed from the display. Go ahead and clean things up.
+        onRemovedFromDisplay();
+    }
+
+    /**
+     * Removes the stack it from its current parent, so it can be either destroyed completely or
+     * re-parented.
+     */
+    void onRemovedFromDisplay() {
         mDisplayContent.mDimLayerController.removeDimLayerUser(this);
         EventLog.writeEvent(EventLogTags.WM_STACK_REMOVED, mStackId);
 
@@ -914,7 +913,7 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
             mAnimationBackgroundSurface = null;
         }
 
-        if (inSplitScreenPrimaryWindowingMode()) {
+        if (mStackId == DOCKED_STACK_ID) {
             mDisplayContent.mDividerControllerLocked.notifyDockedStackExistsChanged(false);
         }
 
@@ -1036,8 +1035,8 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
     }
 
     boolean shouldIgnoreInput() {
-        return isAdjustedForMinimizedDockedStack() ||
-                (inSplitScreenPrimaryWindowingMode() && isMinimizedDockAndHomeStackResizable());
+        return isAdjustedForMinimizedDockedStack() || mStackId == DOCKED_STACK_ID &&
+                isMinimizedDockAndHomeStackResizable();
     }
 
     /**
@@ -1472,7 +1471,7 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
                 postExclude.set(mTmpRect);
             }
 
-            final boolean isFreeformed = task.inFreeformWindowingMode();
+            final boolean isFreeformed = task.inFreeformWorkspace();
             if (task != focusedTask || isFreeformed) {
                 if (isFreeformed) {
                     // If the task is freeformed, enlarge the area to account for outside
@@ -1530,7 +1529,7 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
             }
         }
 
-        if (inPinnedWindowingMode()) {
+        if (mStackId == PINNED_STACK_ID) {
             try {
                 mService.mActivityManager.notifyPinnedStackAnimationStarted();
             } catch (RemoteException e) {
@@ -1562,7 +1561,7 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
             mService.requestTraversal();
         }
 
-        if (inPinnedWindowingMode()) {
+        if (mStackId == PINNED_STACK_ID) {
             // Update to the final bounds if requested. This is done here instead of in the bounds
             // animator to allow us to coordinate this after we notify the PiP mode changed
 
@@ -1596,7 +1595,7 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
      *         bounds and we have a deferred PiP mode changed callback set with the animation.
      */
     public boolean deferScheduleMultiWindowModeChanged() {
-        if (inPinnedWindowingMode()) {
+        if (mStackId == PINNED_STACK_ID) {
             return (mBoundsAnimatingRequested || mBoundsAnimating);
         }
         return false;

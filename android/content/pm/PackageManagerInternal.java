@@ -467,7 +467,6 @@ public abstract class PackageManagerInternal {
     /** Updates the flags for the given permission. */
     public abstract void updatePermissionFlagsTEMP(@NonNull String permName,
             @NonNull String packageName, int flagMask, int flagValues, int userId);
-    /** Returns a PermissionGroup. */
-    public abstract @Nullable PackageParser.PermissionGroup getPermissionGroupTEMP(
-            @NonNull String groupName);
+    /** temporary until mPermissionTrees is moved to PermissionManager */
+    public abstract Object enforcePermissionTreeTEMP(@NonNull String permName, int callingUid);
 }

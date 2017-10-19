@@ -1748,26 +1748,22 @@ public final class Debug
     public static final int MEMINFO_SHMEM = 4;
     /** @hide */
     public static final int MEMINFO_SLAB = 5;
-     /** @hide */
-    public static final int MEMINFO_SLAB_RECLAIMABLE = 6;
-     /** @hide */
-    public static final int MEMINFO_SLAB_UNRECLAIMABLE = 7;
     /** @hide */
-    public static final int MEMINFO_SWAP_TOTAL = 8;
+    public static final int MEMINFO_SWAP_TOTAL = 6;
     /** @hide */
-    public static final int MEMINFO_SWAP_FREE = 9;
+    public static final int MEMINFO_SWAP_FREE = 7;
     /** @hide */
-    public static final int MEMINFO_ZRAM_TOTAL = 10;
+    public static final int MEMINFO_ZRAM_TOTAL = 8;
     /** @hide */
-    public static final int MEMINFO_MAPPED = 11;
+    public static final int MEMINFO_MAPPED = 9;
     /** @hide */
-    public static final int MEMINFO_VM_ALLOC_USED = 12;
+    public static final int MEMINFO_VM_ALLOC_USED = 10;
     /** @hide */
-    public static final int MEMINFO_PAGE_TABLES = 13;
+    public static final int MEMINFO_PAGE_TABLES = 11;
     /** @hide */
-    public static final int MEMINFO_KERNEL_STACK = 14;
+    public static final int MEMINFO_KERNEL_STACK = 12;
     /** @hide */
-    public static final int MEMINFO_COUNT = 15;
+    public static final int MEMINFO_COUNT = 13;
 
     /**
      * Retrieves /proc/meminfo.  outSizes is filled with fields

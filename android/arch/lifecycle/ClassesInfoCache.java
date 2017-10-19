@@ -46,7 +46,7 @@ class ClassesInfoCache {
             return mHasLifecycleMethods.get(klass);
         }
 
-        Method[] methods = getDeclaredMethods(klass);
+        Method[] methods = klass.getDeclaredMethods();
         for (Method method : methods) {
             OnLifecycleEvent annotation = method.getAnnotation(OnLifecycleEvent.class);
             if (annotation != null) {
@@ -62,18 +62,6 @@ class ClassesInfoCache {
         }
         mHasLifecycleMethods.put(klass, false);
         return false;
-    }
-
-    private Method[] getDeclaredMethods(Class klass) {
-        try {
-            return klass.getDeclaredMethods();
-        } catch (NoClassDefFoundError e) {
-            throw new IllegalArgumentException("The observer class has some methods that use "
-                    + "newer APIs which are not available in the current OS version. Lifecycles "
-                    + "cannot access even other methods so you should make sure that your "
-                    + "observer classes only access framework classes that are available "
-                    + "in your min API level OR use lifecycle:compiler annotation processor.", e);
-        }
     }
 
     CallbackInfo getInfo(Class klass) {
@@ -118,7 +106,7 @@ class ClassesInfoCache {
             }
         }
 
-        Method[] methods = declaredMethods != null ? declaredMethods : getDeclaredMethods(klass);
+        Method[] methods = declaredMethods != null ? declaredMethods : klass.getDeclaredMethods();
         boolean hasLifecycleMethods = false;
         for (Method method : methods) {
             OnLifecycleEvent annotation = method.getAnnotation(OnLifecycleEvent.class);

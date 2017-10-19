@@ -60,8 +60,6 @@ public final class Byte extends Number implements Comparable<Byte> {
      * {@code byte}.
      */
     @SuppressWarnings("unchecked")
-    // Android-changed: Avoid use of removed Class.getPrimitiveClass method.
-    // public static final Class<Byte>     TYPE = (Class<Byte>) Class.getPrimitiveClass("byte");
     public static final Class<Byte>     TYPE = (Class<Byte>) byte[].class.getComponentType();
 
     /**

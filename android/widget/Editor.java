@@ -165,7 +165,7 @@ public class Editor {
     private static final int MENU_ITEM_ORDER_PASTE_AS_PLAIN_TEXT = 11;
     private static final int MENU_ITEM_ORDER_PROCESS_TEXT_INTENT_ACTIONS_START = 100;
 
-    private static final float MAGNIFIER_ZOOM = 1.25f;
+    private static final float MAGNIFIER_ZOOM = 1.5f;
     @IntDef({MagnifierHandleTrigger.SELECTION_START,
             MagnifierHandleTrigger.SELECTION_END,
             MagnifierHandleTrigger.INSERTION})
@@ -474,17 +474,6 @@ public class Editor {
 
         hideCursorAndSpanControllers();
         stopTextActionModeWithPreservingSelection();
-    }
-
-    void invalidateMagnifier() {
-        final DisplayMetrics dm = mTextView.getResources().getDisplayMetrics();
-        invalidateMagnifier(0, 0, dm.widthPixels, dm.heightPixels);
-    }
-
-    void invalidateMagnifier(final float l, final float t, final float r, final float b) {
-        if (mMagnifier != null) {
-            mTextView.post(() -> mMagnifier.invalidate(new RectF(l, t, r, b)));
-        }
     }
 
     private void discardTextDisplayLists() {
@@ -4556,17 +4545,17 @@ public class Editor {
                     + mTextView.getLayout().getLineBottom(lineNumber)) / 2.0f;
             final int[] coordinatesOnScreen = new int[2];
             mTextView.getLocationOnScreen(coordinatesOnScreen);
-            final float centerXOnScreen = mTextView.convertViewToScreenCoord(xPosInView, true);
-            final float centerYOnScreen = mTextView.convertViewToScreenCoord(yPosInView, false);
+            final float centerXOnScreen = xPosInView + mTextView.getTotalPaddingLeft()
+                    - mTextView.getScrollX() + coordinatesOnScreen[0];
+            final float centerYOnScreen = yPosInView + mTextView.getTotalPaddingTop()
+                    - mTextView.getScrollY() + coordinatesOnScreen[1];
 
-            suspendBlink();
             mMagnifier.show(centerXOnScreen, centerYOnScreen, MAGNIFIER_ZOOM);
         }
 
         protected final void dismissMagnifier() {
             if (mMagnifier != null) {
                 mMagnifier.dismiss();
-                resumeBlink();
             }
         }
 

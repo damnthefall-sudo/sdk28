@@ -31,7 +31,6 @@ import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * Internal interfaces to be used by other components within the system server.
@@ -82,25 +81,10 @@ public abstract class PermissionManagerInternal {
             @NonNull int[] allUserIds);
 
 
-    /**
-     * Add all permissions in the given package.
-     * <p>
-     * NOTE: argument {@code groupTEMP} is temporary until mPermissionGroups is moved to
-     * the permission settings.
-     */
-    public abstract void addAllPermissions(@NonNull PackageParser.Package pkg, boolean chatty);
-    public abstract void removeAllPermissions(@NonNull PackageParser.Package pkg, boolean chatty);
-    public abstract boolean addDynamicPermission(@NonNull PermissionInfo info, boolean async,
+    public abstract boolean addPermission(@NonNull PermissionInfo info, boolean async,
             int callingUid, @Nullable PermissionCallback callback);
-    public abstract void removeDynamicPermission(@NonNull String permName, int callingUid,
+    public abstract void removePermission(@NonNull String permName, int callingUid,
             @Nullable PermissionCallback callback);
-
-    public abstract int updatePermissions(@Nullable String changingPkg,
-            @Nullable PackageParser.Package pkgInfo, int flags);
-    public abstract int updatePermissionTrees(@Nullable String changingPkg,
-            @Nullable PackageParser.Package pkgInfo, int flags);
-
-    public abstract @Nullable String[] getAppOpPermissionPackages(@NonNull String permName);
 
     public abstract int getPermissionFlags(@NonNull String permName,
             @NonNull String packageName, int callingUid, int userId);
@@ -114,6 +98,8 @@ public abstract class PermissionManagerInternal {
      */
     public abstract @Nullable List<PermissionInfo> getPermissionInfoByGroup(@NonNull String group,
             @PermissionInfoFlags int flags, int callingUid);
+    public abstract boolean isPermissionAppOp(@NonNull String permName);
+    public abstract boolean isPermissionInstant(@NonNull String permName);
 
     /**
      * Updates the flags associated with a permission by replacing the flags in

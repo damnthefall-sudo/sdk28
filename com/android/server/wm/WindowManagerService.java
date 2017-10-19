@@ -2384,7 +2384,7 @@ public class WindowManagerService extends IWindowManager.Stub
             final Rect insets = new Rect();
             final Rect stableInsets = new Rect();
             Rect surfaceInsets = null;
-            final boolean freeform = win != null && win.inFreeformWindowingMode();
+            final boolean freeform = win != null && win.inFreeformWorkspace();
             if (win != null) {
                 // Containing frame will usually cover the whole screen, including dialog windows.
                 // For freeform workspace windows it will not cover the whole screen and it also
@@ -2794,7 +2794,7 @@ public class WindowManagerService extends IWindowManager.Stub
         for (final WindowState win : mWindowMap.values()) {
             final Task task = win.getTask();
             if (task != null && mTmpTaskIds.get(task.mTaskId, -1) != -1
-                    && task.inFreeformWindowingMode()) {
+                    && task.inFreeformWorkspace()) {
                 final AppWindowToken appToken = win.mAppToken;
                 if (appToken != null && appToken.mAppAnimator != null) {
                     appToken.mAppAnimator.startProlongAnimation(scaleUp ?
@@ -3391,8 +3391,7 @@ public class WindowManagerService extends IWindowManager.Stub
 
             // Notify whether the docked stack exists for the current user
             final DisplayContent displayContent = getDefaultDisplayContentLocked();
-            final TaskStack stack =
-                    displayContent.getSplitScreenPrimaryStackStackIgnoringVisibility();
+            final TaskStack stack = displayContent.getDockedStackIgnoringVisibility();
             displayContent.mDividerControllerLocked.notifyDockedStackExistsChanged(
                     stack != null && stack.hasTaskForUser(newUserId));
 
@@ -6899,6 +6898,11 @@ public class WindowManagerService extends IWindowManager.Stub
                     dumpSessionsLocked(pw, true);
                 }
                 return;
+            } else if ("surfaces".equals(cmd)) {
+                synchronized(mWindowMap) {
+                    WindowSurfaceController.SurfaceTrace.dumpAllSurfaces(pw, null);
+                }
+                return;
             } else if ("displays".equals(cmd) || "d".equals(cmd)) {
                 synchronized(mWindowMap) {
                     mRoot.dumpDisplayContents(pw);
@@ -6963,6 +6967,10 @@ public class WindowManagerService extends IWindowManager.Stub
             if (dumpAll) {
                 pw.println("-------------------------------------------------------------------------------");
             }
+            WindowSurfaceController.SurfaceTrace.dumpAllSurfaces(pw, dumpAll ?
+                    "-------------------------------------------------------------------------------"
+                    : null);
+            pw.println();
             if (dumpAll) {
                 pw.println("-------------------------------------------------------------------------------");
             }
@@ -7124,7 +7132,7 @@ public class WindowManagerService extends IWindowManager.Stub
     public int getDockedStackSide() {
         synchronized (mWindowMap) {
             final TaskStack dockedStack = getDefaultDisplayContentLocked()
-                    .getSplitScreenPrimaryStackStackIgnoringVisibility();
+                    .getDockedStackIgnoringVisibility();
             return dockedStack == null ? DOCKED_INVALID : dockedStack.getDockSide();
         }
     }
@@ -7596,10 +7604,10 @@ public class WindowManagerService extends IWindowManager.Stub
         }
 
         @Override
-        public boolean isStackVisible(int windowingMode) {
+        public boolean isStackVisible(int stackId) {
             synchronized (mWindowMap) {
                 final DisplayContent dc = getDefaultDisplayContentLocked();
-                return dc.isStackVisible(windowingMode);
+                return dc.isStackVisible(stackId);
             }
         }
 

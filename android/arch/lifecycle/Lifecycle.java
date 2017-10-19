@@ -17,7 +17,6 @@
 package android.arch.lifecycle;
 
 import android.support.annotation.MainThread;
-import android.support.annotation.NonNull;
 
 /**
  * Defines an object that has an Android Lifecycle. {@link android.support.v4.app.Fragment Fragment}
@@ -84,7 +83,7 @@ public abstract class Lifecycle {
      * @param observer The observer to notify.
      */
     @MainThread
-    public abstract void addObserver(@NonNull LifecycleObserver observer);
+    public abstract void addObserver(LifecycleObserver observer);
 
     /**
      * Removes the given observer from the observers list.
@@ -100,7 +99,7 @@ public abstract class Lifecycle {
      * @param observer The observer to be removed.
      */
     @MainThread
-    public abstract void removeObserver(@NonNull LifecycleObserver observer);
+    public abstract void removeObserver(LifecycleObserver observer);
 
     /**
      * Returns the current state of the Lifecycle.
@@ -194,7 +193,7 @@ public abstract class Lifecycle {
          * @param state State to compare with
          * @return true if this State is greater or equal to the given {@code state}
          */
-        public boolean isAtLeast(@NonNull State state) {
+        public boolean isAtLeast(State state) {
             return compareTo(state) >= 0;
         }
     }

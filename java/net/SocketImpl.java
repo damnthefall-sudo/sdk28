@@ -227,7 +227,6 @@ public abstract class SocketImpl implements SocketOptions {
         return fd;
     }
 
-    // Android-added: getFD$() for testing.
     /**
      * @hide used by java.nio tests
      */

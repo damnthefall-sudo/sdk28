@@ -17,6 +17,7 @@
 package com.android.systemui.recents.views;
 
 import android.app.ActivityManager;
+import android.content.res.Configuration;
 import android.graphics.Point;
 import android.graphics.Rect;
 import android.view.InputDevice;
@@ -31,6 +32,7 @@ import com.android.systemui.recents.Recents;
 import com.android.systemui.recents.events.EventBus;
 import com.android.systemui.recents.events.activity.ConfigurationChangedEvent;
 import com.android.systemui.recents.events.activity.HideRecentsEvent;
+import com.android.systemui.recents.events.activity.HideStackActionButtonEvent;
 import com.android.systemui.recents.events.ui.DismissAllTaskViewsEvent;
 import com.android.systemui.recents.events.ui.HideIncompatibleAppOverlayEvent;
 import com.android.systemui.recents.events.ui.ShowIncompatibleAppOverlayEvent;
@@ -39,8 +41,8 @@ import com.android.systemui.recents.events.ui.dragndrop.DragEndEvent;
 import com.android.systemui.recents.events.ui.dragndrop.DragStartEvent;
 import com.android.systemui.recents.events.ui.dragndrop.DragStartInitializeDropTargetsEvent;
 import com.android.systemui.recents.misc.SystemServicesProxy;
-import com.android.systemui.shared.recents.model.Task;
-import com.android.systemui.shared.recents.model.TaskStack;
+import com.android.systemui.recents.model.Task;
+import com.android.systemui.recents.model.TaskStack;
 
 import java.util.ArrayList;
 
@@ -70,7 +72,7 @@ public class RecentsViewTouchHandler {
     private DropTarget mLastDropTarget;
     private DividerSnapAlgorithm mDividerSnapAlgorithm;
     private ArrayList<DropTarget> mDropTargets = new ArrayList<>();
-    private ArrayList<DockState> mVisibleDockStates = new ArrayList<>();
+    private ArrayList<TaskStack.DockState> mVisibleDockStates = new ArrayList<>();
 
     public RecentsViewTouchHandler(RecentsView rv) {
         mRv = rv;
@@ -94,7 +96,7 @@ public class RecentsViewTouchHandler {
     /**
      * Returns the set of visible dock states for this current drag.
      */
-    public ArrayList<DockState> getVisibleDockStates() {
+    public ArrayList<TaskStack.DockState> getVisibleDockStates() {
         return mVisibleDockStates;
     }
 
@@ -146,9 +148,9 @@ public class RecentsViewTouchHandler {
                 EventBus.getDefault().send(new ShowIncompatibleAppOverlayEvent());
             } else {
                 // Add the dock state drop targets (these take priority)
-                DockState[] dockStates = Recents.getConfiguration()
+                TaskStack.DockState[] dockStates = Recents.getConfiguration()
                         .getDockStatesForCurrentOrientation();
-                for (DockState dockState : dockStates) {
+                for (TaskStack.DockState dockState : dockStates) {
                     registerDropTargetForCurrentDrag(dockState);
                     dockState.update(mRv.getContext());
                     mVisibleDockStates.add(dockState);

@@ -160,6 +160,7 @@ import com.android.systemui.Interpolators;
 import com.android.systemui.Prefs;
 import com.android.systemui.R;
 import com.android.systemui.RecentsComponent;
+import com.android.systemui.SwipeHelper;
 import com.android.systemui.SystemUI;
 import com.android.systemui.SystemUIFactory;
 import com.android.systemui.UiOffloadThread;
@@ -4837,7 +4838,7 @@ public class StatusBar extends SystemUI implements DemoMode,
 
     @Override
     public void onTouchSlopExceeded() {
-        mStackScroller.cancelLongPress();
+        mStackScroller.removeLongPressCallback();
         mStackScroller.checkSnoozeLeavebehind();
     }
 
@@ -5469,7 +5470,7 @@ public class StatusBar extends SystemUI implements DemoMode,
 
         @Override
         public void onDoubleTap(float screenX, float screenY) {
-            if (screenX > 0 && screenY > 0 && mAmbientIndicationContainer != null
+            if (screenX > 0 && screenY > 0 && mAmbientIndicationContainer != null 
                 && mAmbientIndicationContainer.getVisibility() == View.VISIBLE) {
                 mAmbientIndicationContainer.getLocationOnScreen(mTmpInt2);
                 float viewX = screenX - mTmpInt2[0];
@@ -5881,7 +5882,8 @@ public class StatusBar extends SystemUI implements DemoMode,
                 List<ActivityManager.RecentTaskInfo> recentTask = null;
                 try {
                     recentTask = ActivityManager.getService().getRecentTasks(1,
-                            ActivityManager.RECENT_WITH_EXCLUDED,
+                            ActivityManager.RECENT_WITH_EXCLUDED
+                            | ActivityManager.RECENT_INCLUDE_PROFILES,
                             mCurrentUserId).getList();
                 } catch (RemoteException e) {
                     // Abandon hope activity manager not running.
@@ -6294,15 +6296,14 @@ public class StatusBar extends SystemUI implements DemoMode,
                 true /* removeControls */, x, y, true /* resetMenu */);
     }
 
-    protected ExpandableNotificationRow.LongPressListener getNotificationLongClicker() {
-        return new ExpandableNotificationRow.LongPressListener() {
+    protected SwipeHelper.LongPressListener getNotificationLongClicker() {
+        return new SwipeHelper.LongPressListener() {
             @Override
             public boolean onLongPress(View v, final int x, final int y,
                     MenuItem item) {
                 if (!(v instanceof ExpandableNotificationRow)) {
                     return false;
                 }
-
                 if (v.getWindowToken() == null) {
                     Log.e(TAG, "Trying to show notification guts, but not attached to window");
                     return false;
@@ -6317,7 +6318,7 @@ public class StatusBar extends SystemUI implements DemoMode,
                     closeAndSaveGuts(false /* removeLeavebehind */, false /* force */,
                             true /* removeControls */, -1 /* x */, -1 /* y */,
                             true /* resetMenu */);
-                    return true;
+                    return false;
                 }
                 bindGuts(row, item);
                 NotificationGuts guts = row.getGuts();
@@ -6597,7 +6598,6 @@ public class StatusBar extends SystemUI implements DemoMode,
         row.setRemoteViewClickHandler(mOnClickHandler);
         row.setInflationCallback(this);
         row.setSecureStateProvider(this::isKeyguardCurrentlySecure);
-        row.setLongPressListener(getNotificationLongClicker());
 
         // Get the app name.
         // Note that Notification.Builder#bindHeaderAppName has similar logic

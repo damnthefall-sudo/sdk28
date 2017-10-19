@@ -17,6 +17,6 @@
 package android.arch.lifecycle.testapp;
 
 public enum TestEvent {
-    OWNER_CALLBACK,
-    LIFECYCLE_EVENT,
+    ACTIVITY_CALLBACK,
+    LIFECYCLE_EVENT
 }

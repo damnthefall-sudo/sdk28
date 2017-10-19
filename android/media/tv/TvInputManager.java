@@ -2590,9 +2590,12 @@ public final class TvInputManager {
             }
         }
 
-        /** @removed */
         public boolean dispatchKeyEventToHdmi(KeyEvent event) {
-            return false;
+            try {
+                return mInterface.dispatchKeyEventToHdmi(event);
+            } catch (RemoteException e) {
+                throw new RuntimeException(e);
+            }
         }
 
         public void overrideAudioSink(int audioType, String audioAddress, int samplingRate,

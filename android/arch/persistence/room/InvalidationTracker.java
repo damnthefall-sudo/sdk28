@@ -219,7 +219,7 @@ public class InvalidationTracker {
      *
      * @param observer The observer which listens the database for changes.
      */
-    public void addObserver(@NonNull Observer observer) {
+    public void addObserver(Observer observer) {
         final String[] tableNames = observer.mTables;
         int[] tableIds = new int[tableNames.length];
         final int size = tableNames.length;
@@ -265,7 +265,7 @@ public class InvalidationTracker {
      * @param observer The observer to remove.
      */
     @SuppressWarnings("WeakerAccess")
-    public void removeObserver(@NonNull final Observer observer) {
+    public void removeObserver(final Observer observer) {
         ObserverWrapper wrapper;
         synchronized (mObserverMap) {
             wrapper = mObserverMap.remove(observer);

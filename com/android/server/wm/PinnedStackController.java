@@ -417,7 +417,8 @@ class PinnedStackController {
                             false /* useCurrentMinEdgeSize */);
                 }
                 final Rect animatingBounds = mTmpAnimatingBoundsRect;
-                final TaskStack pinnedStack = mDisplayContent.getPinnedStack();
+                final TaskStack pinnedStack =
+                        mDisplayContent.getStack(WINDOWING_MODE_PINNED);
                 if (pinnedStack != null) {
                     pinnedStack.getAnimationOrCurrentBounds(animatingBounds);
                 } else {

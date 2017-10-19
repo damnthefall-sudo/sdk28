@@ -16,6 +16,7 @@
 
 package com.android.server.wm;
 
+import static android.app.ActivityManager.StackId.PINNED_STACK_ID;
 import static android.view.Display.DEFAULT_DISPLAY;
 import static android.view.WindowManager.INPUT_CONSUMER_NAVIGATION;
 import static android.view.WindowManager.INPUT_CONSUMER_PIP;
@@ -649,7 +650,7 @@ final class InputMonitor implements InputManagerService.WindowManagerCallbacks {
             final boolean hasFocus = w == mInputFocus;
             final boolean isVisible = w.isVisibleLw();
 
-            if (w.inPinnedWindowingMode()) {
+            if (w.getStackId() == PINNED_STACK_ID) {
                 if (mAddPipInputConsumerHandle
                         && (inputWindowHandle.layer <= pipInputConsumer.mWindowHandle.layer)) {
                     // Update the bounds of the Pip input consumer to match the Pinned stack

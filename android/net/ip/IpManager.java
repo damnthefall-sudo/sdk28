@@ -26,7 +26,6 @@ import android.net.IpPrefix;
 import android.net.LinkAddress;
 import android.net.LinkProperties.ProvisioningChange;
 import android.net.LinkProperties;
-import android.net.Network;
 import android.net.ProxyInfo;
 import android.net.RouteInfo;
 import android.net.StaticIpConfiguration;
@@ -349,16 +348,6 @@ public class IpManager extends StateMachine {
                 return this;
             }
 
-            public Builder withNetwork(Network network) {
-                mConfig.mNetwork = network;
-                return this;
-            }
-
-            public Builder withDisplayName(String displayName) {
-                mConfig.mDisplayName = displayName;
-                return this;
-            }
-
             public ProvisioningConfiguration build() {
                 return new ProvisioningConfiguration(mConfig);
             }
@@ -373,8 +362,6 @@ public class IpManager extends StateMachine {
         /* package */ ApfCapabilities mApfCapabilities;
         /* package */ int mProvisioningTimeoutMs = DEFAULT_TIMEOUT_MS;
         /* package */ int mIPv6AddrGenMode = INetd.IPV6_ADDR_GEN_MODE_STABLE_PRIVACY;
-        /* package */ Network mNetwork = null;
-        /* package */ String mDisplayName = null;
 
         public ProvisioningConfiguration() {} // used by Builder
 
@@ -387,9 +374,6 @@ public class IpManager extends StateMachine {
             mStaticIpConfig = other.mStaticIpConfig;
             mApfCapabilities = other.mApfCapabilities;
             mProvisioningTimeoutMs = other.mProvisioningTimeoutMs;
-            mIPv6AddrGenMode = other.mIPv6AddrGenMode;
-            mNetwork = other.mNetwork;
-            mDisplayName = other.mDisplayName;
         }
 
         @Override
@@ -404,8 +388,6 @@ public class IpManager extends StateMachine {
                     .add("mApfCapabilities: " + mApfCapabilities)
                     .add("mProvisioningTimeoutMs: " + mProvisioningTimeoutMs)
                     .add("mIPv6AddrGenMode: " + mIPv6AddrGenMode)
-                    .add("mNetwork: " + mNetwork)
-                    .add("mDisplayName: " + mDisplayName)
                     .toString();
         }
 
@@ -1459,10 +1441,10 @@ public class IpManager extends StateMachine {
         @Override
         public void enter() {
             // Get the Configuration for ApfFilter from Context
-            final boolean filter802_3Frames =
+            boolean filter802_3Frames =
                     mContext.getResources().getBoolean(R.bool.config_apfDrop802_3Frames);
 
-            final int[] ethTypeBlackList = mContext.getResources().getIntArray(
+            int[] ethTypeBlackList = mContext.getResources().getIntArray(
                     R.array.config_apfEthTypeBlackList);
 
             mApfFilter = ApfFilter.maybeCreate(mConfiguration.mApfCapabilities, mNetworkInterface,
@@ -1474,7 +1456,7 @@ public class IpManager extends StateMachine {
             }
 
             mPacketTracker = createPacketTracker();
-            if (mPacketTracker != null) mPacketTracker.start(mConfiguration.mDisplayName);
+            if (mPacketTracker != null) mPacketTracker.start();
 
             if (mConfiguration.mEnableIPv6 && !startIPv6()) {
                 doImmediateProvisioningFailure(IpManagerEvent.ERROR_STARTING_IPV6);
@@ -1488,7 +1470,7 @@ public class IpManager extends StateMachine {
                 return;
             }
 
-            final InitialConfiguration config = mConfiguration.mInitialConfig;
+            InitialConfiguration config = mConfiguration.mInitialConfig;
             if ((config != null) && !applyInitialConfig(config)) {
                 // TODO introduce a new IpManagerEvent constant to distinguish this error case.
                 doImmediateProvisioningFailure(IpManagerEvent.ERROR_INVALID_PROVISIONING);

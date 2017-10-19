@@ -21,7 +21,6 @@ import android.annotation.ColorInt;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.Size;
-import android.annotation.WorkerThread;
 import android.content.res.ResourcesImpl;
 import android.os.Parcel;
 import android.os.Parcelable;
@@ -1234,7 +1233,6 @@ public final class Bitmap implements Parcelable {
      * @param stream   The outputstream to write the compressed data.
      * @return true if successfully compressed to the specified stream.
      */
-    @WorkerThread
     public boolean compress(CompressFormat format, int quality, OutputStream stream) {
         checkRecycled("Can't compress a recycled bitmap");
         // do explicit check before calling the native method

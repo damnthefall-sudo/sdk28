@@ -823,7 +823,7 @@ class AppWindowToken extends WindowToken implements WindowManagerService.AppFree
 
         // For freeform windows, we can't freeze the bounds at the moment because this would make
         // the resizing unresponsive.
-        if (task == null || task.inFreeformWindowingMode()) {
+        if (task == null || task.inFreeformWorkspace()) {
             return false;
         }
 
@@ -1310,7 +1310,8 @@ class AppWindowToken extends WindowToken implements WindowManagerService.AppFree
 
                 // Notify the pinned stack upon all windows drawn. If there was an animation in
                 // progress then this signal will resume that animation.
-                final TaskStack pinnedStack = mDisplayContent.getPinnedStack();
+                final TaskStack pinnedStack =
+                        mDisplayContent.getStack(WINDOWING_MODE_PINNED);
                 if (pinnedStack != null) {
                     pinnedStack.onAllWindowsDrawn();
                 }

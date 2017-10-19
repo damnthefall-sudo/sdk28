@@ -29,8 +29,6 @@ import java.io.*;
 import java.security.spec.AlgorithmParameterSpec;
 import java.security.spec.InvalidParameterSpecException;
 
-import sun.security.jca.Providers;
-
 /**
  * This class is used as an opaque representation of cryptographic parameters.
  *
@@ -287,8 +285,6 @@ public class AlgorithmParameters {
     {
         if (provider == null || provider.length() == 0)
             throw new IllegalArgumentException("missing provider");
-        // Android-added: Check for Bouncy Castle deprecation
-        Providers.checkBouncyCastleDeprecation(provider, "AlgorithmParameters", algorithm);
         Object[] objs = Security.getImpl(algorithm, "AlgorithmParameters",
                                          provider);
         return new AlgorithmParameters((AlgorithmParametersSpi)objs[0],
@@ -334,8 +330,6 @@ public class AlgorithmParameters {
     {
         if (provider == null)
             throw new IllegalArgumentException("missing provider");
-        // Android-added: Check for Bouncy Castle deprecation
-        Providers.checkBouncyCastleDeprecation(provider, "AlgorithmParameters", algorithm);
         Object[] objs = Security.getImpl(algorithm, "AlgorithmParameters",
                                          provider);
         return new AlgorithmParameters((AlgorithmParametersSpi)objs[0],

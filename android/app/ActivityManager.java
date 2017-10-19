@@ -16,8 +16,14 @@
 
 package android.app;
 
+import static android.app.WindowConfiguration.WINDOWING_MODE_FREEFORM;
+import static android.app.WindowConfiguration.WINDOWING_MODE_FULLSCREEN;
+import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED;
+import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_PRIMARY;
+import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_SECONDARY;
+import static android.app.WindowConfiguration.WINDOWING_MODE_UNDEFINED;
+
 import android.Manifest;
-import android.annotation.DrawableRes;
 import android.annotation.IntDef;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
@@ -664,6 +670,138 @@ public class ActivityManager {
         /** Invalid stack ID. */
         public static final int INVALID_STACK_ID = -1;
 
+        /** First static stack ID.
+         * @hide */
+        private  static final int FIRST_STATIC_STACK_ID = 0;
+
+        /** ID of stack where fullscreen activities are normally launched into.
+         * @hide */
+        public static final int FULLSCREEN_WORKSPACE_STACK_ID = 1;
+
+        /** ID of stack where freeform/resized activities are normally launched into.
+         * @hide */
+        public static final int FREEFORM_WORKSPACE_STACK_ID = FULLSCREEN_WORKSPACE_STACK_ID + 1;
+
+        /** ID of stack that occupies a dedicated region of the screen.
+         * @hide */
+        public static final int DOCKED_STACK_ID = FREEFORM_WORKSPACE_STACK_ID + 1;
+
+        /** ID of stack that always on top (always visible) when it exist.
+         * @hide */
+        public static final int PINNED_STACK_ID = DOCKED_STACK_ID + 1;
+
+        /** Last static stack stack ID.
+         * @hide */
+        private static final int LAST_STATIC_STACK_ID = PINNED_STACK_ID;
+
+        /** Start of ID range used by stacks that are created dynamically.
+         * @hide */
+        public static final int FIRST_DYNAMIC_STACK_ID = LAST_STATIC_STACK_ID + 1;
+
+        // TODO: Figure-out a way to remove this.
+        /** @hide */
+        public static boolean isStaticStack(int stackId) {
+            return stackId >= FIRST_STATIC_STACK_ID && stackId <= LAST_STATIC_STACK_ID;
+        }
+
+        // TODO: It seems this mostly means a stack on a secondary display now. Need to see if
+        // there are other meanings. If not why not just use information from the display?
+        /** @hide */
+        public static boolean isDynamicStack(int stackId) {
+            return stackId >= FIRST_DYNAMIC_STACK_ID;
+        }
+
+        /**
+         * Returns true if we try to maintain focus in the current stack when the top activity
+         * finishes.
+         * @hide
+         */
+        // TODO: Figure-out a way to remove. Probably isn't needed in the new world...
+        public static boolean keepFocusInStackIfPossible(int stackId) {
+            return stackId == FREEFORM_WORKSPACE_STACK_ID
+                    || stackId == DOCKED_STACK_ID || stackId == PINNED_STACK_ID;
+        }
+
+        /**
+         * Returns true if the windows of tasks being moved to the target stack from the source
+         * stack should be replaced, meaning that window manager will keep the old window around
+         * until the new is ready.
+         * @hide
+         */
+        public static boolean replaceWindowsOnTaskMove(int sourceStackId, int targetStackId) {
+            return sourceStackId == FREEFORM_WORKSPACE_STACK_ID
+                    || targetStackId == FREEFORM_WORKSPACE_STACK_ID;
+        }
+
+        /**
+         * Returns true if the top task in the task is allowed to return home when finished and
+         * there are other tasks in the stack.
+         * @hide
+         */
+        public static boolean allowTopTaskToReturnHome(int stackId) {
+            return stackId != PINNED_STACK_ID;
+        }
+
+        /**
+         * Returns true if the stack should be resized to match the bounds specified by
+         * {@link ActivityOptions#setLaunchBounds} when launching an activity into the stack.
+         * @hide
+         */
+        public static boolean resizeStackWithLaunchBounds(int stackId) {
+            return stackId == PINNED_STACK_ID;
+        }
+
+        /**
+         * Returns true if a window from the specified stack with {@param stackId} are normally
+         * fullscreen, i. e. they can become the top opaque fullscreen window, meaning that it
+         * controls system bars, lockscreen occluded/dismissing state, screen rotation animation,
+         * etc.
+         * @hide
+         */
+        // TODO: What about the other side of docked stack if we move this to WindowConfiguration?
+        public static boolean normallyFullscreenWindows(int stackId) {
+            return stackId != PINNED_STACK_ID && stackId != FREEFORM_WORKSPACE_STACK_ID
+                    && stackId != DOCKED_STACK_ID;
+        }
+
+        /** Returns the stack id for the input windowing mode.
+         * @hide */
+        // TODO: To be removed once we are not using stack id for stuff...
+        public static int getStackIdForWindowingMode(int windowingMode) {
+            switch (windowingMode) {
+                case WINDOWING_MODE_PINNED: return PINNED_STACK_ID;
+                case WINDOWING_MODE_FREEFORM: return FREEFORM_WORKSPACE_STACK_ID;
+                case WINDOWING_MODE_SPLIT_SCREEN_PRIMARY: return DOCKED_STACK_ID;
+                case WINDOWING_MODE_SPLIT_SCREEN_SECONDARY: return FULLSCREEN_WORKSPACE_STACK_ID;
+                case WINDOWING_MODE_FULLSCREEN: return FULLSCREEN_WORKSPACE_STACK_ID;
+                default: return INVALID_STACK_ID;
+            }
+        }
+
+        /** Returns the windowing mode that should be used for this input stack id.
+         * @hide */
+        // TODO: To be removed once we are not using stack id for stuff...
+        public static int getWindowingModeForStackId(int stackId, boolean inSplitScreenMode) {
+            final int windowingMode;
+            switch (stackId) {
+                case FULLSCREEN_WORKSPACE_STACK_ID:
+                    windowingMode = inSplitScreenMode
+                            ? WINDOWING_MODE_SPLIT_SCREEN_SECONDARY : WINDOWING_MODE_FULLSCREEN;
+                    break;
+                case PINNED_STACK_ID:
+                    windowingMode = WINDOWING_MODE_PINNED;
+                    break;
+                case DOCKED_STACK_ID:
+                    windowingMode = WINDOWING_MODE_SPLIT_SCREEN_PRIMARY;
+                    break;
+                case FREEFORM_WORKSPACE_STACK_ID:
+                    windowingMode = WINDOWING_MODE_FREEFORM;
+                    break;
+                default :
+                    windowingMode = WINDOWING_MODE_UNDEFINED;
+            }
+            return windowingMode;
+        }
     }
 
     /**
@@ -942,14 +1080,11 @@ public class ActivityManager {
                 ATTR_TASKDESCRIPTION_PREFIX + "color";
         private static final String ATTR_TASKDESCRIPTIONCOLOR_BACKGROUND =
                 ATTR_TASKDESCRIPTION_PREFIX + "colorBackground";
-        private static final String ATTR_TASKDESCRIPTIONICON_FILENAME =
+        private static final String ATTR_TASKDESCRIPTIONICONFILENAME =
                 ATTR_TASKDESCRIPTION_PREFIX + "icon_filename";
-        private static final String ATTR_TASKDESCRIPTIONICON_RESOURCE =
-                ATTR_TASKDESCRIPTION_PREFIX + "icon_resource";
 
         private String mLabel;
         private Bitmap mIcon;
-        private int mIconRes;
         private String mIconFilename;
         private int mColorPrimary;
         private int mColorBackground;
@@ -963,27 +1098,9 @@ public class ActivityManager {
          * @param icon An icon that represents the current state of this task.
          * @param colorPrimary A color to override the theme's primary color.  This color must be
          *                     opaque.
-         * @deprecated use TaskDescription constructor with icon resource instead
          */
-        @Deprecated
         public TaskDescription(String label, Bitmap icon, int colorPrimary) {
-            this(label, icon, 0, null, colorPrimary, 0, 0, 0);
-            if ((colorPrimary != 0) && (Color.alpha(colorPrimary) != 255)) {
-                throw new RuntimeException("A TaskDescription's primary color should be opaque");
-            }
-        }
-
-        /**
-         * Creates the TaskDescription to the specified values.
-         *
-         * @param label A label and description of the current state of this task.
-         * @param iconRes A drawable resource of an icon that represents the current state of this
-         *                activity.
-         * @param colorPrimary A color to override the theme's primary color.  This color must be
-         *                     opaque.
-         */
-        public TaskDescription(String label, @DrawableRes int iconRes, int colorPrimary) {
-            this(label, null, iconRes, null, colorPrimary, 0, 0, 0);
+            this(label, icon, null, colorPrimary, 0, 0, 0);
             if ((colorPrimary != 0) && (Color.alpha(colorPrimary) != 255)) {
                 throw new RuntimeException("A TaskDescription's primary color should be opaque");
             }
@@ -994,22 +1111,9 @@ public class ActivityManager {
          *
          * @param label A label and description of the current state of this activity.
          * @param icon An icon that represents the current state of this activity.
-         * @deprecated use TaskDescription constructor with icon resource instead
          */
-        @Deprecated
         public TaskDescription(String label, Bitmap icon) {
-            this(label, icon, 0, null, 0, 0, 0, 0);
-        }
-
-        /**
-         * Creates the TaskDescription to the specified values.
-         *
-         * @param label A label and description of the current state of this activity.
-         * @param iconRes A drawable resource of an icon that represents the current state of this
-         *                activity.
-         */
-        public TaskDescription(String label, @DrawableRes int iconRes) {
-            this(label, null, iconRes, null, 0, 0, 0, 0);
+            this(label, icon, null, 0, 0, 0, 0);
         }
 
         /**
@@ -1018,22 +1122,21 @@ public class ActivityManager {
          * @param label A label and description of the current state of this activity.
          */
         public TaskDescription(String label) {
-            this(label, null, 0, null, 0, 0, 0, 0);
+            this(label, null, null, 0, 0, 0, 0);
         }
 
         /**
          * Creates an empty TaskDescription.
          */
         public TaskDescription() {
-            this(null, null, 0, null, 0, 0, 0, 0);
+            this(null, null, null, 0, 0, 0, 0);
         }
 
         /** @hide */
-        public TaskDescription(String label, Bitmap bitmap, int iconRes, String iconFilename,
-                int colorPrimary, int colorBackground, int statusBarColor, int navigationBarColor) {
+        public TaskDescription(String label, Bitmap icon, String iconFilename, int colorPrimary,
+                int colorBackground, int statusBarColor, int navigationBarColor) {
             mLabel = label;
-            mIcon = bitmap;
-            mIconRes = iconRes;
+            mIcon = icon;
             mIconFilename = iconFilename;
             mColorPrimary = colorPrimary;
             mColorBackground = colorBackground;
@@ -1055,7 +1158,6 @@ public class ActivityManager {
         public void copyFrom(TaskDescription other) {
             mLabel = other.mLabel;
             mIcon = other.mIcon;
-            mIconRes = other.mIconRes;
             mIconFilename = other.mIconFilename;
             mColorPrimary = other.mColorPrimary;
             mColorBackground = other.mColorBackground;
@@ -1071,7 +1173,6 @@ public class ActivityManager {
         public void copyFromPreserveHiddenFields(TaskDescription other) {
             mLabel = other.mLabel;
             mIcon = other.mIcon;
-            mIconRes = other.mIconRes;
             mIconFilename = other.mIconFilename;
             mColorPrimary = other.mColorPrimary;
             if (other.mColorBackground != 0) {
@@ -1144,14 +1245,6 @@ public class ActivityManager {
         }
 
         /**
-         * Sets the icon resource for this task description.
-         * @hide
-         */
-        public void setIcon(int iconRes) {
-            mIconRes = iconRes;
-        }
-
-        /**
          * Moves the icon bitmap reference from an actual Bitmap to a file containing the
          * bitmap.
          * @hide
@@ -1179,13 +1272,6 @@ public class ActivityManager {
         }
 
         /** @hide */
-        @TestApi
-        public int getIconResource() {
-            return mIconRes;
-        }
-
-        /** @hide */
-        @TestApi
         public String getIconFilename() {
             return mIconFilename;
         }
@@ -1251,10 +1337,7 @@ public class ActivityManager {
                         Integer.toHexString(mColorBackground));
             }
             if (mIconFilename != null) {
-                out.attribute(null, ATTR_TASKDESCRIPTIONICON_FILENAME, mIconFilename);
-            }
-            if (mIconRes != 0) {
-                out.attribute(null, ATTR_TASKDESCRIPTIONICON_RESOURCE, Integer.toString(mIconRes));
+                out.attribute(null, ATTR_TASKDESCRIPTIONICONFILENAME, mIconFilename);
             }
         }
 
@@ -1266,10 +1349,8 @@ public class ActivityManager {
                 setPrimaryColor((int) Long.parseLong(attrValue, 16));
             } else if (ATTR_TASKDESCRIPTIONCOLOR_BACKGROUND.equals(attrName)) {
                 setBackgroundColor((int) Long.parseLong(attrValue, 16));
-            } else if (ATTR_TASKDESCRIPTIONICON_FILENAME.equals(attrName)) {
+            } else if (ATTR_TASKDESCRIPTIONICONFILENAME.equals(attrName)) {
                 setIconFilename(attrValue);
-            } else if (ATTR_TASKDESCRIPTIONICON_RESOURCE.equals(attrName)) {
-                setIcon(Integer.parseInt(attrValue, 10));
             }
         }
 
@@ -1292,7 +1373,6 @@ public class ActivityManager {
                 dest.writeInt(1);
                 mIcon.writeToParcel(dest, 0);
             }
-            dest.writeInt(mIconRes);
             dest.writeInt(mColorPrimary);
             dest.writeInt(mColorBackground);
             dest.writeInt(mStatusBarColor);
@@ -1308,7 +1388,6 @@ public class ActivityManager {
         public void readFromParcel(Parcel source) {
             mLabel = source.readInt() > 0 ? source.readString() : null;
             mIcon = source.readInt() > 0 ? Bitmap.CREATOR.createFromParcel(source) : null;
-            mIconRes = source.readInt();
             mColorPrimary = source.readInt();
             mColorBackground = source.readInt();
             mStatusBarColor = source.readInt();
@@ -1329,8 +1408,8 @@ public class ActivityManager {
         @Override
         public String toString() {
             return "TaskDescription Label: " + mLabel + " Icon: " + mIcon +
-                    " IconRes: " + mIconRes + " IconFilename: " + mIconFilename +
-                    " colorPrimary: " + mColorPrimary + " colorBackground: " + mColorBackground +
+                    " IconFilename: " + mIconFilename + " colorPrimary: " + mColorPrimary +
+                    " colorBackground: " + mColorBackground +
                     " statusBarColor: " + mColorBackground +
                     " navigationBarColor: " + mNavigationBarColor;
         }
@@ -1492,6 +1571,7 @@ public class ActivityManager {
             }
             dest.writeInt(stackId);
             dest.writeInt(userId);
+            dest.writeLong(firstActiveTime);
             dest.writeLong(lastActiveTime);
             dest.writeInt(affiliatedTaskId);
             dest.writeInt(affiliatedTaskColor);
@@ -1520,6 +1600,7 @@ public class ActivityManager {
                     TaskDescription.CREATOR.createFromParcel(source) : null;
             stackId = source.readInt();
             userId = source.readInt();
+            firstActiveTime = source.readLong();
             lastActiveTime = source.readLong();
             affiliatedTaskId = source.readInt();
             affiliatedTaskColor = source.readInt();
@@ -1562,6 +1643,31 @@ public class ActivityManager {
     public static final int RECENT_IGNORE_UNAVAILABLE = 0x0002;
 
     /**
+     * Provides a list that contains recent tasks for all
+     * profiles of a user.
+     * @hide
+     */
+    public static final int RECENT_INCLUDE_PROFILES = 0x0004;
+
+    /**
+     * Ignores all tasks that are on the home stack.
+     * @hide
+     */
+    public static final int RECENT_IGNORE_HOME_AND_RECENTS_STACK_TASKS = 0x0008;
+
+    /**
+     * Ignores the top task in the docked stack.
+     * @hide
+     */
+    public static final int RECENT_INGORE_DOCKED_STACK_TOP_TASK = 0x0010;
+
+    /**
+     * Ignores all tasks that are on the pinned stack.
+     * @hide
+     */
+    public static final int RECENT_INGORE_PINNED_STACK_TASKS = 0x0020;
+
+    /**
      * <p></p>Return a list of the tasks that the user has recently launched, with
      * the most recent being first and older ones after in order.
      *
@@ -1596,7 +1702,33 @@ public class ActivityManager {
     public List<RecentTaskInfo> getRecentTasks(int maxNum, int flags)
             throws SecurityException {
         try {
-            return getService().getRecentTasks(maxNum, flags, UserHandle.myUserId()).getList();
+            return getService().getRecentTasks(maxNum,
+                    flags, UserHandle.myUserId()).getList();
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Same as {@link #getRecentTasks(int, int)} but returns the recent tasks for a
+     * specific user. It requires holding
+     * the {@link android.Manifest.permission#INTERACT_ACROSS_USERS_FULL} permission.
+     * @param maxNum The maximum number of entries to return in the list.  The
+     * actual number returned may be smaller, depending on how many tasks the
+     * user has started and the maximum number the system can remember.
+     * @param flags Information about what to return.  May be any combination
+     * of {@link #RECENT_WITH_EXCLUDED} and {@link #RECENT_IGNORE_UNAVAILABLE}.
+     *
+     * @return Returns a list of RecentTaskInfo records describing each of
+     * the recent tasks. Most recently activated tasks go first.
+     *
+     * @hide
+     */
+    public List<RecentTaskInfo> getRecentTasksForUser(int maxNum, int flags, int userId)
+            throws SecurityException {
+        try {
+            return getService().getRecentTasks(maxNum,
+                    flags, userId).getList();
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -1883,6 +2015,22 @@ public class ActivityManager {
             throws SecurityException {
         try {
             return getService().getTasks(maxNum, 0);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Completely remove the given task.
+     *
+     * @param taskId Identifier of the task to be removed.
+     * @return Returns true if the given task was found and removed.
+     *
+     * @hide
+     */
+    public boolean removeTask(int taskId) throws SecurityException {
+        try {
+            return getService().removeTask(taskId);
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }

@@ -16,8 +16,6 @@
 
 package android.arch.lifecycle;
 
-import android.support.annotation.NonNull;
-
 /**
  * @deprecated Use {@code android.support.v7.app.AppCompatActivity}
  * which extends {@link LifecycleOwner}, so there are no use cases for this class.
@@ -25,7 +23,6 @@ import android.support.annotation.NonNull;
 @SuppressWarnings({"WeakerAccess", "unused"})
 @Deprecated
 public interface LifecycleRegistryOwner extends LifecycleOwner {
-    @NonNull
     @Override
     LifecycleRegistry getLifecycle();
 }

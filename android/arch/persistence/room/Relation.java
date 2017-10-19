@@ -28,8 +28,6 @@ import java.lang.annotation.Target;
  * <pre>
  * {@literal @}Entity
  * public class Pet {
- *     {@literal @} PrimaryKey
- *     int id;
  *     int userId;
  *     String name;
  *     // other fields
@@ -43,8 +41,8 @@ import java.lang.annotation.Target;
  *
  * {@literal @}Dao
  * public interface UserPetDao {
- *     {@literal @}Query("SELECT id, name from User")
- *     public List&lt;UserNameAndAllPets&gt; loadUserAndPets();
+ *     {@literal @}Query("SELECT id, name from User WHERE age &gt; :minAge")
+ *     public List&lt;UserNameAndAllPets&gt; loadUserAndPets(int minAge);
  * }
  * </pre>
  * <p>
@@ -65,16 +63,16 @@ import java.lang.annotation.Target;
  *   {@literal @}Embedded
  *   public User user;
  *   {@literal @}Relation(parentColumn = "id", entityColumn = "userId", entity = Pet.class)
- *   public List&lt;PetNameAndId&gt; pets;
+ *   public List<PetNameAndId> pets;
  * }
  * {@literal @}Dao
  * public interface UserPetDao {
- *     {@literal @}Query("SELECT * from User")
- *     public List&lt;UserAllPets&gt; loadUserAndPets();
+ *     {@literal @}Query("SELECT * from User WHERE age &gt; :minAge")
+ *     public List&lt;UserAllPets&gt; loadUserAndPets(int minAge);
  * }
  * </pre>
  * <p>
- * In the example above, {@code PetNameAndId} is a regular Pojo but all of fields are fetched
+ * In the example above, {@code PetNameAndId} is a regular but all of fields are fetched
  * from the {@code entity} defined in the {@code @Relation} annotation (<i>Pet</i>).
  * {@code PetNameAndId} could also define its own relations all of which would also be fetched
  * automatically.
@@ -87,7 +85,7 @@ import java.lang.annotation.Target;
  *   public User user;
  *   {@literal @}Relation(parentColumn = "id", entityColumn = "userId", entity = Pet.class,
  *           projection = {"name"})
- *   public List&lt;String&gt; petNames;
+ *   public List<String> petNames;
  * }
  * </pre>
  * <p>
@@ -95,7 +93,7 @@ import java.lang.annotation.Target;
  * cannot have relations. This is a design decision to avoid common pitfalls in {@link Entity}
  * setups. You can read more about it in the main Room documentation. When loading data, you can
  * simply work around this limitation by creating Pojo classes that extend the {@link Entity}.
- * <p>
+ *
  * Note that the {@code @Relation} annotated field cannot be a constructor parameter, it must be
  * public or have a public setter.
  */

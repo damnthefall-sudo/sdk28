@@ -388,12 +388,11 @@ public class WallpaperManager {
 
         public Bitmap peekWallpaperBitmap(Context context, boolean returnDefault,
                 @SetWallpaperFlags int which) {
-            return peekWallpaperBitmap(context, returnDefault, which, context.getUserId(),
-                    false /* hardware */);
+            return peekWallpaperBitmap(context, returnDefault, which, context.getUserId());
         }
 
         public Bitmap peekWallpaperBitmap(Context context, boolean returnDefault,
-                @SetWallpaperFlags int which, int userId, boolean hardware) {
+                @SetWallpaperFlags int which, int userId) {
             if (mService != null) {
                 try {
                     if (!mService.isWallpaperSupported(context.getOpPackageName())) {
@@ -410,7 +409,7 @@ public class WallpaperManager {
                 mCachedWallpaper = null;
                 mCachedWallpaperUserId = 0;
                 try {
-                    mCachedWallpaper = getCurrentWallpaperLocked(context, userId, hardware);
+                    mCachedWallpaper = getCurrentWallpaperLocked(context, userId);
                     mCachedWallpaperUserId = userId;
                 } catch (OutOfMemoryError e) {
                     Log.w(TAG, "Out of memory loading the current wallpaper: " + e);
@@ -448,7 +447,7 @@ public class WallpaperManager {
             }
         }
 
-        private Bitmap getCurrentWallpaperLocked(Context context, int userId, boolean hardware) {
+        private Bitmap getCurrentWallpaperLocked(Context context, int userId) {
             if (mService == null) {
                 Log.w(TAG, "WallpaperService not running");
                 return null;
@@ -461,9 +460,6 @@ public class WallpaperManager {
                 if (fd != null) {
                     try {
                         BitmapFactory.Options options = new BitmapFactory.Options();
-                        if (hardware) {
-                            options.inPreferredConfig = Bitmap.Config.HARDWARE;
-                        }
                         return BitmapFactory.decodeFileDescriptor(
                                 fd.getFileDescriptor(), null, options);
                     } catch (OutOfMemoryError e) {
@@ -818,23 +814,12 @@ public class WallpaperManager {
     }
 
     /**
-     * Like {@link #getDrawable()} but returns a Bitmap with default {@link Bitmap.Config}.
+     * Like {@link #getDrawable()} but returns a Bitmap.
      *
      * @hide
      */
     public Bitmap getBitmap() {
-        return getBitmap(false);
-    }
-
-    /**
-     * Like {@link #getDrawable()} but returns a Bitmap.
-     *
-     * @param hardware Asks for a hardware backed bitmap.
-     * @see Bitmap.Config#HARDWARE
-     * @hide
-     */
-    public Bitmap getBitmap(boolean hardware) {
-        return getBitmapAsUser(mContext.getUserId(), hardware);
+        return getBitmapAsUser(mContext.getUserId());
     }
 
     /**
@@ -842,8 +827,8 @@ public class WallpaperManager {
      *
      * @hide
      */
-    public Bitmap getBitmapAsUser(int userId, boolean hardware) {
-        return sGlobals.peekWallpaperBitmap(mContext, true, FLAG_SYSTEM, userId, hardware);
+    public Bitmap getBitmapAsUser(int userId) {
+        return sGlobals.peekWallpaperBitmap(mContext, true, FLAG_SYSTEM, userId);
     }
 
     /**

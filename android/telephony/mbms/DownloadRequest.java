@@ -16,7 +16,6 @@
 
 package android.telephony.mbms;
 
-import android.annotation.NonNull;
 import android.annotation.SystemApi;
 import android.content.Intent;
 import android.net.Uri;
@@ -27,6 +26,7 @@ import android.util.Log;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
@@ -71,19 +71,6 @@ public final class DownloadRequest implements Parcelable {
         private String appIntent;
         private int version = CURRENT_VERSION;
 
-
-        /**
-         * Builds a new DownloadRequest.
-         * @param sourceUri the source URI for the DownloadRequest to be built. This URI should
-         *     never be null.
-         */
-        public Builder(@NonNull Uri sourceUri) {
-            if (sourceUri == null) {
-                throw new IllegalArgumentException("Source URI must be non-null.");
-            }
-            source = sourceUri;
-        }
-
         /**
          * Sets the service from which the download request to be built will download from.
          * @param serviceInfo
@@ -101,6 +88,15 @@ public final class DownloadRequest implements Parcelable {
         @SystemApi
         public Builder setServiceId(String serviceId) {
             fileServiceId = serviceId;
+            return this;
+        }
+
+        /**
+         * Sets the source URI for the download request to be built.
+         * @param source
+         */
+        public Builder setSource(Uri source) {
+            this.source = source;
             return this;
         }
 
@@ -320,11 +316,9 @@ public final class DownloadRequest implements Parcelable {
             throw new RuntimeException("Could not get sha256 hash object");
         }
         if (version >= 1) {
-            // Hash the source URI and the app intent
+            // Hash the source URI, destination URI, and the app intent
             digest.update(sourceUri.toString().getBytes(StandardCharsets.UTF_8));
-            if (serializedResultIntentForApp != null) {
-                digest.update(serializedResultIntentForApp.getBytes(StandardCharsets.UTF_8));
-            }
+            digest.update(serializedResultIntentForApp.getBytes(StandardCharsets.UTF_8));
         }
         // Add updates for future versions here
         return Base64.encodeToString(digest.digest(), Base64.URL_SAFE | Base64.NO_WRAP);

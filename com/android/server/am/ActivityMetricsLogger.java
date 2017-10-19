@@ -5,7 +5,6 @@ import static android.app.ActivityManager.START_TASK_TO_FRONT;
 import static android.app.ActivityManager.StackId.INVALID_STACK_ID;
 import static android.app.ActivityManagerInternal.APP_TRANSITION_TIMEOUT;
 import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_PRIMARY;
-import static android.app.WindowConfiguration.WINDOWING_MODE_FREEFORM;
 import static android.app.WindowConfiguration.WINDOWING_MODE_FULLSCREEN;
 import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED;
 import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_SECONDARY;
@@ -128,7 +127,7 @@ class ActivityMetricsLogger {
             case WINDOWING_MODE_SPLIT_SCREEN_SECONDARY:
                 mWindowState = WINDOW_STATE_SIDE_BY_SIDE;
                 break;
-            case WINDOWING_MODE_FREEFORM:
+            case WINDOW_STATE_FREEFORM:
                 mWindowState = WINDOW_STATE_FREEFORM;
                 break;
             default:

@@ -49,13 +49,10 @@ public abstract class LimitOffsetDataSource<T> extends TiledDataSource<T> {
     private final RoomDatabase mDb;
     @SuppressWarnings("FieldCanBeLocal")
     private final InvalidationTracker.Observer mObserver;
-    private final boolean mInTransaction;
 
-    protected LimitOffsetDataSource(RoomDatabase db, RoomSQLiteQuery query,
-            boolean inTransaction, String... tables) {
+    protected LimitOffsetDataSource(RoomDatabase db, RoomSQLiteQuery query, String... tables) {
         mDb = db;
         mSourceQuery = query;
-        mInTransaction = inTransaction;
         mCountQuery = "SELECT COUNT(*) FROM ( " + mSourceQuery.getSql() + " )";
         mLimitOffsetQuery = "SELECT * FROM ( " + mSourceQuery.getSql() + " ) LIMIT ? OFFSET ?";
         mObserver = new InvalidationTracker.Observer(tables) {
@@ -101,30 +98,13 @@ public abstract class LimitOffsetDataSource<T> extends TiledDataSource<T> {
         sqLiteQuery.copyArgumentsFrom(mSourceQuery);
         sqLiteQuery.bindLong(sqLiteQuery.getArgCount() - 1, loadCount);
         sqLiteQuery.bindLong(sqLiteQuery.getArgCount(), startPosition);
-        if (mInTransaction) {
-            mDb.beginTransaction();
-            Cursor cursor = null;
-            try {
-                cursor = mDb.query(sqLiteQuery);
-                List<T> rows = convertRows(cursor);
-                mDb.setTransactionSuccessful();
-                return rows;
-            } finally {
-                if (cursor != null) {
-                    cursor.close();
-                }
-                mDb.endTransaction();
-                sqLiteQuery.release();
-            }
-        } else {
-            Cursor cursor = mDb.query(sqLiteQuery);
-            //noinspection TryFinallyCanBeTryWithResources
-            try {
-                return convertRows(cursor);
-            } finally {
-                cursor.close();
-                sqLiteQuery.release();
-            }
+        Cursor cursor = mDb.query(sqLiteQuery);
+
+        try {
+            return convertRows(cursor);
+        } finally {
+            cursor.close();
+            sqLiteQuery.release();
         }
     }
 }

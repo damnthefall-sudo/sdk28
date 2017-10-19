@@ -73,12 +73,12 @@ class WindowContainer<E extends WindowContainer> extends ConfigurationContainer<
 
 
     @Override
-    protected int getChildCount() {
+    final protected int getChildCount() {
         return mChildren.size();
     }
 
     @Override
-    protected E getChildAt(int index) {
+    final protected E getChildAt(int index) {
         return mChildren.get(index);
     }
 

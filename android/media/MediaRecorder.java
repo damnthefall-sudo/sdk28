@@ -917,7 +917,7 @@ public class MediaRecorder
      */
     public void setNextOutputFile(File file) throws IOException
     {
-        RandomAccessFile f = new RandomAccessFile(file, "rw");
+        RandomAccessFile f = new RandomAccessFile(file, "rws");
         try {
             _setNextOutputFile(f.getFD());
         } finally {
@@ -942,7 +942,7 @@ public class MediaRecorder
     public void prepare() throws IllegalStateException, IOException
     {
         if (mPath != null) {
-            RandomAccessFile file = new RandomAccessFile(mPath, "rw");
+            RandomAccessFile file = new RandomAccessFile(mPath, "rws");
             try {
                 _setOutputFile(file.getFD());
             } finally {
@@ -951,7 +951,7 @@ public class MediaRecorder
         } else if (mFd != null) {
             _setOutputFile(mFd);
         } else if (mFile != null) {
-            RandomAccessFile file = new RandomAccessFile(mFile, "rw");
+            RandomAccessFile file = new RandomAccessFile(mFile, "rws");
             try {
                 _setOutputFile(file.getFD());
             } finally {

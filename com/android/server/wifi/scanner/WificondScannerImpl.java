@@ -167,12 +167,12 @@ public class WificondScannerImpl extends WifiScannerImpl implements Handler.Call
                     + ",eventHandler=" + eventHandler);
             return false;
         }
+        if (mPendingSingleScanSettings != null
+                || (mLastScanSettings != null && mLastScanSettings.singleScanActive)) {
+            Log.w(TAG, "A single scan is already running");
+            return false;
+        }
         synchronized (mSettingsLock) {
-            if (mPendingSingleScanSettings != null
-                    || (mLastScanSettings != null && mLastScanSettings.singleScanActive)) {
-                Log.w(TAG, "A single scan is already running");
-                return false;
-            }
             mPendingSingleScanSettings = settings;
             mPendingSingleScanEventHandler = eventHandler;
             processPendingScans();
@@ -518,10 +518,8 @@ public class WificondScannerImpl extends WifiScannerImpl implements Handler.Call
     }
 
     private boolean isHwPnoScanRequired() {
-        synchronized (mSettingsLock) {
-            if (mPnoSettings == null) return false;
-            return isHwPnoScanRequired(mPnoSettings.isConnected);
-        }
+        if (mPnoSettings == null) return false;
+        return isHwPnoScanRequired(mPnoSettings.isConnected);
     }
 
     @Override

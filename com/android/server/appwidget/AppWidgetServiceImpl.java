@@ -71,6 +71,7 @@ import android.os.SystemClock;
 import android.os.Trace;
 import android.os.UserHandle;
 import android.os.UserManager;
+import android.os.storage.StorageManager;
 import android.service.appwidget.AppWidgetServiceDumpProto;
 import android.service.appwidget.WidgetProto;
 import android.text.TextUtils;
@@ -158,9 +159,7 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
     // Bump if the stored widgets need to be upgraded.
     private static final int CURRENT_VERSION = 1;
 
-    // Every widget update request is associated which an increasing sequence number. This is
-    // used to verify which request has successfully been received by the host.
-    private static final AtomicLong UPDATE_COUNTER = new AtomicLong();
+    private static final AtomicLong REQUEST_COUNTER = new AtomicLong();
 
     private final BroadcastReceiver mBroadcastReceiver = new BroadcastReceiver() {
         @Override
@@ -815,9 +814,9 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
             Host host = lookupOrAddHostLocked(id);
             host.callbacks = callbacks;
 
-            long updateSequenceNo = UPDATE_COUNTER.incrementAndGet();
             int N = appWidgetIds.length;
             ArrayList<PendingHostUpdate> outUpdates = new ArrayList<>(N);
+
             LongSparseArray<PendingHostUpdate> updatesMap = new LongSparseArray<>();
             for (int i = 0; i < N; i++) {
                 if (host.getPendingUpdatesForId(appWidgetIds[i], updatesMap)) {
@@ -829,8 +828,6 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
                     }
                 }
             }
-            // Reset the update counter once all the updates have been calculated
-            host.lastWidgetUpdateSequenceNo = updateSequenceNo;
             return new ParceledListSlice<>(outUpdates);
         }
     }
@@ -1917,9 +1914,9 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
             // method with a wrong id. In that case, ignore the call.
             return;
         }
-        long requestId = UPDATE_COUNTER.incrementAndGet();
+        long requestId = REQUEST_COUNTER.incrementAndGet();
         if (widget != null) {
-            widget.updateSequenceNos.put(viewId, requestId);
+            widget.updateRequestIds.put(viewId, requestId);
         }
         if (widget == null || widget.host == null || widget.host.zombie
                 || widget.host.callbacks == null || widget.provider == null
@@ -1944,7 +1941,7 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
             int appWidgetId, int viewId, long requestId) {
         try {
             callbacks.viewDataChanged(appWidgetId, viewId);
-            host.lastWidgetUpdateSequenceNo = requestId;
+            host.lastWidgetUpdateRequestId = requestId;
         } catch (RemoteException re) {
             // It failed; remove the callback. No need to prune because
             // we know that this host is still referenced by this instance.
@@ -1991,9 +1988,9 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
     }
 
     private void scheduleNotifyUpdateAppWidgetLocked(Widget widget, RemoteViews updateViews) {
-        long requestId = UPDATE_COUNTER.incrementAndGet();
+        long requestId = REQUEST_COUNTER.incrementAndGet();
         if (widget != null) {
-            widget.updateSequenceNos.put(ID_VIEWS_UPDATE, requestId);
+            widget.updateRequestIds.put(ID_VIEWS_UPDATE, requestId);
         }
         if (widget == null || widget.provider == null || widget.provider.zombie
                 || widget.host.callbacks == null || widget.host.zombie) {
@@ -2016,7 +2013,7 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
             int appWidgetId, RemoteViews views, long requestId) {
         try {
             callbacks.updateAppWidget(appWidgetId, views);
-            host.lastWidgetUpdateSequenceNo = requestId;
+            host.lastWidgetUpdateRequestId = requestId;
         } catch (RemoteException re) {
             synchronized (mLock) {
                 Slog.e(TAG, "Widget host dead: " + host.id, re);
@@ -2026,11 +2023,11 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
     }
 
     private void scheduleNotifyProviderChangedLocked(Widget widget) {
-        long requestId = UPDATE_COUNTER.incrementAndGet();
+        long requestId = REQUEST_COUNTER.incrementAndGet();
         if (widget != null) {
             // When the provider changes, reset everything else.
-            widget.updateSequenceNos.clear();
-            widget.updateSequenceNos.append(ID_PROVIDER_CHANGED, requestId);
+            widget.updateRequestIds.clear();
+            widget.updateRequestIds.append(ID_PROVIDER_CHANGED, requestId);
         }
         if (widget == null || widget.provider == null || widget.provider.zombie
                 || widget.host.callbacks == null || widget.host.zombie) {
@@ -2053,7 +2050,7 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
             int appWidgetId, AppWidgetProviderInfo info, long requestId) {
         try {
             callbacks.providerChanged(appWidgetId, info);
-            host.lastWidgetUpdateSequenceNo = requestId;
+            host.lastWidgetUpdateRequestId = requestId;
         } catch (RemoteException re) {
             synchronized (mLock){
                 Slog.e(TAG, "Widget host dead: " + host.id, re);
@@ -3890,11 +3887,7 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
         boolean zombie; // if we're in safe mode, don't prune this just because nobody references it
 
         int tag = TAG_UNDEFINED; // for use while saving state (the index)
-        // Sequence no for the last update successfully sent. This is updated whenever a
-        // widget update is successfully sent to the host callbacks. As all new/undelivered updates
-        // will have sequenceNo greater than this, all those updates will be sent when the host
-        // callbacks are attached again.
-        long lastWidgetUpdateSequenceNo;
+        long lastWidgetUpdateRequestId; // request id for the last update successfully sent
 
         public int getUserId() {
             return UserHandle.getUserId(id.uid);
@@ -3921,18 +3914,18 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
          */
         public boolean getPendingUpdatesForId(int appWidgetId,
                 LongSparseArray<PendingHostUpdate> outUpdates) {
-            long updateSequenceNo = lastWidgetUpdateSequenceNo;
+            long updateRequestId = lastWidgetUpdateRequestId;
             int N = widgets.size();
             for (int i = 0; i < N; i++) {
                 Widget widget = widgets.get(i);
                 if (widget.appWidgetId == appWidgetId) {
                     outUpdates.clear();
-                    for (int j = widget.updateSequenceNos.size() - 1; j >= 0; j--) {
-                        long requestId = widget.updateSequenceNos.valueAt(j);
-                        if (requestId <= updateSequenceNo) {
+                    for (int j = widget.updateRequestIds.size() - 1; j >= 0; j--) {
+                        long requestId = widget.updateRequestIds.valueAt(j);
+                        if (requestId <= updateRequestId) {
                             continue;
                         }
-                        int id = widget.updateSequenceNos.keyAt(j);
+                        int id = widget.updateRequestIds.keyAt(j);
                         final PendingHostUpdate update;
                         switch (id) {
                             case ID_PROVIDER_CHANGED:
@@ -4028,8 +4021,8 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
         RemoteViews maskedViews;
         Bundle options;
         Host host;
-        // Map of request type to updateSequenceNo.
-        SparseLongArray updateSequenceNos = new SparseLongArray(2);
+        // Request ids for various operations
+        SparseLongArray updateRequestIds = new SparseLongArray(2);
 
         @Override
         public String toString() {

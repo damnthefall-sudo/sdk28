@@ -125,7 +125,6 @@ import java.util.Timer;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Future;
 
-import static android.os.IServiceManager.DUMP_PRIORITY_CRITICAL;
 import static android.view.Display.DEFAULT_DISPLAY;
 
 public final class SystemServer {
@@ -825,8 +824,7 @@ public final class SystemServer {
             wm = WindowManagerService.main(context, inputManager,
                     mFactoryTestMode != FactoryTest.FACTORY_TEST_LOW_LEVEL,
                     !mFirstBoot, mOnlyCore, new PhoneWindowManager());
-            ServiceManager.addService(Context.WINDOW_SERVICE, wm, /* allowIsolated= */ false,
-                    DUMP_PRIORITY_CRITICAL);
+            ServiceManager.addService(Context.WINDOW_SERVICE, wm);
             ServiceManager.addService(Context.INPUT_SERVICE, inputManager);
             traceEnd();
 
@@ -1642,7 +1640,11 @@ public final class SystemServer {
         traceEnd();
 
         traceBeginAndSlog("MakePackageManagerServiceReady");
-        mPackageManagerService.systemReady();
+        try {
+            mPackageManagerService.systemReady();
+        } catch (Throwable e) {
+            reportWtf("making Package Manager Service ready", e);
+        }
         traceEnd();
 
         traceBeginAndSlog("MakeDisplayManagerServiceReady");

@@ -5708,7 +5708,6 @@ public final class Settings {
          *
          * @hide
          */
-        @TestApi
         public static final String ACCESSIBILITY_DISPLAY_MAGNIFICATION_ENABLED =
                 "accessibility_display_magnification_enabled";
 
@@ -6791,6 +6790,14 @@ public final class Settings {
          */
         public static final String LOCK_SCREEN_SHOW_NOTIFICATIONS =
                 "lock_screen_show_notifications";
+
+        /**
+         * This preference stores the last stack active task time for each user, which affects what
+         * tasks will be visible in Overview.
+         * @hide
+         */
+        public static final String OVERVIEW_LAST_STACK_ACTIVE_TIME =
+                "overview_last_stack_active_time";
 
         /**
          * List of TV inputs that are currently hidden. This is a string
@@ -9566,22 +9573,6 @@ public final class Settings {
          * see also com.android.server.devicepolicy.DevicePolicyConstants
          */
         public static final String DEVICE_POLICY_CONSTANTS = "device_policy_constants";
-
-        /**
-         * TextClassifier specific settings.
-         * This is encoded as a key=value list, separated by commas. Ex:
-         *
-         * <pre>
-         * smart_selection_dark_launch              (boolean)
-         * smart_selection_enabled_for_edit_text    (boolean)
-         * </pre>
-         *
-         * <p>
-         * Type: string
-         * @hide
-         * see also android.view.textclassifier.TextClassifierConstants
-         */
-        public static final String TEXT_CLASSIFIER_CONSTANTS = "text_classifier_constants";
 
         /**
          * Get the key that retrieves a bluetooth headset's priority.

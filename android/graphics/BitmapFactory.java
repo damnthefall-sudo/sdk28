@@ -354,7 +354,6 @@ public class BitmapFactory {
          * decode, in the case of which a more accurate, but slightly slower,
          * IDCT method will be used instead.
          */
-        @Deprecated
         public boolean inPreferQualityOverSpeed;
 
         /**
@@ -413,7 +412,6 @@ public class BitmapFactory {
          * can check, inbetween the bounds decode and the image decode, to see
          * if the operation is canceled.
          */
-        @Deprecated
         public boolean mCancel;
 
         /**
@@ -428,7 +426,6 @@ public class BitmapFactory {
          *  or if inJustDecodeBounds is true, will set outWidth/outHeight
          *  to -1
          */
-        @Deprecated
         public void requestCancelDecode() {
             mCancel = true;
         }

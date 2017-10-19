@@ -376,8 +376,6 @@ public class UsbHostManager {
                 }
             }
         }
-
-        mUsbAlsaManager.dump(pw);
     }
 
     private native void monitorUsbHostBus();

@@ -25,7 +25,6 @@ import android.os.Build;
 import android.support.annotation.NonNull;
 import android.support.annotation.RestrictTo;
 import android.support.media.tv.TvContractCompat.Programs;
-import android.support.media.tv.TvContractCompat.Programs.Genres.Genre;
 
 /**
  * A convenience class to access {@link TvContractCompat.Programs} entries in the system content
@@ -283,7 +282,7 @@ public final class Program extends BaseProgram implements Comparable<Program> {
          * @return This Builder object to allow for chaining of calls to builder methods.
          * @see Programs#COLUMN_BROADCAST_GENRE
          */
-        public Builder setBroadcastGenres(@Genre String[] genres) {
+        public Builder setBroadcastGenres(String[] genres) {
             mValues.put(Programs.COLUMN_BROADCAST_GENRE, Programs.Genres.encode(genres));
             return this;
         }
