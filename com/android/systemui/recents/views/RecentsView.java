@@ -16,10 +16,6 @@
 
 package com.android.systemui.recents.views;
 
-import static android.app.ActivityManager.StackId.INVALID_STACK_ID;
-
-import android.animation.Animator;
-import android.animation.ObjectAnimator;
 import android.animation.ValueAnimator;
 import android.animation.ValueAnimator.AnimatorUpdateListener;
 import android.app.ActivityOptions.OnAnimationStartedListener;
@@ -57,7 +53,6 @@ import com.android.systemui.recents.Recents;
 import com.android.systemui.recents.RecentsActivity;
 import com.android.systemui.recents.RecentsActivityLaunchState;
 import com.android.systemui.recents.RecentsConfiguration;
-import com.android.systemui.recents.RecentsDebugFlags;
 import com.android.systemui.recents.events.EventBus;
 import com.android.systemui.recents.events.activity.DismissRecentsToHomeAnimationStarted;
 import com.android.systemui.recents.events.activity.DockedFirstAnimationFrameEvent;
@@ -78,9 +73,9 @@ import com.android.systemui.recents.events.ui.dragndrop.DragEndEvent;
 import com.android.systemui.recents.events.ui.dragndrop.DragStartEvent;
 import com.android.systemui.recents.misc.ReferenceCountedTrigger;
 import com.android.systemui.recents.misc.SystemServicesProxy;
-import com.android.systemui.recents.misc.Utilities;
-import com.android.systemui.recents.model.Task;
-import com.android.systemui.recents.model.TaskStack;
+import com.android.systemui.shared.recents.utilities.Utilities;
+import com.android.systemui.shared.recents.model.Task;
+import com.android.systemui.shared.recents.model.TaskStack;
 import com.android.systemui.recents.views.RecentsTransitionHelper.AnimationSpecComposer;
 import com.android.systemui.recents.views.RecentsTransitionHelper.AppTransitionAnimationSpecsFuture;
 import com.android.systemui.stackdivider.WindowManagerProxy;
@@ -114,7 +109,6 @@ public class RecentsView extends FrameLayout {
     private final int mStackButtonShadowColor;
 
     private boolean mAwaitingFirstLayout = true;
-    private boolean mLastTaskLaunchedWasFreeform;
 
     @ViewDebug.ExportedProperty(category="recents")
     Rect mSystemInsets = new Rect();
@@ -165,22 +159,20 @@ public class RecentsView extends FrameLayout {
         mEmptyView = (TextView) inflater.inflate(R.layout.recents_empty, this, false);
         addView(mEmptyView);
 
-        if (RecentsDebugFlags.Static.EnableStackActionButton) {
-            if (mStackActionButton != null) {
-                removeView(mStackActionButton);
-            }
-            mStackActionButton = (TextView) inflater.inflate(Recents.getConfiguration()
-                            .isLowRamDevice
-                        ? R.layout.recents_low_ram_stack_action_button
-                        : R.layout.recents_stack_action_button,
-                    this, false);
-
-            mStackButtonShadowRadius = mStackActionButton.getShadowRadius();
-            mStackButtonShadowDistance = new PointF(mStackActionButton.getShadowDx(),
-                    mStackActionButton.getShadowDy());
-            mStackButtonShadowColor = mStackActionButton.getShadowColor();
-            addView(mStackActionButton);
+        if (mStackActionButton != null) {
+            removeView(mStackActionButton);
         }
+        mStackActionButton = (TextView) inflater.inflate(Recents.getConfiguration()
+                        .isLowRamDevice
+                    ? R.layout.recents_low_ram_stack_action_button
+                    : R.layout.recents_stack_action_button,
+                this, false);
+
+        mStackButtonShadowRadius = mStackActionButton.getShadowRadius();
+        mStackButtonShadowDistance = new PointF(mStackActionButton.getShadowDx(),
+                mStackActionButton.getShadowDy());
+        mStackButtonShadowColor = mStackActionButton.getShadowColor();
+        addView(mStackActionButton);
 
         reevaluateStyles();
     }
@@ -232,7 +224,6 @@ public class RecentsView extends FrameLayout {
 
         // Reset the state
         mAwaitingFirstLayout = !isResumingFromVisible;
-        mLastTaskLaunchedWasFreeform = false;
 
         // Update the stack
         mTaskStackView.onReload(isResumingFromVisible);
@@ -319,13 +310,6 @@ public class RecentsView extends FrameLayout {
         }
     }
 
-    /**
-     * Returns whether the last task launched was in the freeform stack or not.
-     */
-    public boolean isLastTaskLaunchedFreeform() {
-        return mLastTaskLaunchedWasFreeform;
-    }
-
     /** Launches the focused task from the first stack if possible */
     public boolean launchFocusedTask(int logEvent) {
         if (mTaskStackView != null) {
@@ -371,9 +355,7 @@ public class RecentsView extends FrameLayout {
         mEmptyView.setText(msgResId);
         mEmptyView.setVisibility(View.VISIBLE);
         mEmptyView.bringToFront();
-        if (RecentsDebugFlags.Static.EnableStackActionButton) {
-            mStackActionButton.bringToFront();
-        }
+        mStackActionButton.bringToFront();
     }
 
     /**
@@ -383,9 +365,7 @@ public class RecentsView extends FrameLayout {
         mEmptyView.setVisibility(View.INVISIBLE);
         mTaskStackView.setVisibility(View.VISIBLE);
         mTaskStackView.bringToFront();
-        if (RecentsDebugFlags.Static.EnableStackActionButton) {
-            mStackActionButton.bringToFront();
-        }
+        mStackActionButton.bringToFront();
     }
 
     /**
@@ -433,13 +413,11 @@ public class RecentsView extends FrameLayout {
                     MeasureSpec.makeMeasureSpec(height, MeasureSpec.AT_MOST));
         }
 
-        if (RecentsDebugFlags.Static.EnableStackActionButton) {
-            // Measure the stack action button within the constraints of the space above the stack
-            Rect buttonBounds = mTaskStackView.mLayoutAlgorithm.getStackActionButtonRect();
-            measureChild(mStackActionButton,
-                    MeasureSpec.makeMeasureSpec(buttonBounds.width(), MeasureSpec.AT_MOST),
-                    MeasureSpec.makeMeasureSpec(buttonBounds.height(), MeasureSpec.AT_MOST));
-        }
+        // Measure the stack action button within the constraints of the space above the stack
+        Rect buttonBounds = mTaskStackView.mLayoutAlgorithm.getStackActionButtonRect();
+        measureChild(mStackActionButton,
+                MeasureSpec.makeMeasureSpec(buttonBounds.width(), MeasureSpec.AT_MOST),
+                MeasureSpec.makeMeasureSpec(buttonBounds.height(), MeasureSpec.AT_MOST));
 
         setMeasuredDimension(width, height);
     }
@@ -473,13 +451,11 @@ public class RecentsView extends FrameLayout {
         mBackgroundScrim.setBounds(left, top, right, bottom);
         mMultiWindowBackgroundScrim.setBounds(0, 0, mTmpDisplaySize.x, mTmpDisplaySize.y);
 
-        if (RecentsDebugFlags.Static.EnableStackActionButton) {
-            // Layout the stack action button such that its drawable is start-aligned with the
-            // stack, vertically centered in the available space above the stack
-            Rect buttonBounds = getStackActionButtonBoundsFromStackLayout();
-            mStackActionButton.layout(buttonBounds.left, buttonBounds.top, buttonBounds.right,
-                    buttonBounds.bottom);
-        }
+        // Layout the stack action button such that its drawable is start-aligned with the
+        // stack, vertically centered in the available space above the stack
+        Rect buttonBounds = getStackActionButtonBoundsFromStackLayout();
+        mStackActionButton.layout(buttonBounds.left, buttonBounds.top, buttonBounds.right,
+                buttonBounds.bottom);
 
         if (mAwaitingFirstLayout) {
             mAwaitingFirstLayout = false;
@@ -521,7 +497,7 @@ public class RecentsView extends FrameLayout {
     public void onDrawForeground(Canvas canvas) {
         super.onDrawForeground(canvas);
 
-        ArrayList<TaskStack.DockState> visDockStates = mTouchHandler.getVisibleDockStates();
+        ArrayList<DockState> visDockStates = mTouchHandler.getVisibleDockStates();
         for (int i = visDockStates.size() - 1; i >= 0; i--) {
             visDockStates.get(i).viewState.draw(canvas);
         }
@@ -529,7 +505,7 @@ public class RecentsView extends FrameLayout {
 
     @Override
     protected boolean verifyDrawable(Drawable who) {
-        ArrayList<TaskStack.DockState> visDockStates = mTouchHandler.getVisibleDockStates();
+        ArrayList<DockState> visDockStates = mTouchHandler.getVisibleDockStates();
         for (int i = visDockStates.size() - 1; i >= 0; i--) {
             Drawable d = visDockStates.get(i).viewState.dockAreaOverlay;
             if (d == who) {
@@ -542,7 +518,6 @@ public class RecentsView extends FrameLayout {
     /**** EventBus Events ****/
 
     public final void onBusEvent(LaunchTaskEvent event) {
-        mLastTaskLaunchedWasFreeform = event.task.isFreeformTask();
         mTransitionHelper.launchTaskFromRecents(getStack(), event.task, mTaskStackView,
                 event.taskView, event.screenPinningRequested, event.targetWindowingMode,
                 event.targetActivityType);
@@ -553,10 +528,8 @@ public class RecentsView extends FrameLayout {
 
     public final void onBusEvent(DismissRecentsToHomeAnimationStarted event) {
         int taskViewExitToHomeDuration = TaskStackAnimationHelper.EXIT_TO_HOME_TRANSLATION_DURATION;
-        if (RecentsDebugFlags.Static.EnableStackActionButton) {
-            // Hide the stack action button
-            EventBus.getDefault().send(new HideStackActionButtonEvent());
-        }
+        // Hide the stack action button
+        EventBus.getDefault().send(new HideStackActionButtonEvent());
         animateBackgroundScrim(0f, taskViewExitToHomeDuration);
 
         if (Recents.getConfiguration().isLowRamDevice) {
@@ -566,8 +539,8 @@ public class RecentsView extends FrameLayout {
 
     public final void onBusEvent(DragStartEvent event) {
         updateVisibleDockRegions(Recents.getConfiguration().getDockStatesForCurrentOrientation(),
-                true /* isDefaultDockState */, TaskStack.DockState.NONE.viewState.dockAreaAlpha,
-                TaskStack.DockState.NONE.viewState.hintTextAlpha,
+                true /* isDefaultDockState */, DockState.NONE.viewState.dockAreaAlpha,
+                DockState.NONE.viewState.hintTextAlpha,
                 true /* animateAlpha */, false /* animateBounds */);
 
         // Temporarily hide the stack action button without changing visibility
@@ -581,15 +554,15 @@ public class RecentsView extends FrameLayout {
     }
 
     public final void onBusEvent(DragDropTargetChangedEvent event) {
-        if (event.dropTarget == null || !(event.dropTarget instanceof TaskStack.DockState)) {
+        if (event.dropTarget == null || !(event.dropTarget instanceof DockState)) {
             updateVisibleDockRegions(
                     Recents.getConfiguration().getDockStatesForCurrentOrientation(),
-                    true /* isDefaultDockState */, TaskStack.DockState.NONE.viewState.dockAreaAlpha,
-                    TaskStack.DockState.NONE.viewState.hintTextAlpha,
+                    true /* isDefaultDockState */, DockState.NONE.viewState.dockAreaAlpha,
+                    DockState.NONE.viewState.hintTextAlpha,
                     true /* animateAlpha */, true /* animateBounds */);
         } else {
-            final TaskStack.DockState dockState = (TaskStack.DockState) event.dropTarget;
-            updateVisibleDockRegions(new TaskStack.DockState[] {dockState},
+            final DockState dockState = (DockState) event.dropTarget;
+            updateVisibleDockRegions(new DockState[] {dockState},
                     false /* isDefaultDockState */, -1, -1, true /* animateAlpha */,
                     true /* animateBounds */);
         }
@@ -608,8 +581,8 @@ public class RecentsView extends FrameLayout {
 
     public final void onBusEvent(final DragEndEvent event) {
         // Handle the case where we drop onto a dock region
-        if (event.dropTarget instanceof TaskStack.DockState) {
-            final TaskStack.DockState dockState = (TaskStack.DockState) event.dropTarget;
+        if (event.dropTarget instanceof DockState) {
+            final DockState dockState = (DockState) event.dropTarget;
 
             // Hide the dock region
             updateVisibleDockRegions(null, false /* isDefaultDockState */, -1, -1,
@@ -731,18 +704,10 @@ public class RecentsView extends FrameLayout {
     }
 
     public final void onBusEvent(ShowStackActionButtonEvent event) {
-        if (!RecentsDebugFlags.Static.EnableStackActionButton) {
-            return;
-        }
-
         showStackActionButton(SHOW_STACK_ACTION_BUTTON_DURATION, event.translate);
     }
 
     public final void onBusEvent(HideStackActionButtonEvent event) {
-        if (!RecentsDebugFlags.Static.EnableStackActionButton) {
-            return;
-        }
-
         hideStackActionButton(HIDE_STACK_ACTION_BUTTON_DURATION, true /* translate */);
     }
 
@@ -758,10 +723,6 @@ public class RecentsView extends FrameLayout {
      * Shows the stack action button.
      */
     private void showStackActionButton(final int duration, final boolean translate) {
-        if (!RecentsDebugFlags.Static.EnableStackActionButton) {
-            return;
-        }
-
         final ReferenceCountedTrigger postAnimationTrigger = new ReferenceCountedTrigger();
         if (mStackActionButton.getVisibility() == View.INVISIBLE) {
             mStackActionButton.setVisibility(View.VISIBLE);
@@ -794,10 +755,6 @@ public class RecentsView extends FrameLayout {
      * Hides the stack action button.
      */
     private void hideStackActionButton(int duration, boolean translate) {
-        if (!RecentsDebugFlags.Static.EnableStackActionButton) {
-            return;
-        }
-
         final ReferenceCountedTrigger postAnimationTrigger = new ReferenceCountedTrigger();
         hideStackActionButton(duration, translate, postAnimationTrigger);
         postAnimationTrigger.flushLastDecrementRunnables();
@@ -808,10 +765,6 @@ public class RecentsView extends FrameLayout {
      */
     private void hideStackActionButton(int duration, boolean translate,
                                        final ReferenceCountedTrigger postAnimationTrigger) {
-        if (!RecentsDebugFlags.Static.EnableStackActionButton) {
-            return;
-        }
-
         if (mStackActionButton.getVisibility() == View.VISIBLE) {
             if (translate) {
                 mStackActionButton.animate().translationY(mStackActionButton.getMeasuredHeight()
@@ -858,15 +811,15 @@ public class RecentsView extends FrameLayout {
     /**
      * Updates the dock region to match the specified dock state.
      */
-    private void updateVisibleDockRegions(TaskStack.DockState[] newDockStates,
+    private void updateVisibleDockRegions(DockState[] newDockStates,
             boolean isDefaultDockState, int overrideAreaAlpha, int overrideHintAlpha,
             boolean animateAlpha, boolean animateBounds) {
-        ArraySet<TaskStack.DockState> newDockStatesSet = Utilities.arrayToSet(newDockStates,
-                new ArraySet<TaskStack.DockState>());
-        ArrayList<TaskStack.DockState> visDockStates = mTouchHandler.getVisibleDockStates();
+        ArraySet<DockState> newDockStatesSet = Utilities.arrayToSet(newDockStates,
+                new ArraySet<DockState>());
+        ArrayList<DockState> visDockStates = mTouchHandler.getVisibleDockStates();
         for (int i = visDockStates.size() - 1; i >= 0; i--) {
-            TaskStack.DockState dockState = visDockStates.get(i);
-            TaskStack.DockState.ViewState viewState = dockState.viewState;
+            DockState dockState = visDockStates.get(i);
+            DockState.ViewState viewState = dockState.viewState;
             if (newDockStates == null || !newDockStatesSet.contains(dockState)) {
                 // This is no longer visible, so hide it
                 viewState.startAnimation(null, 0, 0, TaskStackView.SLOW_SYNC_STACK_DURATION,

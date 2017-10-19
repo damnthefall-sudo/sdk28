@@ -1448,17 +1448,59 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
 
     /**
      * <p>Enables low quality mode for the drawing cache.</p>
+     *
+     * @deprecated The view drawing cache was largely made obsolete with the introduction of
+     * hardware-accelerated rendering in API 11. With hardware-acceleration, intermediate cache
+     * layers are largely unnecessary and can easily result in a net loss in performance due to the
+     * cost of creating and updating the layer. In the rare cases where caching layers are useful,
+     * such as for alpha animations, {@link #setLayerType(int, Paint)} handles this with hardware
+     * rendering. For software-rendered snapshots of a small part of the View hierarchy or
+     * individual Views it is recommended to create a {@link Canvas} from either a {@link Bitmap} or
+     * {@link android.graphics.Picture} and call {@link #draw(Canvas)} on the View. However these
+     * software-rendered usages are discouraged and have compatibility issues with hardware-only
+     * rendering features such as {@link android.graphics.Bitmap.Config#HARDWARE Config.HARDWARE}
+     * bitmaps, real-time shadows, and outline clipping. For screenshots of the UI for feedback
+     * reports or unit testing the {@link PixelCopy} API is recommended.
      */
+    @Deprecated
     public static final int DRAWING_CACHE_QUALITY_LOW = 0x00080000;
 
     /**
      * <p>Enables high quality mode for the drawing cache.</p>
+     *
+     * @deprecated The view drawing cache was largely made obsolete with the introduction of
+     * hardware-accelerated rendering in API 11. With hardware-acceleration, intermediate cache
+     * layers are largely unnecessary and can easily result in a net loss in performance due to the
+     * cost of creating and updating the layer. In the rare cases where caching layers are useful,
+     * such as for alpha animations, {@link #setLayerType(int, Paint)} handles this with hardware
+     * rendering. For software-rendered snapshots of a small part of the View hierarchy or
+     * individual Views it is recommended to create a {@link Canvas} from either a {@link Bitmap} or
+     * {@link android.graphics.Picture} and call {@link #draw(Canvas)} on the View. However these
+     * software-rendered usages are discouraged and have compatibility issues with hardware-only
+     * rendering features such as {@link android.graphics.Bitmap.Config#HARDWARE Config.HARDWARE}
+     * bitmaps, real-time shadows, and outline clipping. For screenshots of the UI for feedback
+     * reports or unit testing the {@link PixelCopy} API is recommended.
      */
+    @Deprecated
     public static final int DRAWING_CACHE_QUALITY_HIGH = 0x00100000;
 
     /**
      * <p>Enables automatic quality mode for the drawing cache.</p>
+     *
+     * @deprecated The view drawing cache was largely made obsolete with the introduction of
+     * hardware-accelerated rendering in API 11. With hardware-acceleration, intermediate cache
+     * layers are largely unnecessary and can easily result in a net loss in performance due to the
+     * cost of creating and updating the layer. In the rare cases where caching layers are useful,
+     * such as for alpha animations, {@link #setLayerType(int, Paint)} handles this with hardware
+     * rendering. For software-rendered snapshots of a small part of the View hierarchy or
+     * individual Views it is recommended to create a {@link Canvas} from either a {@link Bitmap} or
+     * {@link android.graphics.Picture} and call {@link #draw(Canvas)} on the View. However these
+     * software-rendered usages are discouraged and have compatibility issues with hardware-only
+     * rendering features such as {@link android.graphics.Bitmap.Config#HARDWARE Config.HARDWARE}
+     * bitmaps, real-time shadows, and outline clipping. For screenshots of the UI for feedback
+     * reports or unit testing the {@link PixelCopy} API is recommended.
      */
+    @Deprecated
     public static final int DRAWING_CACHE_QUALITY_AUTO = 0x00000000;
 
     private static final int[] DRAWING_CACHE_QUALITY_FLAGS = {
@@ -2300,9 +2342,9 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
     private static final int PFLAG_HOVERED             = 0x10000000;
 
     /**
-     * no longer needed, should be reused
+     * Flag set by {@link AutofillManager} if it needs to be notified when this view is clicked.
      */
-    private static final int PFLAG_DOES_NOTHING_REUSE_PLEASE = 0x20000000;
+    private static final int PFLAG_NOTIFY_AUTOFILL_MANAGER_ON_CLICK = 0x20000000;
 
     /** {@hide} */
     static final int PFLAG_ACTIVATED                   = 0x40000000;
@@ -6355,6 +6397,42 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         return null;
     }
 
+    /** @hide */
+    public void setNotifyAutofillManagerOnClick(boolean notify) {
+        if (notify) {
+            mPrivateFlags |= PFLAG_NOTIFY_AUTOFILL_MANAGER_ON_CLICK;
+        } else {
+            mPrivateFlags &= ~PFLAG_NOTIFY_AUTOFILL_MANAGER_ON_CLICK;
+        }
+    }
+
+    private void notifyAutofillManagerOnClick() {
+        if ((mPrivateFlags & PFLAG_NOTIFY_AUTOFILL_MANAGER_ON_CLICK) != 0) {
+            try {
+                getAutofillManager().notifyViewClicked(this);
+            } finally {
+                // Set it to already called so it's not called twice when called by
+                // performClickInternal()
+                mPrivateFlags |= ~PFLAG_NOTIFY_AUTOFILL_MANAGER_ON_CLICK;
+            }
+        }
+    }
+
+    /**
+     * Entry point for {@link #performClick()} - other methods on View should call it instead of
+     * {@code performClick()} directly to make sure the autofill manager is notified when
+     * necessary (as subclasses could extend {@code performClick()} without calling the parent's
+     * method).
+     */
+    private boolean performClickInternal() {
+        // Must notify autofill manager before performing the click actions to avoid scenarios where
+        // the app has a click listener that changes the state of views the autofill service might
+        // be interested on.
+        notifyAutofillManagerOnClick();
+
+        return performClick();
+    }
+
     /**
      * Call this view's OnClickListener, if it is defined.  Performs all normal
      * actions associated with clicking: reporting accessibility event, playing
@@ -6363,7 +6441,14 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * @return True there was an assigned OnClickListener that was called, false
      *         otherwise is returned.
      */
+    // NOTE: other methods on View should not call this method directly, but performClickInternal()
+    // instead, to guarantee that the autofill manager is notified when necessary (as subclasses
+    // could extend this method without calling super.performClick()).
     public boolean performClick() {
+        // We still need to call this method to handle the cases where performClick() was called
+        // externally, instead of through performClickInternal()
+        notifyAutofillManagerOnClick();
+
         final boolean result;
         final ListenerInfo li = mListenerInfo;
         if (li != null && li.mOnClickListener != null) {
@@ -8907,7 +8992,21 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * @see #isDrawingCacheEnabled()
      *
      * @attr ref android.R.styleable#View_drawingCacheQuality
+     *
+     * @deprecated The view drawing cache was largely made obsolete with the introduction of
+     * hardware-accelerated rendering in API 11. With hardware-acceleration, intermediate cache
+     * layers are largely unnecessary and can easily result in a net loss in performance due to the
+     * cost of creating and updating the layer. In the rare cases where caching layers are useful,
+     * such as for alpha animations, {@link #setLayerType(int, Paint)} handles this with hardware
+     * rendering. For software-rendered snapshots of a small part of the View hierarchy or
+     * individual Views it is recommended to create a {@link Canvas} from either a {@link Bitmap} or
+     * {@link android.graphics.Picture} and call {@link #draw(Canvas)} on the View. However these
+     * software-rendered usages are discouraged and have compatibility issues with hardware-only
+     * rendering features such as {@link android.graphics.Bitmap.Config#HARDWARE Config.HARDWARE}
+     * bitmaps, real-time shadows, and outline clipping. For screenshots of the UI for feedback
+     * reports or unit testing the {@link PixelCopy} API is recommended.
      */
+    @Deprecated
     @DrawingCacheQuality
     public int getDrawingCacheQuality() {
         return mViewFlags & DRAWING_CACHE_QUALITY_MASK;
@@ -8925,7 +9024,21 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * @see #isDrawingCacheEnabled()
      *
      * @attr ref android.R.styleable#View_drawingCacheQuality
+     *
+     * @deprecated The view drawing cache was largely made obsolete with the introduction of
+     * hardware-accelerated rendering in API 11. With hardware-acceleration, intermediate cache
+     * layers are largely unnecessary and can easily result in a net loss in performance due to the
+     * cost of creating and updating the layer. In the rare cases where caching layers are useful,
+     * such as for alpha animations, {@link #setLayerType(int, Paint)} handles this with hardware
+     * rendering. For software-rendered snapshots of a small part of the View hierarchy or
+     * individual Views it is recommended to create a {@link Canvas} from either a {@link Bitmap} or
+     * {@link android.graphics.Picture} and call {@link #draw(Canvas)} on the View. However these
+     * software-rendered usages are discouraged and have compatibility issues with hardware-only
+     * rendering features such as {@link android.graphics.Bitmap.Config#HARDWARE Config.HARDWARE}
+     * bitmaps, real-time shadows, and outline clipping. For screenshots of the UI for feedback
+     * reports or unit testing the {@link PixelCopy} API is recommended.
      */
+    @Deprecated
     public void setDrawingCacheQuality(@DrawingCacheQuality int quality) {
         setFlags(quality, DRAWING_CACHE_QUALITY_MASK);
     }
@@ -11433,7 +11546,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         switch (action) {
             case AccessibilityNodeInfo.ACTION_CLICK: {
                 if (isClickable()) {
-                    performClick();
+                    performClickInternal();
                     return true;
                 }
             } break;
@@ -12545,7 +12658,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                     // This is a tap, so remove the longpress check
                     removeLongPressCallback();
                     if (!event.isCanceled()) {
-                        return performClick();
+                        return performClickInternal();
                     }
                 }
             }
@@ -13117,7 +13230,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                                     mPerformClick = new PerformClick();
                                 }
                                 if (!post(mPerformClick)) {
-                                    performClick();
+                                    performClickInternal();
                                 }
                             }
                         }
@@ -18103,7 +18216,21 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * @see #getDrawingCache()
      * @see #buildDrawingCache()
      * @see #setLayerType(int, android.graphics.Paint)
+     *
+     * @deprecated The view drawing cache was largely made obsolete with the introduction of
+     * hardware-accelerated rendering in API 11. With hardware-acceleration, intermediate cache
+     * layers are largely unnecessary and can easily result in a net loss in performance due to the
+     * cost of creating and updating the layer. In the rare cases where caching layers are useful,
+     * such as for alpha animations, {@link #setLayerType(int, Paint)} handles this with hardware
+     * rendering. For software-rendered snapshots of a small part of the View hierarchy or
+     * individual Views it is recommended to create a {@link Canvas} from either a {@link Bitmap} or
+     * {@link android.graphics.Picture} and call {@link #draw(Canvas)} on the View. However these
+     * software-rendered usages are discouraged and have compatibility issues with hardware-only
+     * rendering features such as {@link android.graphics.Bitmap.Config#HARDWARE Config.HARDWARE}
+     * bitmaps, real-time shadows, and outline clipping. For screenshots of the UI for feedback
+     * reports or unit testing the {@link PixelCopy} API is recommended.
      */
+    @Deprecated
     public void setDrawingCacheEnabled(boolean enabled) {
         mCachingFailed = false;
         setFlags(enabled ? DRAWING_CACHE_ENABLED : 0, DRAWING_CACHE_ENABLED);
@@ -18116,7 +18243,21 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      *
      * @see #setDrawingCacheEnabled(boolean)
      * @see #getDrawingCache()
+     *
+     * @deprecated The view drawing cache was largely made obsolete with the introduction of
+     * hardware-accelerated rendering in API 11. With hardware-acceleration, intermediate cache
+     * layers are largely unnecessary and can easily result in a net loss in performance due to the
+     * cost of creating and updating the layer. In the rare cases where caching layers are useful,
+     * such as for alpha animations, {@link #setLayerType(int, Paint)} handles this with hardware
+     * rendering. For software-rendered snapshots of a small part of the View hierarchy or
+     * individual Views it is recommended to create a {@link Canvas} from either a {@link Bitmap} or
+     * {@link android.graphics.Picture} and call {@link #draw(Canvas)} on the View. However these
+     * software-rendered usages are discouraged and have compatibility issues with hardware-only
+     * rendering features such as {@link android.graphics.Bitmap.Config#HARDWARE Config.HARDWARE}
+     * bitmaps, real-time shadows, and outline clipping. For screenshots of the UI for feedback
+     * reports or unit testing the {@link PixelCopy} API is recommended.
      */
+    @Deprecated
     @ViewDebug.ExportedProperty(category = "drawing")
     public boolean isDrawingCacheEnabled() {
         return (mViewFlags & DRAWING_CACHE_ENABLED) == DRAWING_CACHE_ENABLED;
@@ -18130,10 +18271,11 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      */
     @SuppressWarnings({"UnusedDeclaration"})
     public void outputDirtyFlags(String indent, boolean clear, int clearMask) {
-        Log.d("View", indent + this + "             DIRTY(" + (mPrivateFlags & View.PFLAG_DIRTY_MASK) +
-                ") DRAWN(" + (mPrivateFlags & PFLAG_DRAWN) + ")" + " CACHE_VALID(" +
-                (mPrivateFlags & View.PFLAG_DRAWING_CACHE_VALID) +
-                ") INVALIDATED(" + (mPrivateFlags & PFLAG_INVALIDATED) + ")");
+        Log.d(VIEW_LOG_TAG, indent + this + "             DIRTY("
+                + (mPrivateFlags & View.PFLAG_DIRTY_MASK)
+                + ") DRAWN(" + (mPrivateFlags & PFLAG_DRAWN) + ")" + " CACHE_VALID("
+                + (mPrivateFlags & View.PFLAG_DRAWING_CACHE_VALID)
+                + ") INVALIDATED(" + (mPrivateFlags & PFLAG_INVALIDATED) + ")");
         if (clear) {
             mPrivateFlags &= clearMask;
         }
@@ -18257,7 +18399,21 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * @return A non-scaled bitmap representing this view or null if cache is disabled.
      *
      * @see #getDrawingCache(boolean)
+     *
+     * @deprecated The view drawing cache was largely made obsolete with the introduction of
+     * hardware-accelerated rendering in API 11. With hardware-acceleration, intermediate cache
+     * layers are largely unnecessary and can easily result in a net loss in performance due to the
+     * cost of creating and updating the layer. In the rare cases where caching layers are useful,
+     * such as for alpha animations, {@link #setLayerType(int, Paint)} handles this with hardware
+     * rendering. For software-rendered snapshots of a small part of the View hierarchy or
+     * individual Views it is recommended to create a {@link Canvas} from either a {@link Bitmap} or
+     * {@link android.graphics.Picture} and call {@link #draw(Canvas)} on the View. However these
+     * software-rendered usages are discouraged and have compatibility issues with hardware-only
+     * rendering features such as {@link android.graphics.Bitmap.Config#HARDWARE Config.HARDWARE}
+     * bitmaps, real-time shadows, and outline clipping. For screenshots of the UI for feedback
+     * reports or unit testing the {@link PixelCopy} API is recommended.
      */
+    @Deprecated
     public Bitmap getDrawingCache() {
         return getDrawingCache(false);
     }
@@ -18288,7 +18444,21 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * @see #isDrawingCacheEnabled()
      * @see #buildDrawingCache(boolean)
      * @see #destroyDrawingCache()
+     *
+     * @deprecated The view drawing cache was largely made obsolete with the introduction of
+     * hardware-accelerated rendering in API 11. With hardware-acceleration, intermediate cache
+     * layers are largely unnecessary and can easily result in a net loss in performance due to the
+     * cost of creating and updating the layer. In the rare cases where caching layers are useful,
+     * such as for alpha animations, {@link #setLayerType(int, Paint)} handles this with hardware
+     * rendering. For software-rendered snapshots of a small part of the View hierarchy or
+     * individual Views it is recommended to create a {@link Canvas} from either a {@link Bitmap} or
+     * {@link android.graphics.Picture} and call {@link #draw(Canvas)} on the View. However these
+     * software-rendered usages are discouraged and have compatibility issues with hardware-only
+     * rendering features such as {@link android.graphics.Bitmap.Config#HARDWARE Config.HARDWARE}
+     * bitmaps, real-time shadows, and outline clipping. For screenshots of the UI for feedback
+     * reports or unit testing the {@link PixelCopy} API is recommended.
      */
+    @Deprecated
     public Bitmap getDrawingCache(boolean autoScale) {
         if ((mViewFlags & WILL_NOT_CACHE_DRAWING) == WILL_NOT_CACHE_DRAWING) {
             return null;
@@ -18308,7 +18478,21 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * @see #setDrawingCacheEnabled(boolean)
      * @see #buildDrawingCache()
      * @see #getDrawingCache()
+     *
+     * @deprecated The view drawing cache was largely made obsolete with the introduction of
+     * hardware-accelerated rendering in API 11. With hardware-acceleration, intermediate cache
+     * layers are largely unnecessary and can easily result in a net loss in performance due to the
+     * cost of creating and updating the layer. In the rare cases where caching layers are useful,
+     * such as for alpha animations, {@link #setLayerType(int, Paint)} handles this with hardware
+     * rendering. For software-rendered snapshots of a small part of the View hierarchy or
+     * individual Views it is recommended to create a {@link Canvas} from either a {@link Bitmap} or
+     * {@link android.graphics.Picture} and call {@link #draw(Canvas)} on the View. However these
+     * software-rendered usages are discouraged and have compatibility issues with hardware-only
+     * rendering features such as {@link android.graphics.Bitmap.Config#HARDWARE Config.HARDWARE}
+     * bitmaps, real-time shadows, and outline clipping. For screenshots of the UI for feedback
+     * reports or unit testing the {@link PixelCopy} API is recommended.
      */
+    @Deprecated
     public void destroyDrawingCache() {
         if (mDrawingCache != null) {
             mDrawingCache.recycle();
@@ -18330,7 +18514,21 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * @see #setDrawingCacheEnabled(boolean)
      * @see #buildDrawingCache()
      * @see #getDrawingCache()
+     *
+     * @deprecated The view drawing cache was largely made obsolete with the introduction of
+     * hardware-accelerated rendering in API 11. With hardware-acceleration, intermediate cache
+     * layers are largely unnecessary and can easily result in a net loss in performance due to the
+     * cost of creating and updating the layer. In the rare cases where caching layers are useful,
+     * such as for alpha animations, {@link #setLayerType(int, Paint)} handles this with hardware
+     * rendering. For software-rendered snapshots of a small part of the View hierarchy or
+     * individual Views it is recommended to create a {@link Canvas} from either a {@link Bitmap} or
+     * {@link android.graphics.Picture} and call {@link #draw(Canvas)} on the View. However these
+     * software-rendered usages are discouraged and have compatibility issues with hardware-only
+     * rendering features such as {@link android.graphics.Bitmap.Config#HARDWARE Config.HARDWARE}
+     * bitmaps, real-time shadows, and outline clipping. For screenshots of the UI for feedback
+     * reports or unit testing the {@link PixelCopy} API is recommended.
      */
+    @Deprecated
     public void setDrawingCacheBackgroundColor(@ColorInt int color) {
         if (color != mDrawingCacheBackgroundColor) {
             mDrawingCacheBackgroundColor = color;
@@ -18342,7 +18540,21 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * @see #setDrawingCacheBackgroundColor(int)
      *
      * @return The background color to used for the drawing cache's bitmap
+     *
+     * @deprecated The view drawing cache was largely made obsolete with the introduction of
+     * hardware-accelerated rendering in API 11. With hardware-acceleration, intermediate cache
+     * layers are largely unnecessary and can easily result in a net loss in performance due to the
+     * cost of creating and updating the layer. In the rare cases where caching layers are useful,
+     * such as for alpha animations, {@link #setLayerType(int, Paint)} handles this with hardware
+     * rendering. For software-rendered snapshots of a small part of the View hierarchy or
+     * individual Views it is recommended to create a {@link Canvas} from either a {@link Bitmap} or
+     * {@link android.graphics.Picture} and call {@link #draw(Canvas)} on the View. However these
+     * software-rendered usages are discouraged and have compatibility issues with hardware-only
+     * rendering features such as {@link android.graphics.Bitmap.Config#HARDWARE Config.HARDWARE}
+     * bitmaps, real-time shadows, and outline clipping. For screenshots of the UI for feedback
+     * reports or unit testing the {@link PixelCopy} API is recommended.
      */
+    @Deprecated
     @ColorInt
     public int getDrawingCacheBackgroundColor() {
         return mDrawingCacheBackgroundColor;
@@ -18352,7 +18564,21 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * <p>Calling this method is equivalent to calling <code>buildDrawingCache(false)</code>.</p>
      *
      * @see #buildDrawingCache(boolean)
+     *
+     * @deprecated The view drawing cache was largely made obsolete with the introduction of
+     * hardware-accelerated rendering in API 11. With hardware-acceleration, intermediate cache
+     * layers are largely unnecessary and can easily result in a net loss in performance due to the
+     * cost of creating and updating the layer. In the rare cases where caching layers are useful,
+     * such as for alpha animations, {@link #setLayerType(int, Paint)} handles this with hardware
+     * rendering. For software-rendered snapshots of a small part of the View hierarchy or
+     * individual Views it is recommended to create a {@link Canvas} from either a {@link Bitmap} or
+     * {@link android.graphics.Picture} and call {@link #draw(Canvas)} on the View. However these
+     * software-rendered usages are discouraged and have compatibility issues with hardware-only
+     * rendering features such as {@link android.graphics.Bitmap.Config#HARDWARE Config.HARDWARE}
+     * bitmaps, real-time shadows, and outline clipping. For screenshots of the UI for feedback
+     * reports or unit testing the {@link PixelCopy} API is recommended.
      */
+    @Deprecated
     public void buildDrawingCache() {
         buildDrawingCache(false);
     }
@@ -18379,7 +18605,21 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      *
      * @see #getDrawingCache()
      * @see #destroyDrawingCache()
+     *
+     * @deprecated The view drawing cache was largely made obsolete with the introduction of
+     * hardware-accelerated rendering in API 11. With hardware-acceleration, intermediate cache
+     * layers are largely unnecessary and can easily result in a net loss in performance due to the
+     * cost of creating and updating the layer. In the rare cases where caching layers are useful,
+     * such as for alpha animations, {@link #setLayerType(int, Paint)} handles this with hardware
+     * rendering. For software-rendered snapshots of a small part of the View hierarchy or
+     * individual Views it is recommended to create a {@link Canvas} from either a {@link Bitmap} or
+     * {@link android.graphics.Picture} and call {@link #draw(Canvas)} on the View. However these
+     * software-rendered usages are discouraged and have compatibility issues with hardware-only
+     * rendering features such as {@link android.graphics.Bitmap.Config#HARDWARE Config.HARDWARE}
+     * bitmaps, real-time shadows, and outline clipping. For screenshots of the UI for feedback
+     * reports or unit testing the {@link PixelCopy} API is recommended.
      */
+    @Deprecated
     public void buildDrawingCache(boolean autoScale) {
         if ((mPrivateFlags & PFLAG_DRAWING_CACHE_VALID) == 0 || (autoScale ?
                 mDrawingCache == null : mUnscaledDrawingCache == null)) {
@@ -19812,7 +20052,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         boolean changed = false;
 
         if (DBG) {
-            Log.d("View", this + " View.setFrame(" + left + "," + top + ","
+            Log.d(VIEW_LOG_TAG, this + " View.setFrame(" + left + "," + top + ","
                     + right + "," + bottom + ")");
         }
 
@@ -24858,7 +25098,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
     private final class PerformClick implements Runnable {
         @Override
         public void run() {
-            performClick();
+            performClickInternal();
         }
     }
 

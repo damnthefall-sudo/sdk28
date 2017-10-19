@@ -29,9 +29,12 @@ import static android.arch.lifecycle.Lifecycle.State.RESUMED;
 import static android.arch.lifecycle.Lifecycle.State.STARTED;
 
 import android.arch.core.internal.FastSafeIterableMap;
+import android.support.annotation.MainThread;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
+import android.util.Log;
 
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.Map.Entry;
@@ -43,6 +46,8 @@ import java.util.Map.Entry;
  * a custom LifecycleOwner.
  */
 public class LifecycleRegistry extends Lifecycle {
+
+    private static final String LOG_TAG = "LifecycleRegistry";
 
     /**
      * Custom list that keeps observers and can handle removals / additions during traversal.
@@ -59,8 +64,12 @@ public class LifecycleRegistry extends Lifecycle {
     private State mState;
     /**
      * The provider that owns this Lifecycle.
+     * Only WeakReference on LifecycleOwner is kept, so if somebody leaks Lifecycle, they won't leak
+     * the whole Fragment / Activity. However, to leak Lifecycle object isn't great idea neither,
+     * because it keeps strong references on all other listeners, so you'll leak all of them as
+     * well.
      */
-    private final LifecycleOwner mLifecycleOwner;
+    private final WeakReference<LifecycleOwner> mLifecycleOwner;
 
     private int mAddingObserverCounter = 0;
 
@@ -86,19 +95,19 @@ public class LifecycleRegistry extends Lifecycle {
      * @param provider The owner LifecycleOwner
      */
     public LifecycleRegistry(@NonNull LifecycleOwner provider) {
-        mLifecycleOwner = provider;
+        mLifecycleOwner = new WeakReference<>(provider);
         mState = INITIALIZED;
     }
 
     /**
-     * Only marks the current state as the given value. It doesn't dispatch any event to its
-     * listeners.
+     * Moves the Lifecycle to the given state and dispatches necessary events to the observers.
      *
      * @param state new state
      */
     @SuppressWarnings("WeakerAccess")
-    public void markState(State state) {
-        mState = state;
+    @MainThread
+    public void markState(@NonNull State state) {
+        moveToState(state);
     }
 
     /**
@@ -109,8 +118,16 @@ public class LifecycleRegistry extends Lifecycle {
      *
      * @param event The event that was received
      */
-    public void handleLifecycleEvent(Lifecycle.Event event) {
-        mState = getStateAfter(event);
+    public void handleLifecycleEvent(@NonNull Lifecycle.Event event) {
+        State next = getStateAfter(event);
+        moveToState(next);
+    }
+
+    private void moveToState(State next) {
+        if (mState == next) {
+            return;
+        }
+        mState = next;
         if (mHandlingEvent || mAddingObserverCounter != 0) {
             mNewEventOccurred = true;
             // we will figure out what to do on upper level.
@@ -140,7 +157,7 @@ public class LifecycleRegistry extends Lifecycle {
     }
 
     @Override
-    public void addObserver(LifecycleObserver observer) {
+    public void addObserver(@NonNull LifecycleObserver observer) {
         State initialState = mState == DESTROYED ? DESTROYED : INITIALIZED;
         ObserverWithState statefulObserver = new ObserverWithState(observer, initialState);
         ObserverWithState previous = mObserverMap.putIfAbsent(observer, statefulObserver);
@@ -148,15 +165,19 @@ public class LifecycleRegistry extends Lifecycle {
         if (previous != null) {
             return;
         }
+        LifecycleOwner lifecycleOwner = mLifecycleOwner.get();
+        if (lifecycleOwner == null) {
+            // it is null we should be destroyed. Fallback quickly
+            return;
+        }
 
         boolean isReentrance = mAddingObserverCounter != 0 || mHandlingEvent;
-
         State targetState = calculateTargetState(observer);
         mAddingObserverCounter++;
         while ((statefulObserver.mState.compareTo(targetState) < 0
                 && mObserverMap.contains(observer))) {
             pushParentState(statefulObserver.mState);
-            statefulObserver.dispatchEvent(mLifecycleOwner, upEvent(statefulObserver.mState));
+            statefulObserver.dispatchEvent(lifecycleOwner, upEvent(statefulObserver.mState));
             popParentState();
             // mState / subling may have been changed recalculate
             targetState = calculateTargetState(observer);
@@ -178,7 +199,7 @@ public class LifecycleRegistry extends Lifecycle {
     }
 
     @Override
-    public void removeObserver(LifecycleObserver observer) {
+    public void removeObserver(@NonNull LifecycleObserver observer) {
         // we consciously decided not to send destruction events here in opposition to addObserver.
         // Our reasons for that:
         // 1. These events haven't yet happened at all. In contrast to events in addObservers, that
@@ -258,7 +279,7 @@ public class LifecycleRegistry extends Lifecycle {
         throw new IllegalArgumentException("Unexpected state value " + state);
     }
 
-    private void forwardPass() {
+    private void forwardPass(LifecycleOwner lifecycleOwner) {
         Iterator<Entry<LifecycleObserver, ObserverWithState>> ascendingIterator =
                 mObserverMap.iteratorWithAdditions();
         while (ascendingIterator.hasNext() && !mNewEventOccurred) {
@@ -267,13 +288,13 @@ public class LifecycleRegistry extends Lifecycle {
             while ((observer.mState.compareTo(mState) < 0 && !mNewEventOccurred
                     && mObserverMap.contains(entry.getKey()))) {
                 pushParentState(observer.mState);
-                observer.dispatchEvent(mLifecycleOwner, upEvent(observer.mState));
+                observer.dispatchEvent(lifecycleOwner, upEvent(observer.mState));
                 popParentState();
             }
         }
     }
 
-    private void backwardPass() {
+    private void backwardPass(LifecycleOwner lifecycleOwner) {
         Iterator<Entry<LifecycleObserver, ObserverWithState>> descendingIterator =
                 mObserverMap.descendingIterator();
         while (descendingIterator.hasNext() && !mNewEventOccurred) {
@@ -283,7 +304,7 @@ public class LifecycleRegistry extends Lifecycle {
                     && mObserverMap.contains(entry.getKey()))) {
                 Event event = downEvent(observer.mState);
                 pushParentState(getStateAfter(event));
-                observer.dispatchEvent(mLifecycleOwner, event);
+                observer.dispatchEvent(lifecycleOwner, event);
                 popParentState();
             }
         }
@@ -292,16 +313,22 @@ public class LifecycleRegistry extends Lifecycle {
     // happens only on the top of stack (never in reentrance),
     // so it doesn't have to take in account parents
     private void sync() {
+        LifecycleOwner lifecycleOwner = mLifecycleOwner.get();
+        if (lifecycleOwner == null) {
+            Log.w(LOG_TAG, "LifecycleOwner is garbage collected, you shouldn't try dispatch "
+                    + "new events from it.");
+            return;
+        }
         while (!isSynced()) {
             mNewEventOccurred = false;
             // no need to check eldest for nullability, because isSynced does it for us.
             if (mState.compareTo(mObserverMap.eldest().getValue().mState) < 0) {
-                backwardPass();
+                backwardPass(lifecycleOwner);
             }
             Entry<LifecycleObserver, ObserverWithState> newest = mObserverMap.newest();
             if (!mNewEventOccurred && newest != null
                     && mState.compareTo(newest.getValue().mState) > 0) {
-                forwardPass();
+                forwardPass(lifecycleOwner);
             }
         }
         mNewEventOccurred = false;

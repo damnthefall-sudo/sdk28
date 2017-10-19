@@ -17,9 +17,7 @@
 package com.android.server.am;
 
 import static android.app.ActivityManager.LOCK_TASK_MODE_NONE;
-import static android.app.ActivityManager.StackId.FREEFORM_WORKSPACE_STACK_ID;
 import static android.app.ActivityManager.StackId.INVALID_STACK_ID;
-import static android.app.ActivityManager.StackId.PINNED_STACK_ID;
 import static android.app.ActivityManager.TaskDescription.ATTR_TASKDESCRIPTION_PREFIX;
 import static android.app.ActivityOptions.ANIM_CLIP_REVEAL;
 import static android.app.ActivityOptions.ANIM_CUSTOM;
@@ -60,6 +58,10 @@ import static android.content.pm.ActivityInfo.LAUNCH_MULTIPLE;
 import static android.content.pm.ActivityInfo.LAUNCH_SINGLE_INSTANCE;
 import static android.content.pm.ActivityInfo.LAUNCH_SINGLE_TASK;
 import static android.content.pm.ActivityInfo.LAUNCH_SINGLE_TOP;
+import static android.content.pm.ActivityInfo.LOCK_TASK_LAUNCH_MODE_ALWAYS;
+import static android.content.pm.ActivityInfo.LOCK_TASK_LAUNCH_MODE_DEFAULT;
+import static android.content.pm.ActivityInfo.LOCK_TASK_LAUNCH_MODE_IF_WHITELISTED;
+import static android.content.pm.ActivityInfo.LOCK_TASK_LAUNCH_MODE_NEVER;
 import static android.content.pm.ActivityInfo.PERSIST_ACROSS_REBOOTS;
 import static android.content.pm.ActivityInfo.PERSIST_ROOT_ONLY;
 import static android.content.pm.ActivityInfo.RESIZE_MODE_FORCE_RESIZEABLE;
@@ -284,6 +286,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
     int configChangeFlags;  // which config values have changed
     private boolean keysPaused;     // has key dispatching been paused for it?
     int launchMode;         // the launch mode activity attribute.
+    int lockTaskLaunchMode; // the lockTaskMode manifest attribute, subject to override
     boolean visible;        // does this activity's window need to be shown?
     boolean visibleIgnoringKeyguard; // is this activity visible, ignoring the fact that Keyguard
                                      // might hide this activity?
@@ -420,9 +423,13 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
             if (iconFilename != null || taskDescription.getLabel() != null ||
                     taskDescription.getPrimaryColor() != 0) {
                 pw.print(prefix); pw.print("taskDescription:");
-                        pw.print(" iconFilename="); pw.print(taskDescription.getIconFilename());
                         pw.print(" label=\""); pw.print(taskDescription.getLabel());
                                 pw.print("\"");
+                        pw.print(" icon="); pw.print(taskDescription.getInMemoryIcon() != null
+                                ? taskDescription.getInMemoryIcon().getByteCount() + " bytes"
+                                : "null");
+                        pw.print(" iconResource="); pw.print(taskDescription.getIconResource());
+                        pw.print(" iconFilename="); pw.print(taskDescription.getIconFilename());
                         pw.print(" primaryColor=");
                         pw.println(Integer.toHexString(taskDescription.getPrimaryColor()));
                         pw.print(prefix + " backgroundColor=");
@@ -431,9 +438,6 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
                         pw.println(Integer.toHexString(taskDescription.getStatusBarColor()));
                         pw.print(prefix + " navigationBarColor=");
                         pw.println(Integer.toHexString(taskDescription.getNavigationBarColor()));
-            }
-            if (iconFilename == null && taskDescription.getIcon() != null) {
-                pw.print(prefix); pw.println("taskDescription contains Bitmap");
             }
         }
         if (results != null) {
@@ -661,8 +665,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
             return;
         }
 
-        final boolean inPictureInPictureMode = (task.getStackId() == PINNED_STACK_ID) &&
-                (targetStackBounds != null);
+        final boolean inPictureInPictureMode = inPinnedWindowingMode() && targetStackBounds != null;
         if (inPictureInPictureMode != mLastReportedPictureInPictureMode || forceUpdate) {
             // Picture-in-picture mode changes also trigger a multi-window mode change as well, so
             // update that here in order
@@ -682,10 +685,6 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
         } catch (Exception e) {
             // If process died, no one cares.
         }
-    }
-
-    boolean isFreeform() {
-        return task != null && task.getStackId() == FREEFORM_WORKSPACE_STACK_ID;
     }
 
     @Override
@@ -831,23 +830,6 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
         hasBeenLaunched = false;
         mStackSupervisor = supervisor;
 
-        mRotationAnimationHint = aInfo.rotationAnimation;
-
-        if (options != null) {
-            pendingOptions = options;
-            mLaunchTaskBehind = pendingOptions.getLaunchTaskBehind();
-
-            final int rotationAnimation = pendingOptions.getRotationAnimationHint();
-            // Only override manifest supplied option if set.
-            if (rotationAnimation >= 0) {
-                mRotationAnimationHint = rotationAnimation;
-            }
-            PendingIntent usageReport = pendingOptions.getUsageTimeReport();
-            if (usageReport != null) {
-                appTimeTracker = new AppTimeTracker(usageReport);
-            }
-        }
-
         // This starts out true, since the initial state of an activity is that we have everything,
         // and we shouldn't never consider it lacking in state to be removed if it dies.
         haveState = true;
@@ -914,6 +896,32 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
 
         mShowWhenLocked = (aInfo.flags & FLAG_SHOW_WHEN_LOCKED) != 0;
         mTurnScreenOn = (aInfo.flags & FLAG_TURN_SCREEN_ON) != 0;
+
+        mRotationAnimationHint = aInfo.rotationAnimation;
+        lockTaskLaunchMode = aInfo.lockTaskLaunchMode;
+        if (appInfo.isPrivilegedApp() && (lockTaskLaunchMode == LOCK_TASK_LAUNCH_MODE_ALWAYS
+                || lockTaskLaunchMode == LOCK_TASK_LAUNCH_MODE_NEVER)) {
+            lockTaskLaunchMode = LOCK_TASK_LAUNCH_MODE_DEFAULT;
+        }
+
+        if (options != null) {
+            pendingOptions = options;
+            mLaunchTaskBehind = options.getLaunchTaskBehind();
+
+            final int rotationAnimation = pendingOptions.getRotationAnimationHint();
+            // Only override manifest supplied option if set.
+            if (rotationAnimation >= 0) {
+                mRotationAnimationHint = rotationAnimation;
+            }
+            final PendingIntent usageReport = pendingOptions.getUsageTimeReport();
+            if (usageReport != null) {
+                appTimeTracker = new AppTimeTracker(usageReport);
+            }
+            final boolean useLockTask = pendingOptions.getLockTaskMode();
+            if (useLockTask && lockTaskLaunchMode == LOCK_TASK_LAUNCH_MODE_DEFAULT) {
+                lockTaskLaunchMode = LOCK_TASK_LAUNCH_MODE_IF_WHITELISTED;
+            }
+        }
     }
 
     AppWindowContainerController getWindowContainerController() {
@@ -948,7 +956,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
         // update the initial multi-window modes so that the callbacks are scheduled correctly when
         // the user leaves that mode.
         mLastReportedMultiWindowMode = !task.mFullscreen;
-        mLastReportedPictureInPictureMode = (task.getStackId() == PINNED_STACK_ID);
+        mLastReportedPictureInPictureMode = inPinnedWindowingMode();
     }
 
     void removeWindowContainer() {
@@ -1551,7 +1559,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
             // On devices that support leanback only (Android TV), Recents activity can only be
             // visible if the home stack is the focused stack or we are in split-screen mode.
             final ActivityDisplay display = getDisplay();
-            boolean hasSplitScreenStack = display != null && display.hasSplitScreenStack();
+            boolean hasSplitScreenStack = display != null && display.hasSplitScreenPrimaryStack();
             isVisible = hasSplitScreenStack || mStackSupervisor.isFocusedStack(getStack());
         }
 
@@ -2739,6 +2747,8 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
 
     void setShowWhenLocked(boolean showWhenLocked) {
         mShowWhenLocked = showWhenLocked;
+        mStackSupervisor.ensureActivitiesVisibleLocked(null, 0 /* configChanges */,
+                false /* preserveWindows */);
     }
 
     /**

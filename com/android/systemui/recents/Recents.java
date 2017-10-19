@@ -29,14 +29,13 @@ import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
+import android.content.res.Resources;
 import android.graphics.Point;
 import android.graphics.Rect;
 import android.hardware.display.DisplayManager;
-import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.RemoteException;
-import android.os.SystemProperties;
 import android.os.UserHandle;
 import android.provider.Settings;
 import android.util.EventLog;
@@ -53,6 +52,7 @@ import com.android.systemui.RecentsComponent;
 import com.android.systemui.SystemUI;
 import com.android.systemui.recents.events.EventBus;
 import com.android.systemui.recents.events.activity.ConfigurationChangedEvent;
+import com.android.systemui.recents.events.activity.DockedFirstAnimationFrameEvent;
 import com.android.systemui.recents.events.activity.DockedTopTaskEvent;
 import com.android.systemui.recents.events.activity.LaunchTaskFailedEvent;
 import com.android.systemui.recents.events.activity.RecentsActivityStartingEvent;
@@ -62,7 +62,7 @@ import com.android.systemui.recents.events.component.SetWaitingForTransitionStar
 import com.android.systemui.recents.events.component.ShowUserToastEvent;
 import com.android.systemui.recents.events.ui.RecentsDrawnEvent;
 import com.android.systemui.recents.misc.SystemServicesProxy;
-import com.android.systemui.recents.model.RecentsTaskLoader;
+import com.android.systemui.shared.recents.model.RecentsTaskLoader;
 import com.android.systemui.stackdivider.Divider;
 import com.android.systemui.statusbar.CommandQueue;
 
@@ -81,22 +81,14 @@ public class Recents extends SystemUI
         implements RecentsComponent, CommandQueue.Callbacks {
 
     private final static String TAG = "Recents";
-    private final static boolean DEBUG = false;
 
     public final static int EVENT_BUS_PRIORITY = 1;
     public final static int BIND_TO_SYSTEM_USER_RETRY_DELAY = 5000;
-    public final static int RECENTS_GROW_TARGET_INVALID = -1;
 
     public final static Set<String> RECENTS_ACTIVITIES = new HashSet<>();
     static {
         RECENTS_ACTIVITIES.add(RecentsImpl.RECENTS_ACTIVITY);
     }
-
-    // Purely for experimentation
-    private final static String RECENTS_OVERRIDE_SYSPROP_KEY = "persist.recents_override_pkg";
-    private final static String ACTION_SHOW_RECENTS = "com.android.systemui.recents.ACTION_SHOW";
-    private final static String ACTION_HIDE_RECENTS = "com.android.systemui.recents.ACTION_HIDE";
-    private final static String ACTION_TOGGLE_RECENTS = "com.android.systemui.recents.ACTION_TOGGLE";
 
     private static final String COUNTER_WINDOW_SUPPORTED = "window_enter_supported";
     private static final String COUNTER_WINDOW_UNSUPPORTED = "window_enter_unsupported";
@@ -106,11 +98,6 @@ public class Recents extends SystemUI
     private static RecentsDebugFlags sDebugFlags;
     private static RecentsTaskLoader sTaskLoader;
     private static RecentsConfiguration sConfiguration;
-
-    // For experiments only, allows another package to handle recents if it is defined in the system
-    // properties.  This is limited to show/toggle/hide, and does not tie into the ActivityManager,
-    // and does not reside in the home stack.
-    private String mOverrideRecentsPackageName;
 
     private Handler mHandler;
     private RecentsImpl mImpl;
@@ -204,20 +191,22 @@ public class Recents extends SystemUI
 
     @Override
     public void start() {
-        sDebugFlags = new RecentsDebugFlags(mContext);
+        final Resources res = mContext.getResources();
+        final int defaultTaskBarBackgroundColor =
+                mContext.getColor(R.color.recents_task_bar_default_background_color);
+        final int defaultTaskViewBackgroundColor =
+                mContext.getColor(R.color.recents_task_view_default_background_color);
+        sDebugFlags = new RecentsDebugFlags();
         sSystemServicesProxy = SystemServicesProxy.getInstance(mContext);
         sConfiguration = new RecentsConfiguration(mContext);
-        sTaskLoader = new RecentsTaskLoader(mContext);
+        sTaskLoader = new RecentsTaskLoader(mContext,
+                // TODO: Once we start building the AAR, move these into the loader
+                res.getInteger(R.integer.config_recents_max_thumbnail_count),
+                res.getInteger(R.integer.config_recents_max_icon_count),
+                res.getInteger(R.integer.recents_svelte_level));
+        sTaskLoader.setDefaultColors(defaultTaskBarBackgroundColor, defaultTaskViewBackgroundColor);
         mHandler = new Handler();
         mImpl = new RecentsImpl(mContext);
-
-        // Check if there is a recents override package
-        if (Build.IS_USERDEBUG || Build.IS_ENG) {
-            String cnStr = SystemProperties.get(RECENTS_OVERRIDE_SYSPROP_KEY);
-            if (!cnStr.isEmpty()) {
-                mOverrideRecentsPackageName = cnStr;
-            }
-        }
 
         // Register with the event bus
         EventBus.getDefault().register(this, EVENT_BUS_PRIORITY);
@@ -257,16 +246,8 @@ public class Recents extends SystemUI
             return;
         }
 
-        if (proxyToOverridePackage(ACTION_SHOW_RECENTS)) {
-            return;
-        }
-        try {
-            ActivityManager.getService().closeSystemDialogs(SYSTEM_DIALOG_REASON_RECENT_APPS);
-        } catch (RemoteException e) {
-        }
-
+        sSystemServicesProxy.sendCloseSystemWindows(SYSTEM_DIALOG_REASON_RECENT_APPS);
         int recentsGrowTarget = getComponent(Divider.class).getView().growsRecents();
-
         int currentUser = sSystemServicesProxy.getCurrentUser();
         if (sSystemServicesProxy.isSystemUser(currentUser)) {
             mImpl.showRecents(triggeredFromAltTab, false /* draggingInRecents */,
@@ -301,10 +282,6 @@ public class Recents extends SystemUI
             return;
         }
 
-        if (proxyToOverridePackage(ACTION_HIDE_RECENTS)) {
-            return;
-        }
-
         int currentUser = sSystemServicesProxy.getCurrentUser();
         if (sSystemServicesProxy.isSystemUser(currentUser)) {
             mImpl.hideRecents(triggeredFromAltTab, triggeredFromHomeKey);
@@ -336,12 +313,7 @@ public class Recents extends SystemUI
             return;
         }
 
-        if (proxyToOverridePackage(ACTION_TOGGLE_RECENTS)) {
-            return;
-        }
-
         int growTarget = getComponent(Divider.class).getView().growsRecents();
-
         int currentUser = sSystemServicesProxy.getCurrentUser();
         if (sSystemServicesProxy.isSystemUser(currentUser)) {
             mImpl.toggleRecents(growTarget);
@@ -634,6 +606,23 @@ public class Recents extends SystemUI
         }
     }
 
+    public final void onBusEvent(DockedFirstAnimationFrameEvent event) {
+        SystemServicesProxy ssp = Recents.getSystemServices();
+        int processUser = ssp.getProcessUser();
+        if (!ssp.isSystemUser(processUser)) {
+            postToSystemUser(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        mUserToSystemCallbacks.sendDockedFirstAnimationFrameEvent();
+                    } catch (RemoteException e) {
+                        Log.e(TAG, "Callback failed", e);
+                    }
+                }
+            });
+        }
+    }
+
     /**
      * Handle screen pinning request.
      */
@@ -818,21 +807,6 @@ public class Recents extends SystemUI
         ContentResolver cr = mContext.getContentResolver();
         return (Settings.Global.getInt(cr, Settings.Global.DEVICE_PROVISIONED, 0) != 0) &&
                 (Settings.Secure.getInt(cr, Settings.Secure.USER_SETUP_COMPLETE, 0) != 0);
-    }
-
-    /**
-     * Attempts to proxy the following action to the override recents package.
-     * @return whether the proxying was successful
-     */
-    private boolean proxyToOverridePackage(String action) {
-        if (mOverrideRecentsPackageName != null) {
-            Intent intent = new Intent(action);
-            intent.setPackage(mOverrideRecentsPackageName);
-            intent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
-            mContext.sendBroadcast(intent);
-            return true;
-        }
-        return false;
     }
 
     @Override

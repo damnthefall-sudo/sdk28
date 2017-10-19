@@ -133,7 +133,6 @@ import android.service.notification.NotificationListenerService;
 import android.service.notification.NotificationRankingUpdate;
 import android.service.notification.NotificationRecordProto;
 import android.service.notification.NotificationServiceDumpProto;
-import android.service.notification.NotificationServiceProto;
 import android.service.notification.NotificationStats;
 import android.service.notification.SnoozeCriterion;
 import android.service.notification.StatusBarNotification;
@@ -282,6 +281,7 @@ public class NotificationManagerService extends SystemService {
     private WindowManagerInternal mWindowManagerInternal;
     private AlarmManager mAlarmManager;
     private ICompanionDeviceManager mCompanionManager;
+    private AccessibilityManager mAccessibilityManager;
 
     final IBinder mForegroundToken = new Binder();
     private WorkerHandler mHandler;
@@ -1221,6 +1221,12 @@ public class NotificationManagerService extends SystemService {
         mUsageStats = us;
     }
 
+    @VisibleForTesting
+    void setAccessibilityManager(AccessibilityManager am) {
+        mAccessibilityManager = am;
+    }
+
+
     // TODO: All tests should use this init instead of the one-off setters above.
     @VisibleForTesting
     void init(Looper looper, IPackageManager packageManager,
@@ -1235,6 +1241,8 @@ public class NotificationManagerService extends SystemService {
                 Settings.Global.MAX_NOTIFICATION_ENQUEUE_RATE,
                 DEFAULT_MAX_NOTIFICATION_ENQUEUE_RATE);
 
+        mAccessibilityManager =
+                (AccessibilityManager) getContext().getSystemService(Context.ACCESSIBILITY_SERVICE);
         mAm = ActivityManager.getService();
         mPackageManager = packageManager;
         mPackageManagerClient = packageManagerClient;
@@ -3254,7 +3262,7 @@ public class NotificationManagerService extends SystemService {
                     final NotificationRecord nr = mNotificationList.get(i);
                     if (filter.filtered && !filter.matches(nr.sbn)) continue;
                     nr.dump(proto, filter.redact);
-                    proto.write(NotificationRecordProto.STATE, NotificationServiceProto.POSTED);
+                    proto.write(NotificationRecordProto.STATE, NotificationRecordProto.POSTED);
                 }
             }
             N = mEnqueuedNotifications.size();
@@ -3263,7 +3271,7 @@ public class NotificationManagerService extends SystemService {
                     final NotificationRecord nr = mEnqueuedNotifications.get(i);
                     if (filter.filtered && !filter.matches(nr.sbn)) continue;
                     nr.dump(proto, filter.redact);
-                    proto.write(NotificationRecordProto.STATE, NotificationServiceProto.ENQUEUED);
+                    proto.write(NotificationRecordProto.STATE, NotificationRecordProto.ENQUEUED);
                 }
             }
             List<NotificationRecord> snoozed = mSnoozeHelper.getSnoozed();
@@ -3273,7 +3281,7 @@ public class NotificationManagerService extends SystemService {
                     final NotificationRecord nr = snoozed.get(i);
                     if (filter.filtered && !filter.matches(nr.sbn)) continue;
                     nr.dump(proto, filter.redact);
-                    proto.write(NotificationRecordProto.STATE, NotificationServiceProto.SNOOZED);
+                    proto.write(NotificationRecordProto.STATE, NotificationRecordProto.SNOOZED);
                 }
             }
             proto.end(records);
@@ -4117,13 +4125,16 @@ public class NotificationManagerService extends SystemService {
         // These are set inside the conditional if the notification is allowed to make noise.
         boolean hasValidVibrate = false;
         boolean hasValidSound = false;
+        boolean sentAccessibilityEvent = false;
+        // If the notification will appear in the status bar, it should send an accessibility
+        // event
+        if (!record.isUpdate && record.getImportance() > IMPORTANCE_MIN) {
+            sendAccessibilityEvent(notification, record.sbn.getPackageName());
+            sentAccessibilityEvent = true;
+        }
 
         if (aboveThreshold && isNotificationForCurrentUser(record)) {
-            // If the notification will appear in the status bar, it should send an accessibility
-            // event
-            if (!record.isUpdate && record.getImportance() > IMPORTANCE_MIN) {
-                sendAccessibilityEvent(notification, record.sbn.getPackageName());
-            }
+
             if (mSystemReady && mAudioManager != null) {
                 Uri soundUri = record.getSound();
                 hasValidSound = soundUri != null && !Uri.EMPTY.equals(soundUri);
@@ -4141,6 +4152,10 @@ public class NotificationManagerService extends SystemService {
 
                 boolean hasAudibleAlert = hasValidSound || hasValidVibrate;
                 if (hasAudibleAlert && !shouldMuteNotificationLocked(record)) {
+                    if (!sentAccessibilityEvent) {
+                        sendAccessibilityEvent(notification, record.sbn.getPackageName());
+                        sentAccessibilityEvent = true;
+                    }
                     if (DBG) Slog.v(TAG, "Interrupting!");
                     if (hasValidSound) {
                         mSoundNotificationKey = key;
@@ -4661,8 +4676,7 @@ public class NotificationManagerService extends SystemService {
     }
 
     void sendAccessibilityEvent(Notification notification, CharSequence packageName) {
-        AccessibilityManager manager = AccessibilityManager.getInstance(getContext());
-        if (!manager.isEnabled()) {
+        if (!mAccessibilityManager.isEnabled()) {
             return;
         }
 
@@ -4676,7 +4690,7 @@ public class NotificationManagerService extends SystemService {
             event.getText().add(tickerText);
         }
 
-        manager.sendAccessibilityEvent(event);
+        mAccessibilityManager.sendAccessibilityEvent(event);
     }
 
     /**

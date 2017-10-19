@@ -52,7 +52,6 @@ import android.media.AudioManager;
 import android.os.BatteryManager;
 import android.os.CancellationSignal;
 import android.os.Handler;
-import android.os.IBinder;
 import android.os.IRemoteCallback;
 import android.os.Message;
 import android.os.RemoteException;
@@ -78,7 +77,7 @@ import com.android.internal.telephony.PhoneConstants;
 import com.android.internal.telephony.TelephonyIntents;
 import com.android.internal.widget.LockPatternUtils;
 import com.android.systemui.recents.misc.SystemServicesProxy;
-import com.android.systemui.recents.misc.SystemServicesProxy.TaskStackListener;
+import com.android.systemui.recents.misc.TaskStackChangeListener;
 
 import com.google.android.collect.Lists;
 
@@ -902,6 +901,8 @@ public class KeyguardUpdateMonitor implements TrustManager.TrustListener {
                 }
             } else if (IccCardConstants.INTENT_VALUE_LOCKED_NETWORK.equals(stateExtra)) {
                 state = IccCardConstants.State.NETWORK_LOCKED;
+            } else if (IccCardConstants.INTENT_VALUE_ICC_CARD_IO_ERROR.equals(stateExtra)) {
+                state = IccCardConstants.State.CARD_IO_ERROR;
             } else if (IccCardConstants.INTENT_VALUE_ICC_LOADED.equals(stateExtra)
                         || IccCardConstants.INTENT_VALUE_ICC_IMSI.equals(stateExtra)) {
                 // This is required because telephony doesn't return to "READY" after
@@ -1771,7 +1772,7 @@ public class KeyguardUpdateMonitor implements TrustManager.TrustListener {
         }
     }
 
-    private final TaskStackListener mTaskStackListener = new TaskStackListener() {
+    private final TaskStackChangeListener mTaskStackListener = new TaskStackChangeListener() {
         @Override
         public void onTaskStackChangedBackground() {
             try {

@@ -36,14 +36,18 @@ import android.view.ViewStub;
 import android.view.WindowManager;
 import android.widget.LinearLayout;
 
+import com.android.keyguard.KeyguardUpdateMonitor;
 import com.android.systemui.BatteryMeterView;
 import com.android.systemui.Dependency;
+import com.android.systemui.Prefs;
 import com.android.systemui.R;
-import com.android.systemui.SwipeHelper;
+import com.android.systemui.classifier.FalsingLog;
+import com.android.systemui.classifier.FalsingManager;
 import com.android.systemui.fragments.FragmentHostManager;
 import com.android.systemui.recents.Recents;
 import com.android.systemui.recents.misc.SystemServicesProxy;
-import com.android.systemui.recents.misc.SystemServicesProxy.TaskStackListener;
+import com.android.systemui.recents.misc.TaskStackChangeListener;
+import com.android.systemui.statusbar.ExpandableNotificationRow;
 import com.android.systemui.statusbar.NotificationData;
 import com.android.systemui.statusbar.StatusBarState;
 import com.android.systemui.statusbar.phone.CollapsedStatusBarFragment;
@@ -51,10 +55,6 @@ import com.android.systemui.statusbar.phone.NavigationBarView;
 import com.android.systemui.statusbar.phone.StatusBar;
 import com.android.systemui.statusbar.policy.BatteryController;
 import com.android.systemui.statusbar.policy.UserSwitcherController;
-import com.android.keyguard.KeyguardUpdateMonitor;
-import com.android.systemui.classifier.FalsingLog;
-import com.android.systemui.classifier.FalsingManager;
-import com.android.systemui.Prefs;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
@@ -247,11 +247,12 @@ public class CarStatusBar extends StatusBar implements
     }
 
     /**
-     * Returns the {@link com.android.systemui.SwipeHelper.LongPressListener} that will be
-     * triggered when a notification card is long-pressed.
+     * Returns the
+     * {@link com.android.systemui.statusbar.ExpandableNotificationRow.LongPressListener} that will
+     * be triggered when a notification card is long-pressed.
      */
     @Override
-    protected SwipeHelper.LongPressListener getNotificationLongClicker() {
+    protected ExpandableNotificationRow.LongPressListener getNotificationLongClicker() {
         // For the automative use case, we do not want to the user to be able to interact with
         // a notification other than a regular click. As a result, just return null for the
         // long click listener.
@@ -304,10 +305,10 @@ public class CarStatusBar extends StatusBar implements
     }
 
     /**
-     * An implementation of TaskStackListener, that listens for changes in the system task
+     * An implementation of TaskStackChangeListener, that listens for changes in the system task
      * stack and notifies the navigation bar.
      */
-    private class TaskStackListenerImpl extends TaskStackListener {
+    private class TaskStackListenerImpl extends TaskStackChangeListener {
         @Override
         public void onTaskStackChanged() {
             SystemServicesProxy ssp = Recents.getSystemServices();
