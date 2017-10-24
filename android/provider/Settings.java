@@ -442,6 +442,18 @@ public final class Settings {
             "android.settings.ASSIST_GESTURE_SETTINGS";
 
     /**
+     * Activity Action: Show settings to enroll fingerprints, and setup PIN/Pattern/Pass if
+     * necessary.
+     * <p>
+     * Input: Nothing.
+     * <p>
+     * Output: Nothing.
+     */
+    @SdkConstant(SdkConstantType.ACTIVITY_INTENT_ACTION)
+    public static final String ACTION_FINGERPRINT_ENROLL =
+            "android.settings.FINGERPRINT_ENROLL";
+
+    /**
      * Activity Action: Show settings to allow configuration of cast endpoints.
      * <p>
      * In some cases, a matching Activity may not exist, so ensure you
@@ -5708,6 +5720,7 @@ public final class Settings {
          *
          * @hide
          */
+        @TestApi
         public static final String ACCESSIBILITY_DISPLAY_MAGNIFICATION_ENABLED =
                 "accessibility_display_magnification_enabled";
 
@@ -6792,14 +6805,6 @@ public final class Settings {
                 "lock_screen_show_notifications";
 
         /**
-         * This preference stores the last stack active task time for each user, which affects what
-         * tasks will be visible in Overview.
-         * @hide
-         */
-        public static final String OVERVIEW_LAST_STACK_ACTIVE_TIME =
-                "overview_last_stack_active_time";
-
-        /**
          * List of TV inputs that are currently hidden. This is a string
          * containing the IDs of all hidden TV inputs. Each ID is encoded by
          * {@link android.net.Uri#encode(String)} and separated by ':'.
@@ -7608,6 +7613,13 @@ public final class Settings {
          * {@hide}
          */
         public static final String AIRPLANE_MODE_TOGGLEABLE_RADIOS = "airplane_mode_toggleable_radios";
+
+        /**
+         * An integer representing the Bluetooth Class of Device (CoD).
+         *
+         * @hide
+         */
+        public static final String BLUETOOTH_CLASS_OF_DEVICE = "bluetooth_class_of_device";
 
         /**
          * A Long representing a bitmap of profiles that should be disabled when bluetooth starts.
@@ -9261,6 +9273,13 @@ public final class Settings {
          */
         public static final String DEFAULT_DNS_SERVER = "default_dns_server";
 
+        /**
+         * Whether to disable DNS over TLS (boolean)
+         *
+         * @hide
+         */
+        public static final String DNS_TLS_DISABLED = "dns_tls_disabled";
+
         /** {@hide} */
         public static final String
                 BLUETOOTH_HEADSET_PRIORITY_PREFIX = "bluetooth_headset_priority_";
@@ -9575,6 +9594,22 @@ public final class Settings {
         public static final String DEVICE_POLICY_CONSTANTS = "device_policy_constants";
 
         /**
+         * TextClassifier specific settings.
+         * This is encoded as a key=value list, separated by commas. Ex:
+         *
+         * <pre>
+         * smart_selection_dark_launch              (boolean)
+         * smart_selection_enabled_for_edit_text    (boolean)
+         * </pre>
+         *
+         * <p>
+         * Type: string
+         * @hide
+         * see also android.view.textclassifier.TextClassifierConstants
+         */
+        public static final String TEXT_CLASSIFIER_CONSTANTS = "text_classifier_constants";
+
+        /**
          * Get the key that retrieves a bluetooth headset's priority.
          * @hide
          */
@@ -9621,7 +9656,7 @@ public final class Settings {
          * Get the key that retrieves a bluetooth Input Device's priority.
          * @hide
          */
-        public static final String getBluetoothInputDevicePriorityKey(String address) {
+        public static final String getBluetoothHidHostPriorityKey(String address) {
             return BLUETOOTH_INPUT_DEVICE_PRIORITY_PREFIX + address.toUpperCase(Locale.ROOT);
         }
 

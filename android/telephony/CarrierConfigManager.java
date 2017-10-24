@@ -763,6 +763,18 @@ public class CarrierConfigManager {
     public static final String KEY_CDMA_DTMF_TONE_DELAY_INT = "cdma_dtmf_tone_delay_int";
 
     /**
+     * Some carriers will send call forwarding responses for voicemail in a format that is not 3gpp
+     * compliant, which causes issues during parsing. This causes the
+     * {@link com.android.internal.telephony.CallForwardInfo#number} to contain non-numerical
+     * characters instead of a number.
+     *
+     * If true, we will detect the non-numerical characters and replace them with "Voicemail".
+     * @hide
+     */
+    public static final String KEY_CALL_FORWARDING_MAP_NON_NUMBER_TO_VOICEMAIL_BOOL =
+            "call_forwarding_map_non_number_to_voicemail_bool";
+
+    /**
      * Determines whether conference calls are supported by a carrier.  When {@code true},
      * conference calling is supported, {@code false otherwise}.
      */
@@ -1407,6 +1419,17 @@ public class CarrierConfigManager {
         "support_3gpp_call_forwarding_while_roaming_bool";
 
     /**
+     * Boolean indicating whether to display voicemail number as default call forwarding number in
+     * call forwarding settings.
+     * If true, display vm number when cf number is null.
+     * If false, display the cf number from network.
+     * By default this value is false.
+     * @hide
+     */
+    public static final String KEY_DISPLAY_VOICEMAIL_NUMBER_AS_DEFAULT_CALL_FORWARDING_NUMBER_BOOL =
+            "display_voicemail_number_as_default_call_forwarding_number";
+
+    /**
      * When {@code true}, the user will be notified when they attempt to place an international call
      * when the call is placed using wifi calling.
      * @hide
@@ -1573,6 +1596,25 @@ public class CarrierConfigManager {
     public static final String KEY_SHOW_IMS_REGISTRATION_STATUS_BOOL =
             "show_ims_registration_status_bool";
 
+    /**
+     * The flag to disable the popup dialog which warns the user of data charges.
+     * @hide
+     */
+    public static final String KEY_DISABLE_CHARGE_INDICATION_BOOL =
+            "disable_charge_indication_bool";
+
+    /**
+     * Boolean indicating whether to skip the call forwarding (CF) fail-to-disable dialog.
+     * The logic used to determine whether we succeeded in disabling is carrier specific,
+     * so the dialog may not always be accurate.
+     * {@code false} - show CF fail-to-disable dialog.
+     * {@code true}  - skip showing CF fail-to-disable dialog.
+     *
+     * @hide
+     */
+    public static final String KEY_SKIP_CF_FAIL_TO_DISABLE_DIALOG_BOOL =
+            "skip_cf_fail_to_disable_dialog_bool";
+
     /** The default value for every variable. */
     private final static PersistableBundle sDefaults;
 
@@ -1703,6 +1745,7 @@ public class CarrierConfigManager {
         sDefaults.putInt(KEY_GSM_DTMF_TONE_DELAY_INT, 0);
         sDefaults.putInt(KEY_IMS_DTMF_TONE_DELAY_INT, 0);
         sDefaults.putInt(KEY_CDMA_DTMF_TONE_DELAY_INT, 100);
+        sDefaults.putBoolean(KEY_CALL_FORWARDING_MAP_NON_NUMBER_TO_VOICEMAIL_BOOL, false);
         sDefaults.putInt(KEY_CDMA_3WAYCALL_FLASH_DELAY_INT , 0);
         sDefaults.putBoolean(KEY_SUPPORT_CONFERENCE_CALL_BOOL, true);
         sDefaults.putBoolean(KEY_SUPPORT_IMS_CONFERENCE_CALL_BOOL, true);
@@ -1726,6 +1769,7 @@ public class CarrierConfigManager {
         sDefaults.putString(KEY_CARRIER_NAME_STRING, "");
         sDefaults.putBoolean(KEY_SUPPORT_DIRECT_FDN_DIALING_BOOL, false);
         sDefaults.putBoolean(KEY_CARRIER_DEFAULT_DATA_ROAMING_ENABLED_BOOL, false);
+        sDefaults.putBoolean(KEY_SKIP_CF_FAIL_TO_DISABLE_DIALOG_BOOL, false);
 
         // MMS defaults
         sDefaults.putBoolean(KEY_MMS_ALIAS_ENABLED_BOOL, false);
@@ -1827,6 +1871,8 @@ public class CarrierConfigManager {
         sDefaults.putInt(KEY_EMERGENCY_NOTIFICATION_DELAY_INT, -1);
         sDefaults.putBoolean(KEY_ALLOW_USSD_REQUESTS_VIA_TELEPHONY_MANAGER_BOOL, true);
         sDefaults.putBoolean(KEY_SUPPORT_3GPP_CALL_FORWARDING_WHILE_ROAMING_BOOL, true);
+        sDefaults.putBoolean(KEY_DISPLAY_VOICEMAIL_NUMBER_AS_DEFAULT_CALL_FORWARDING_NUMBER_BOOL,
+                false);
         sDefaults.putBoolean(KEY_NOTIFY_INTERNATIONAL_CALL_ON_WFC_BOOL, false);
         sDefaults.putStringArray(KEY_CALL_FORWARDING_BLOCKS_WHILE_ROAMING_STRING_ARRAY,
                 null);
@@ -1840,6 +1886,7 @@ public class CarrierConfigManager {
         sDefaults.putStringArray(KEY_NON_ROAMING_OPERATOR_STRING_ARRAY, null);
         sDefaults.putStringArray(KEY_ROAMING_OPERATOR_STRING_ARRAY, null);
         sDefaults.putBoolean(KEY_SHOW_IMS_REGISTRATION_STATUS_BOOL, false);
+        sDefaults.putBoolean(KEY_DISABLE_CHARGE_INDICATION_BOOL, false);
     }
 
     /**

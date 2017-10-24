@@ -36,11 +36,15 @@ import android.widget.PopupWindow;
 import com.android.internal.R;
 import com.android.internal.util.Preconditions;
 
+import java.util.Timer;
+import java.util.TimerTask;
+
 /**
  * Android magnifier widget. Can be used by any view which is attached to window.
  */
 public final class Magnifier {
     private static final String LOG_TAG = "magnifier";
+    private static final int MAGNIFIER_REFRESH_RATE_MS = 33; // ~30fps
     // The view for which this magnifier is attached.
     private final View mView;
     // The window containing the magnifier.
@@ -58,6 +62,10 @@ public final class Magnifier {
     // The callback of the pixel copy request will be invoked on this Handler when
     // the copy is finished.
     private final Handler mPixelCopyHandler = Handler.getMain();
+    // Current magnification scale.
+    private float mScale;
+    // Timer used to schedule the copy task.
+    private Timer mTimer;
 
     /**
      * Initializes a magnifier.
@@ -69,6 +77,7 @@ public final class Magnifier {
         mView = Preconditions.checkNotNull(view);
         final Context context = mView.getContext();
         final View content = LayoutInflater.from(context).inflate(R.layout.magnifier, null);
+        content.findViewById(R.id.magnifier_inner).setClipToOutline(true);
         mWindowWidth = context.getResources().getDimensionPixelSize(R.dimen.magnifier_width);
         mWindowHeight = context.getResources().getDimensionPixelSize(R.dimen.magnifier_height);
         final float elevation = context.getResources().getDimension(R.dimen.magnifier_elevation);
@@ -88,16 +97,47 @@ public final class Magnifier {
     /**
      * Shows the magnifier on the screen.
      *
-     * @param centerXOnScreen horizontal coordinate of the center point of the magnifier source
-     * @param centerYOnScreen vertical coordinate of the center point of the magnifier source
-     * @param scale the scale at which the magnifier zooms on the source content
+     * @param xPosInView horizontal coordinate of the center point of the magnifier source relative
+     *        to the view. The lower end is clamped to 0
+     * @param yPosInView vertical coordinate of the center point of the magnifier source
+     *        relative to the view. The lower end is clamped to 0
+     * @param scale the scale at which the magnifier zooms on the source content. The
+     *        lower end is clamped to 1 and the higher end to 4
      */
-    public void show(@FloatRange(from=0) float centerXOnScreen,
-            @FloatRange(from=0) float centerYOnScreen,
-            @FloatRange(from=1, to=10) float scale) {
-        maybeResizeBitmap(scale);
-        configureCoordinates(centerXOnScreen, centerYOnScreen);
-        performPixelCopy();
+    public void show(@FloatRange(from=0) float xPosInView,
+            @FloatRange(from=0) float yPosInView,
+            @FloatRange(from=1, to=4) float scale) {
+        if (scale > 4) {
+            scale = 4;
+        }
+
+        if (scale < 1) {
+            scale = 1;
+        }
+
+        if (xPosInView < 0) {
+            xPosInView = 0;
+        }
+
+        if (yPosInView < 0) {
+            yPosInView = 0;
+        }
+
+        if (mScale != scale) {
+            resizeBitmap(scale);
+        }
+        mScale = scale;
+        configureCoordinates(xPosInView, yPosInView);
+
+        if (mTimer == null) {
+            mTimer = new Timer();
+            mTimer.schedule(new TimerTask() {
+                @Override
+                public void run() {
+                    performPixelCopy();
+                }
+            }, 0 /* delay */, MAGNIFIER_REFRESH_RATE_MS);
+        }
 
         if (mWindow.isShowing()) {
             mWindow.update(mWindowCoords.x, mWindowCoords.y, mWindow.getWidth(),
@@ -113,6 +153,12 @@ public final class Magnifier {
      */
     public void dismiss() {
         mWindow.dismiss();
+
+        if (mTimer != null) {
+            mTimer.cancel();
+            mTimer.purge();
+            mTimer = null;
+        }
     }
 
     /**
@@ -129,39 +175,40 @@ public final class Magnifier {
         return mWindowWidth;
     }
 
-    private void maybeResizeBitmap(float scale) {
+    private void resizeBitmap(float scale) {
         final int bitmapWidth = (int) (mWindowWidth / scale);
         final int bitmapHeight = (int) (mWindowHeight / scale);
-        if (mBitmap.getWidth() != bitmapWidth || mBitmap.getHeight() != bitmapHeight) {
-            mBitmap.reconfigure(bitmapWidth, bitmapHeight, Bitmap.Config.ARGB_8888);
-            getImageView().setImageBitmap(mBitmap);
-        }
+        mBitmap.reconfigure(bitmapWidth, bitmapHeight, Bitmap.Config.ARGB_8888);
+        getImageView().setImageBitmap(mBitmap);
     }
 
-    private void configureCoordinates(float posXOnScreen, float posYOnScreen) {
+    private void configureCoordinates(float xPosInView, float yPosInView) {
+        final int[] coordinatesOnScreen = new int[2];
+        mView.getLocationOnScreen(coordinatesOnScreen);
+        final float posXOnScreen = xPosInView + coordinatesOnScreen[0];
+        final float posYOnScreen = yPosInView + coordinatesOnScreen[1];
+
         mCenterZoomCoords.x = (int) posXOnScreen;
         mCenterZoomCoords.y = (int) posYOnScreen;
 
         final int verticalMagnifierOffset = mView.getContext().getResources().getDimensionPixelSize(
                 R.dimen.magnifier_offset);
-        final int availableTopSpace = (mCenterZoomCoords.y - mWindowHeight / 2)
-                - verticalMagnifierOffset - (mBitmap.getHeight() / 2);
-
         mWindowCoords.x = mCenterZoomCoords.x - mWindowWidth / 2;
-        mWindowCoords.y = mCenterZoomCoords.y - mWindowHeight / 2
-                + verticalMagnifierOffset * (availableTopSpace > 0 ? -1 : 1);
+        mWindowCoords.y = mCenterZoomCoords.y - mWindowHeight / 2 - verticalMagnifierOffset;
     }
 
     private void performPixelCopy() {
-        int startX = mCenterZoomCoords.x - mBitmap.getWidth() / 2;
+        final int startY = mCenterZoomCoords.y - mBitmap.getHeight() / 2;
+        int rawStartX = mCenterZoomCoords.x - mBitmap.getWidth() / 2;
+
         // Clamp startX value to avoid distorting the rendering of the magnifier content.
-        if (startX < 0) {
-            startX = 0;
-        } else if (startX + mBitmap.getWidth() > mView.getWidth()) {
-            startX = mView.getWidth() - mBitmap.getWidth();
+        if (rawStartX < 0) {
+            rawStartX = 0;
+        } else if (rawStartX + mBitmap.getWidth() > mView.getWidth()) {
+            rawStartX = mView.getWidth() - mBitmap.getWidth();
         }
 
-        final int startY = mCenterZoomCoords.y - mBitmap.getHeight() / 2;
+        final int startX = rawStartX;
         final ViewRootImpl viewRootImpl = mView.getViewRootImpl();
 
         if (viewRootImpl != null && viewRootImpl.mSurface != null

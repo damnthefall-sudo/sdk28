@@ -165,7 +165,7 @@ public class Editor {
     private static final int MENU_ITEM_ORDER_PASTE_AS_PLAIN_TEXT = 11;
     private static final int MENU_ITEM_ORDER_PROCESS_TEXT_INTENT_ACTIONS_START = 100;
 
-    private static final float MAGNIFIER_ZOOM = 1.5f;
+    private static final float MAGNIFIER_ZOOM = 1.25f;
     @IntDef({MagnifierHandleTrigger.SELECTION_START,
             MagnifierHandleTrigger.SELECTION_END,
             MagnifierHandleTrigger.INSERTION})
@@ -3888,7 +3888,7 @@ public class Editor {
                 if (selected == null || selected.isEmpty()) {
                     menu.add(Menu.NONE, TextView.ID_AUTOFILL, MENU_ITEM_ORDER_AUTOFILL,
                             com.android.internal.R.string.autofill)
-                            .setShowAsAction(MenuItem.SHOW_AS_OVERFLOW_ALWAYS);
+                            .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER);
                 }
             }
 
@@ -4539,23 +4539,21 @@ public class Editor {
             final Layout layout = mTextView.getLayout();
             final int lineNumber = layout.getLineForOffset(offset);
             // Horizontally snap to character offset.
-            final float xPosInView = getHorizontal(mTextView.getLayout(), offset);
+            final float xPosInView = getHorizontal(mTextView.getLayout(), offset)
+                    + mTextView.getTotalPaddingLeft() - mTextView.getScrollX();
             // Vertically snap to middle of current line.
             final float yPosInView = (mTextView.getLayout().getLineTop(lineNumber)
-                    + mTextView.getLayout().getLineBottom(lineNumber)) / 2.0f;
-            final int[] coordinatesOnScreen = new int[2];
-            mTextView.getLocationOnScreen(coordinatesOnScreen);
-            final float centerXOnScreen = xPosInView + mTextView.getTotalPaddingLeft()
-                    - mTextView.getScrollX() + coordinatesOnScreen[0];
-            final float centerYOnScreen = yPosInView + mTextView.getTotalPaddingTop()
-                    - mTextView.getScrollY() + coordinatesOnScreen[1];
+                    + mTextView.getLayout().getLineBottom(lineNumber)) / 2.0f
+                    + mTextView.getTotalPaddingTop() - mTextView.getScrollY();
 
-            mMagnifier.show(centerXOnScreen, centerYOnScreen, MAGNIFIER_ZOOM);
+            suspendBlink();
+            mMagnifier.show(xPosInView, yPosInView, MAGNIFIER_ZOOM);
         }
 
         protected final void dismissMagnifier() {
             if (mMagnifier != null) {
                 mMagnifier.dismiss();
+                resumeBlink();
             }
         }
 

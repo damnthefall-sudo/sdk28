@@ -16,10 +16,7 @@
 
 package com.android.server.am;
 
-import android.app.ActivityManager;
 import android.content.Context;
-import android.os.Handler;
-import android.os.Message;
 import android.os.SystemClock;
 import android.util.Slog;
 import android.view.WindowManager;
@@ -28,37 +25,33 @@ import android.widget.Toast;
 import com.android.internal.R;
 
 /**
- *  Helper to manage showing/hiding a image to notify them that they are entering
- *  or exiting lock-to-app mode.
+ *  Helper to manage showing/hiding a image to notify them that they are entering or exiting screen
+ *  pinning mode. All exposed methods should be called from a handler thread.
  */
 public class LockTaskNotify {
     private static final String TAG = "LockTaskNotify";
     private static final long SHOW_TOAST_MINIMUM_INTERVAL = 1000;
 
     private final Context mContext;
-    private final H mHandler;
     private Toast mLastToast;
     private long mLastShowToastTime;
 
     public LockTaskNotify(Context context) {
         mContext = context;
-        mHandler = new H();
     }
 
-    public void showToast(int lockTaskModeState) {
-        mHandler.obtainMessage(H.SHOW_TOAST, lockTaskModeState, 0 /* Not used */).sendToTarget();
+    /** Show "Screen pinned" toast. */
+    void showPinningStartToast() {
+        makeAllUserToastAndShow(R.string.lock_to_app_start);
     }
 
-    public void handleShowToast(int lockTaskModeState) {
-        String text = null;
-        if (lockTaskModeState == ActivityManager.LOCK_TASK_MODE_LOCKED) {
-            text = mContext.getString(R.string.lock_to_app_toast_locked);
-        } else if (lockTaskModeState == ActivityManager.LOCK_TASK_MODE_PINNED) {
-            text = mContext.getString(R.string.lock_to_app_toast);
-        }
-        if (text == null) {
-            return;
-        }
+    /** Show "Screen unpinned" toast. */
+    void showPinningExitToast() {
+        makeAllUserToastAndShow(R.string.lock_to_app_exit);
+    }
+
+    /** Show a toast that describes the gesture the user should use to escape pinned mode. */
+    void showEscapeToast() {
         long showToastTime = SystemClock.elapsedRealtime();
         if ((showToastTime - mLastShowToastTime) < SHOW_TOAST_MINIMUM_INTERVAL) {
             Slog.i(TAG, "Ignore toast since it is requested in very short interval.");
@@ -67,36 +60,15 @@ public class LockTaskNotify {
         if (mLastToast != null) {
             mLastToast.cancel();
         }
-        mLastToast = makeAllUserToastAndShow(text);
+        mLastToast = makeAllUserToastAndShow(R.string.lock_to_app_toast);
         mLastShowToastTime = showToastTime;
     }
 
-    public void show(boolean starting) {
-        int showString = R.string.lock_to_app_exit;
-        if (starting) {
-            showString = R.string.lock_to_app_start;
-        }
-        makeAllUserToastAndShow(mContext.getString(showString));
-    }
-
-    private Toast makeAllUserToastAndShow(String text) {
-        Toast toast = Toast.makeText(mContext, text, Toast.LENGTH_LONG);
+    private Toast makeAllUserToastAndShow(int resId) {
+        Toast toast = Toast.makeText(mContext, resId, Toast.LENGTH_LONG);
         toast.getWindowParams().privateFlags |=
                 WindowManager.LayoutParams.PRIVATE_FLAG_SHOW_FOR_ALL_USERS;
         toast.show();
         return toast;
-    }
-
-    private final class H extends Handler {
-        private static final int SHOW_TOAST = 3;
-
-        @Override
-        public void handleMessage(Message msg) {
-            switch(msg.what) {
-                case SHOW_TOAST:
-                    handleShowToast(msg.arg1);
-                    break;
-            }
-        }
     }
 }

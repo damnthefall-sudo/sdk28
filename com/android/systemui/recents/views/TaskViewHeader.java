@@ -17,8 +17,6 @@
 package com.android.systemui.recents.views;
 
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_UNDEFINED;
-import static android.app.WindowConfiguration.WINDOWING_MODE_FREEFORM;
-import static android.app.WindowConfiguration.WINDOWING_MODE_FULLSCREEN;
 import static android.app.WindowConfiguration.WINDOWING_MODE_UNDEFINED;
 
 import android.animation.Animator;
@@ -33,7 +31,6 @@ import android.graphics.Color;
 import android.graphics.ColorFilter;
 import android.graphics.Paint;
 import android.graphics.PixelFormat;
-import android.graphics.PorterDuff;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.RippleDrawable;
@@ -59,8 +56,10 @@ import com.android.systemui.recents.events.EventBus;
 import com.android.systemui.recents.events.activity.LaunchTaskEvent;
 import com.android.systemui.recents.events.ui.ShowApplicationInfoEvent;
 import com.android.systemui.recents.misc.SystemServicesProxy;
-import com.android.systemui.recents.misc.Utilities;
-import com.android.systemui.recents.model.Task;
+import com.android.systemui.shared.system.ActivityManagerWrapper;
+import com.android.systemui.shared.system.PackageManagerWrapper;
+import com.android.systemui.shared.recents.utilities.Utilities;
+import com.android.systemui.shared.recents.model.Task;
 
 /* The task bar view */
 public class TaskViewHeader extends FrameLayout
@@ -164,8 +163,6 @@ public class TaskViewHeader extends FrameLayout
     float mDimAlpha;
     Drawable mLightDismissDrawable;
     Drawable mDarkDismissDrawable;
-    Drawable mLightFreeformIcon;
-    Drawable mDarkFreeformIcon;
     Drawable mLightFullscreenIcon;
     Drawable mDarkFullscreenIcon;
     Drawable mLightInfoIcon;
@@ -173,6 +170,8 @@ public class TaskViewHeader extends FrameLayout
     int mTaskBarViewLightTextColor;
     int mTaskBarViewDarkTextColor;
     int mDisabledTaskBarBackgroundColor;
+    String mDismissDescFormat;
+    String mAppInfoDescFormat;
     int mTaskWindowingMode = WINDOWING_MODE_UNDEFINED;
 
     // Header background
@@ -215,14 +214,15 @@ public class TaskViewHeader extends FrameLayout
         mHighlightHeight = res.getDimensionPixelSize(R.dimen.recents_task_view_highlight);
         mTaskBarViewLightTextColor = context.getColor(R.color.recents_task_bar_light_text_color);
         mTaskBarViewDarkTextColor = context.getColor(R.color.recents_task_bar_dark_text_color);
-        mLightFreeformIcon = context.getDrawable(R.drawable.recents_move_task_freeform_light);
-        mDarkFreeformIcon = context.getDrawable(R.drawable.recents_move_task_freeform_dark);
         mLightFullscreenIcon = context.getDrawable(R.drawable.recents_move_task_fullscreen_light);
         mDarkFullscreenIcon = context.getDrawable(R.drawable.recents_move_task_fullscreen_dark);
         mLightInfoIcon = context.getDrawable(R.drawable.recents_info_light);
         mDarkInfoIcon = context.getDrawable(R.drawable.recents_info_dark);
         mDisabledTaskBarBackgroundColor =
                 context.getColor(R.color.recents_task_bar_disabled_background_color);
+        mDismissDescFormat = mContext.getString(
+                R.string.accessibility_recents_item_will_be_dismissed);
+        mAppInfoDescFormat = mContext.getString(R.string.accessibility_recents_item_open_app_info);
 
         // Configure the background and dim
         mBackground = new HighlightColorDrawable();
@@ -249,9 +249,6 @@ public class TaskViewHeader extends FrameLayout
         mIconView.setOnLongClickListener(this);
         mTitleView = findViewById(R.id.title);
         mDismissButton = findViewById(R.id.dismiss_task);
-        if (ssp.hasFreeformWorkspaceSupport()) {
-            mMoveTaskButton = findViewById(R.id.move_task);
-        }
 
         onConfigurationChanged();
     }
@@ -340,20 +337,6 @@ public class TaskViewHeader extends FrameLayout
         boolean showMoveIcon = true;
         boolean showDismissIcon = true;
         int rightInset = width - getMeasuredWidth();
-
-        if (mTask != null && mTask.isFreeformTask()) {
-            // For freeform tasks, we always show the app icon, and only show the title, move-task
-            // icon, and the dismiss icon if there is room
-            int appIconWidth = mIconView.getMeasuredWidth();
-            int titleWidth = (int) mTitleView.getPaint().measureText(mTask.title);
-            int dismissWidth = mDismissButton.getMeasuredWidth();
-            int moveTaskWidth = mMoveTaskButton != null
-                    ? mMoveTaskButton.getMeasuredWidth()
-                    : 0;
-            showTitle = width >= (appIconWidth + dismissWidth + moveTaskWidth + titleWidth);
-            showMoveIcon = width >= (appIconWidth + dismissWidth + moveTaskWidth);
-            showDismissIcon = width >= (appIconWidth + dismissWidth);
-        }
 
         mTitleView.setVisibility(showTitle ? View.VISIBLE : View.INVISIBLE);
         if (mMoveTaskButton != null) {
@@ -477,44 +460,14 @@ public class TaskViewHeader extends FrameLayout
                 mTaskBarViewLightTextColor : mTaskBarViewDarkTextColor);
         mDismissButton.setImageDrawable(t.useLightOnPrimaryColor ?
                 mLightDismissDrawable : mDarkDismissDrawable);
-        mDismissButton.setContentDescription(t.dismissDescription);
+        mDismissButton.setContentDescription(String.format(mDismissDescFormat, t.titleDescription));
         mDismissButton.setOnClickListener(this);
         mDismissButton.setClickable(false);
         ((RippleDrawable) mDismissButton.getBackground()).setForceSoftware(true);
 
-        // When freeform workspaces are enabled, then update the move-task button depending on the
-        // current task
-        if (mMoveTaskButton != null) {
-            if (t.isFreeformTask()) {
-                mTaskWindowingMode = WINDOWING_MODE_FULLSCREEN;
-                mMoveTaskButton.setImageDrawable(t.useLightOnPrimaryColor
-                        ? mLightFullscreenIcon
-                        : mDarkFullscreenIcon);
-            } else {
-                mTaskWindowingMode = WINDOWING_MODE_FREEFORM;
-                mMoveTaskButton.setImageDrawable(t.useLightOnPrimaryColor
-                        ? mLightFreeformIcon
-                        : mDarkFreeformIcon);
-            }
-            mMoveTaskButton.setOnClickListener(this);
-            mMoveTaskButton.setClickable(false);
-            ((RippleDrawable) mMoveTaskButton.getBackground()).setForceSoftware(true);
-        }
-
-        if (Recents.getDebugFlags().isFastToggleRecentsEnabled()) {
-            if (mFocusTimerIndicator == null) {
-                mFocusTimerIndicator = (ProgressBar) Utilities.findViewStubById(this,
-                        R.id.focus_timer_indicator_stub).inflate();
-            }
-            mFocusTimerIndicator.getProgressDrawable()
-                    .setColorFilter(
-                            getSecondaryColor(t.colorPrimary, t.useLightOnPrimaryColor),
-                            PorterDuff.Mode.SRC_IN);
-        }
-
         // In accessibility, a single click on the focused app info button will show it
         if (touchExplorationEnabled) {
-            mIconView.setContentDescription(t.appInfoDescription);
+            mIconView.setContentDescription(String.format(mAppInfoDescFormat, t.titleDescription));
             mIconView.setOnClickListener(this);
             mIconView.setClickable(true);
         }
@@ -651,7 +604,7 @@ public class TaskViewHeader extends FrameLayout
         SystemServicesProxy ssp = Recents.getSystemServices();
         ComponentName cn = mTask.key.getComponent();
         int userId = mTask.key.userId;
-        ActivityInfo activityInfo = ssp.getActivityInfo(cn, userId);
+        ActivityInfo activityInfo = PackageManagerWrapper.getInstance().getActivityInfo(cn, userId);
         if (activityInfo == null) {
             return;
         }
@@ -671,11 +624,12 @@ public class TaskViewHeader extends FrameLayout
         }
 
         // Update the overlay contents for the current app
-        mAppTitleView.setText(ssp.getBadgedApplicationLabel(activityInfo.applicationInfo, userId));
+        mAppTitleView.setText(ActivityManagerWrapper.getInstance().getBadgedApplicationLabel(
+                activityInfo.applicationInfo, userId));
         mAppTitleView.setTextColor(mTask.useLightOnPrimaryColor ?
                 mTaskBarViewLightTextColor : mTaskBarViewDarkTextColor);
-        mAppIconView.setImageDrawable(ssp.getBadgedApplicationIcon(activityInfo.applicationInfo,
-                userId));
+        mAppIconView.setImageDrawable(ActivityManagerWrapper.getInstance().getBadgedApplicationIcon(
+                activityInfo.applicationInfo, userId));
         mAppInfoView.setImageDrawable(mTask.useLightOnPrimaryColor
                 ? mLightInfoIcon
                 : mDarkInfoIcon);

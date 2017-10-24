@@ -113,15 +113,13 @@ public class MbmsDownloadServiceBase extends IMbmsDownloadService.Stub {
     @Override
     public final int initialize(final int subscriptionId,
             final IMbmsDownloadSessionCallback callback) throws RemoteException {
-        final int uid = Binder.getCallingUid();
-        callback.asBinder().linkToDeath(new DeathRecipient() {
-            @Override
-            public void binderDied() {
-                onAppCallbackDied(uid, subscriptionId);
-            }
-        }, 0);
+        if (callback == null) {
+            throw new NullPointerException("Callback must not be null");
+        }
 
-        return initialize(subscriptionId, new MbmsDownloadSessionCallback() {
+        final int uid = Binder.getCallingUid();
+
+        int result = initialize(subscriptionId, new MbmsDownloadSessionCallback() {
             @Override
             public void onError(int errorCode, String message) {
                 try {
@@ -149,6 +147,17 @@ public class MbmsDownloadServiceBase extends IMbmsDownloadService.Stub {
                 }
             }
         });
+
+        if (result == MbmsErrors.SUCCESS) {
+            callback.asBinder().linkToDeath(new DeathRecipient() {
+                @Override
+                public void binderDied() {
+                    onAppCallbackDied(uid, subscriptionId);
+                }
+            }, 0);
+        }
+
+        return result;
     }
 
     /**
@@ -240,16 +249,12 @@ public class MbmsDownloadServiceBase extends IMbmsDownloadService.Stub {
     public final int registerStateCallback(final DownloadRequest downloadRequest,
             final IDownloadStateCallback callback, int flags) throws RemoteException {
         final int uid = Binder.getCallingUid();
-        DeathRecipient deathRecipient = new DeathRecipient() {
-            @Override
-            public void binderDied() {
-                onAppCallbackDied(uid, downloadRequest.getSubscriptionId());
-                mDownloadCallbackBinderMap.remove(callback.asBinder());
-                mDownloadCallbackDeathRecipients.remove(callback.asBinder());
-            }
-        };
-        mDownloadCallbackDeathRecipients.put(callback.asBinder(), deathRecipient);
-        callback.asBinder().linkToDeath(deathRecipient, 0);
+        if (downloadRequest == null) {
+            throw new NullPointerException("Download request must not be null");
+        }
+        if (callback == null) {
+            throw new NullPointerException("Callback must not be null");
+        }
 
         DownloadStateCallback exposedCallback = new FilteredDownloadStateCallback(callback, flags) {
             @Override
@@ -258,9 +263,23 @@ public class MbmsDownloadServiceBase extends IMbmsDownloadService.Stub {
             }
         };
 
-        mDownloadCallbackBinderMap.put(callback.asBinder(), exposedCallback);
+        int result = registerStateCallback(downloadRequest, exposedCallback);
 
-        return registerStateCallback(downloadRequest, exposedCallback);
+        if (result == MbmsErrors.SUCCESS) {
+            DeathRecipient deathRecipient = new DeathRecipient() {
+                @Override
+                public void binderDied() {
+                    onAppCallbackDied(uid, downloadRequest.getSubscriptionId());
+                    mDownloadCallbackBinderMap.remove(callback.asBinder());
+                    mDownloadCallbackDeathRecipients.remove(callback.asBinder());
+                }
+            };
+            mDownloadCallbackDeathRecipients.put(callback.asBinder(), deathRecipient);
+            callback.asBinder().linkToDeath(deathRecipient, 0);
+            mDownloadCallbackBinderMap.put(callback.asBinder(), exposedCallback);
+        }
+
+        return result;
     }
 
     /**
@@ -292,6 +311,13 @@ public class MbmsDownloadServiceBase extends IMbmsDownloadService.Stub {
     public final int unregisterStateCallback(
             final DownloadRequest downloadRequest, final IDownloadStateCallback callback)
             throws RemoteException {
+        if (downloadRequest == null) {
+            throw new NullPointerException("Download request must not be null");
+        }
+        if (callback == null) {
+            throw new NullPointerException("Callback must not be null");
+        }
+
         DeathRecipient deathRecipient =
                 mDownloadCallbackDeathRecipients.remove(callback.asBinder());
         if (deathRecipient == null) {

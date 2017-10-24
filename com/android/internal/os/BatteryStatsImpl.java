@@ -63,6 +63,7 @@ import android.util.Slog;
 import android.util.SparseArray;
 import android.util.SparseIntArray;
 import android.util.SparseLongArray;
+import android.util.StatsLog;
 import android.util.TimeUtils;
 import android.util.Xml;
 import android.view.Display;
@@ -119,7 +120,7 @@ public class BatteryStatsImpl extends BatteryStats {
     private static final int MAGIC = 0xBA757475; // 'BATSTATS'
 
     // Current on-disk Parcel version
-    private static final int VERSION = 167 + (USE_OLD_HISTORY ? 1000 : 0);
+    private static final int VERSION = 168 + (USE_OLD_HISTORY ? 1000 : 0);
 
     // Maximum number of items we will record in the history.
     private static final int MAX_HISTORY_ITEMS;
@@ -681,17 +682,17 @@ public class BatteryStatsImpl extends BatteryStats {
     }
 
     @Override
-    public long getMahDischarge(int which) {
+    public long getUahDischarge(int which) {
         return mDischargeCounter.getCountLocked(which);
     }
 
     @Override
-    public long getMahDischargeScreenOff(int which) {
+    public long getUahDischargeScreenOff(int which) {
         return mDischargeScreenOffCounter.getCountLocked(which);
     }
 
     @Override
-    public long getMahDischargeScreenDoze(int which) {
+    public long getUahDischargeScreenDoze(int which) {
         return mDischargeScreenDozeCounter.getCountLocked(which);
     }
 
@@ -3588,7 +3589,7 @@ public class BatteryStatsImpl extends BatteryStats {
 
     public void updateTimeBasesLocked(boolean unplugged, int screenState, long uptime,
             long realtime) {
-        final boolean screenOff = isScreenOff(screenState) || isScreenDoze(screenState);
+        final boolean screenOff = !isScreenOn(screenState);
         final boolean updateOnBatteryTimeBase = unplugged != mOnBatteryTimeBase.isRunning();
         final boolean updateOnBatteryScreenOffTimeBase =
                 (unplugged && screenOff) != mOnBatteryScreenOffTimeBase.isRunning();
@@ -4030,6 +4031,7 @@ public class BatteryStatsImpl extends BatteryStats {
         }
         addHistoryEventLocked(elapsedRealtime, uptime, HistoryItem.EVENT_LONG_WAKE_LOCK_START,
                 historyName, uid);
+        StatsLog.write(StatsLog.LONG_PARTIAL_WAKELOCK_STATE_CHANGED, uid, name, historyName, 1);
     }
 
     public void noteLongPartialWakelockFinish(String name, String historyName, int uid) {
@@ -4045,6 +4047,7 @@ public class BatteryStatsImpl extends BatteryStats {
         }
         addHistoryEventLocked(elapsedRealtime, uptime, HistoryItem.EVENT_LONG_WAKE_LOCK_FINISH,
                 historyName, uid);
+        StatsLog.write(StatsLog.LONG_PARTIAL_WAKELOCK_STATE_CHANGED, uid, name, historyName, 0);
     }
 
     void aggregateLastWakeupUptimeLocked(long uptimeMs) {
@@ -4403,6 +4406,7 @@ public class BatteryStatsImpl extends BatteryStats {
                 mPowerSaveModeEnabledTimer.stopRunningLocked(elapsedRealtime);
             }
             addHistoryRecordLocked(elapsedRealtime, uptime);
+            StatsLog.write(StatsLog.BATTERY_SAVER_MODE_STATE_CHANGED, enabled ? 1 : 0);
         }
     }
 
@@ -5427,6 +5431,10 @@ public class BatteryStatsImpl extends BatteryStats {
                 elapsedRealtimeUs, which);
     }
 
+    @Override public Timer getScreenBrightnessTimer(int brightnessBin) {
+        return mScreenBrightnessTimer[brightnessBin];
+    }
+
     @Override public long getInteractiveTime(long elapsedRealtimeUs, int which) {
         return mInteractiveTimer.getTotalTimeLocked(elapsedRealtimeUs, which);
     }
@@ -5520,8 +5528,16 @@ public class BatteryStatsImpl extends BatteryStats {
                 elapsedRealtimeUs, which);
     }
 
+    @Override public Timer getPhoneSignalScanningTimer() {
+        return mPhoneSignalScanningTimer;
+    }
+
     @Override public int getPhoneSignalStrengthCount(int strengthBin, int which) {
         return mPhoneSignalStrengthsTimer[strengthBin].getCountLocked(which);
+    }
+
+    @Override public Timer getPhoneSignalStrengthTimer(int strengthBin) {
+        return mPhoneSignalStrengthsTimer[strengthBin];
     }
 
     @Override public long getPhoneDataConnectionTime(int dataType,
@@ -5532,6 +5548,10 @@ public class BatteryStatsImpl extends BatteryStats {
 
     @Override public int getPhoneDataConnectionCount(int dataType, int which) {
         return mPhoneDataConnectionsTimer[dataType].getCountLocked(which);
+    }
+
+    @Override public Timer getPhoneDataConnectionTimer(int dataType) {
+        return mPhoneDataConnectionsTimer[dataType];
     }
 
     @Override public long getMobileRadioActiveTime(long elapsedRealtimeUs, int which) {
@@ -5572,6 +5592,10 @@ public class BatteryStatsImpl extends BatteryStats {
         return mWifiStateTimer[wifiState].getCountLocked(which);
     }
 
+    @Override public Timer getWifiStateTimer(int wifiState) {
+        return mWifiStateTimer[wifiState];
+    }
+
     @Override public long getWifiSupplStateTime(int state,
             long elapsedRealtimeUs, int which) {
         return mWifiSupplStateTimer[state].getTotalTimeLocked(
@@ -5582,6 +5606,10 @@ public class BatteryStatsImpl extends BatteryStats {
         return mWifiSupplStateTimer[state].getCountLocked(which);
     }
 
+    @Override public Timer getWifiSupplStateTimer(int state) {
+        return mWifiSupplStateTimer[state];
+    }
+
     @Override public long getWifiSignalStrengthTime(int strengthBin,
             long elapsedRealtimeUs, int which) {
         return mWifiSignalStrengthsTimer[strengthBin].getTotalTimeLocked(
@@ -5590,6 +5618,10 @@ public class BatteryStatsImpl extends BatteryStats {
 
     @Override public int getWifiSignalStrengthCount(int strengthBin, int which) {
         return mWifiSignalStrengthsTimer[strengthBin].getCountLocked(which);
+    }
+
+    @Override public Timer getWifiSignalStrengthTimer(int strengthBin) {
+        return mWifiSignalStrengthsTimer[strengthBin];
     }
 
     @Override
@@ -6152,17 +6184,25 @@ public class BatteryStatsImpl extends BatteryStats {
 
         public void noteAudioTurnedOnLocked(long elapsedRealtimeMs) {
             createAudioTurnedOnTimerLocked().startRunningLocked(elapsedRealtimeMs);
+            // TODO(statsd): Possibly use a worksource instead of a uid.
+            StatsLog.write(StatsLog.AUDIO_STATE_CHANGED, getUid(), 1);
         }
 
         public void noteAudioTurnedOffLocked(long elapsedRealtimeMs) {
             if (mAudioTurnedOnTimer != null) {
                 mAudioTurnedOnTimer.stopRunningLocked(elapsedRealtimeMs);
+                if (!mAudioTurnedOnTimer.isRunningLocked()) { // only tell statsd if truly stopped
+                    // TODO(statsd): Possibly use a worksource instead of a uid.
+                    StatsLog.write(StatsLog.AUDIO_STATE_CHANGED, getUid(), 0);
+                }
             }
         }
 
         public void noteResetAudioLocked(long elapsedRealtimeMs) {
             if (mAudioTurnedOnTimer != null) {
                 mAudioTurnedOnTimer.stopAllRunningLocked(elapsedRealtimeMs);
+                // TODO(statsd): Possibly use a worksource instead of a uid.
+                StatsLog.write(StatsLog.AUDIO_STATE_CHANGED, getUid(), 0);
             }
         }
 
@@ -6176,17 +6216,25 @@ public class BatteryStatsImpl extends BatteryStats {
 
         public void noteVideoTurnedOnLocked(long elapsedRealtimeMs) {
             createVideoTurnedOnTimerLocked().startRunningLocked(elapsedRealtimeMs);
+            // TODO(statsd): Possibly use a worksource instead of a uid.
+            StatsLog.write(StatsLog.MEDIA_CODEC_ACTIVITY_CHANGED, getUid(), 1);
         }
 
         public void noteVideoTurnedOffLocked(long elapsedRealtimeMs) {
             if (mVideoTurnedOnTimer != null) {
                 mVideoTurnedOnTimer.stopRunningLocked(elapsedRealtimeMs);
+                if (!mVideoTurnedOnTimer.isRunningLocked()) { // only tell statsd if truly stopped
+                    // TODO(statsd): Possibly use a worksource instead of a uid.
+                    StatsLog.write(StatsLog.MEDIA_CODEC_ACTIVITY_CHANGED, getUid(), 0);
+                }
             }
         }
 
         public void noteResetVideoLocked(long elapsedRealtimeMs) {
             if (mVideoTurnedOnTimer != null) {
                 mVideoTurnedOnTimer.stopAllRunningLocked(elapsedRealtimeMs);
+                // TODO(statsd): Possibly use a worksource instead of a uid.
+                StatsLog.write(StatsLog.MEDIA_CODEC_ACTIVITY_CHANGED, getUid(), 0);
             }
         }
 
@@ -6200,17 +6248,25 @@ public class BatteryStatsImpl extends BatteryStats {
 
         public void noteFlashlightTurnedOnLocked(long elapsedRealtimeMs) {
             createFlashlightTurnedOnTimerLocked().startRunningLocked(elapsedRealtimeMs);
+            // TODO(statsd): Possibly use a worksource instead of a uid.
+            StatsLog.write(StatsLog.FLASHLIGHT_STATE_CHANGED, getUid(), 1);
         }
 
         public void noteFlashlightTurnedOffLocked(long elapsedRealtimeMs) {
             if (mFlashlightTurnedOnTimer != null) {
                 mFlashlightTurnedOnTimer.stopRunningLocked(elapsedRealtimeMs);
+                if (!mFlashlightTurnedOnTimer.isRunningLocked()) {
+                    // TODO(statsd): Possibly use a worksource instead of a uid.
+                    StatsLog.write(StatsLog.FLASHLIGHT_STATE_CHANGED, getUid(), 0);
+                }
             }
         }
 
         public void noteResetFlashlightLocked(long elapsedRealtimeMs) {
             if (mFlashlightTurnedOnTimer != null) {
                 mFlashlightTurnedOnTimer.stopAllRunningLocked(elapsedRealtimeMs);
+                // TODO(statsd): Possibly use a worksource instead of a uid.
+                StatsLog.write(StatsLog.FLASHLIGHT_STATE_CHANGED, getUid(), 0);
             }
         }
 
@@ -6224,17 +6280,25 @@ public class BatteryStatsImpl extends BatteryStats {
 
         public void noteCameraTurnedOnLocked(long elapsedRealtimeMs) {
             createCameraTurnedOnTimerLocked().startRunningLocked(elapsedRealtimeMs);
+            // TODO(statsd): Possibly use a worksource instead of a uid.
+            StatsLog.write(StatsLog.CAMERA_STATE_CHANGED, getUid(), 1);
         }
 
         public void noteCameraTurnedOffLocked(long elapsedRealtimeMs) {
             if (mCameraTurnedOnTimer != null) {
                 mCameraTurnedOnTimer.stopRunningLocked(elapsedRealtimeMs);
+                if (!mCameraTurnedOnTimer.isRunningLocked()) { // only tell statsd if truly stopped
+                    // TODO(statsd): Possibly use a worksource instead of a uid.
+                    StatsLog.write(StatsLog.CAMERA_STATE_CHANGED, getUid(), 0);
+                }
             }
         }
 
         public void noteResetCameraLocked(long elapsedRealtimeMs) {
             if (mCameraTurnedOnTimer != null) {
                 mCameraTurnedOnTimer.stopAllRunningLocked(elapsedRealtimeMs);
+                // TODO(statsd): Possibly use a worksource instead of a uid.
+                StatsLog.write(StatsLog.CAMERA_STATE_CHANGED, getUid(), 0);
             }
         }
 
@@ -6283,26 +6347,42 @@ public class BatteryStatsImpl extends BatteryStats {
 
         public void noteBluetoothScanStartedLocked(long elapsedRealtimeMs, boolean isUnoptimized) {
             createBluetoothScanTimerLocked().startRunningLocked(elapsedRealtimeMs);
+            // TODO(statsd): Possibly use a worksource instead of a uid.
+            StatsLog.write(StatsLog.BLE_SCAN_STATE_CHANGED, getUid(), 1);
             if (isUnoptimized) {
                 createBluetoothUnoptimizedScanTimerLocked().startRunningLocked(elapsedRealtimeMs);
+                // TODO(statsd): Possibly use a worksource instead of a uid.
+                StatsLog.write(StatsLog.BLE_UNOPTIMIZED_SCAN_STATE_CHANGED, getUid(), 1);
             }
         }
 
         public void noteBluetoothScanStoppedLocked(long elapsedRealtimeMs, boolean isUnoptimized) {
             if (mBluetoothScanTimer != null) {
                 mBluetoothScanTimer.stopRunningLocked(elapsedRealtimeMs);
+                if (!mBluetoothScanTimer.isRunningLocked()) { // only tell statsd if truly stopped
+                    // TODO(statsd): Possibly use a worksource instead of a uid.
+                    StatsLog.write(StatsLog.BLE_SCAN_STATE_CHANGED, getUid(), 0);
+                }
             }
             if (isUnoptimized && mBluetoothUnoptimizedScanTimer != null) {
                 mBluetoothUnoptimizedScanTimer.stopRunningLocked(elapsedRealtimeMs);
+                if (!mBluetoothUnoptimizedScanTimer.isRunningLocked()) {
+                    // TODO(statsd): Possibly use a worksource instead of a uid.
+                    StatsLog.write(StatsLog.BLE_UNOPTIMIZED_SCAN_STATE_CHANGED, getUid(), 0);
+                }
             }
         }
 
         public void noteResetBluetoothScanLocked(long elapsedRealtimeMs) {
             if (mBluetoothScanTimer != null) {
                 mBluetoothScanTimer.stopAllRunningLocked(elapsedRealtimeMs);
+                // TODO(statsd): Possibly use a worksource instead of a uid.
+                StatsLog.write(StatsLog.BLE_SCAN_STATE_CHANGED, getUid(), 0);
             }
             if (mBluetoothUnoptimizedScanTimer != null) {
                 mBluetoothUnoptimizedScanTimer.stopAllRunningLocked(elapsedRealtimeMs);
+                // TODO(statsd): Possibly use a worksource instead of a uid.
+                StatsLog.write(StatsLog.BLE_UNOPTIMIZED_SCAN_STATE_CHANGED, getUid(), 0);
             }
         }
 
@@ -6324,6 +6404,9 @@ public class BatteryStatsImpl extends BatteryStats {
             createBluetoothScanResultCounterLocked().addAtomic(numNewResults);
             // Uses background timebase, so the count will only be incremented if uid in background.
             createBluetoothScanResultBgCounterLocked().addAtomic(numNewResults);
+            // TODO(statsd): Possibly use a worksource instead of a uid.
+            // TODO(statsd): This could be in AppScanStats instead, if desired.
+            StatsLog.write(StatsLog.BLE_SCAN_RESULT_RECEIVED, getUid(), numNewResults);
         }
 
         @Override
@@ -6400,6 +6483,11 @@ public class BatteryStatsImpl extends BatteryStats {
         }
 
         @Override
+        public Timer getWifiScanTimer() {
+            return mWifiScanTimer;
+        }
+
+        @Override
         public int getWifiScanBackgroundCount(int which) {
             if (mWifiScanTimer == null || mWifiScanTimer.getSubTimer() == null) {
                 return 0;
@@ -6423,6 +6511,14 @@ public class BatteryStatsImpl extends BatteryStats {
             }
             final long elapsedRealtimeMs = (elapsedRealtimeUs + 500) / 1000;
             return mWifiScanTimer.getSubTimer().getTotalDurationMsLocked(elapsedRealtimeMs) * 1000;
+        }
+
+        @Override
+        public Timer getWifiScanBackgroundTimer() {
+            if (mWifiScanTimer == null) {
+                return null;
+            }
+            return mWifiScanTimer.getSubTimer();
         }
 
         @Override
@@ -8684,6 +8780,8 @@ public class BatteryStatsImpl extends BatteryStats {
             DualTimer t = mSyncStats.startObject(name);
             if (t != null) {
                 t.startRunningLocked(elapsedRealtimeMs);
+                // TODO(statsd): Possibly use a worksource instead of a uid.
+                StatsLog.write(StatsLog.SYNC_STATE_CHANGED, getUid(), name, 1);
             }
         }
 
@@ -8691,6 +8789,10 @@ public class BatteryStatsImpl extends BatteryStats {
             DualTimer t = mSyncStats.stopObject(name);
             if (t != null) {
                 t.stopRunningLocked(elapsedRealtimeMs);
+                if (!t.isRunningLocked()) { // only tell statsd if truly stopped
+                    // TODO(statsd): Possibly use a worksource instead of a uid.
+                    StatsLog.write(StatsLog.SYNC_STATE_CHANGED, getUid(), name, 0);
+                }
             }
         }
 
@@ -8698,6 +8800,8 @@ public class BatteryStatsImpl extends BatteryStats {
             DualTimer t = mJobStats.startObject(name);
             if (t != null) {
                 t.startRunningLocked(elapsedRealtimeMs);
+                // TODO(statsd): Possibly use a worksource instead of a uid.
+                StatsLog.write(StatsLog.SCHEDULED_JOB_STATE_CHANGED, getUid(), name, 1);
             }
         }
 
@@ -8705,6 +8809,10 @@ public class BatteryStatsImpl extends BatteryStats {
             DualTimer t = mJobStats.stopObject(name);
             if (t != null) {
                 t.stopRunningLocked(elapsedRealtimeMs);
+                if (!t.isRunningLocked()) { // only tell statsd if truly stopped
+                    // TODO(statsd): Possibly use a worksource instead of a uid.
+                    StatsLog.write(StatsLog.SCHEDULED_JOB_STATE_CHANGED, getUid(), name, 0);
+                }
             }
             if (mBsi.mOnBatteryTimeBase.isRunning()) {
                 SparseIntArray types = mJobCompletions.get(name);
@@ -8771,6 +8879,8 @@ public class BatteryStatsImpl extends BatteryStats {
             }
             if (type == WAKE_TYPE_PARTIAL) {
                 createAggregatedPartialWakelockTimerLocked().startRunningLocked(elapsedRealtimeMs);
+                // TODO(statsd): Possibly use a worksource instead of a uid.
+                StatsLog.write(StatsLog.UID_WAKELOCK_STATE_CHANGED, getUid(), type, 1);
                 if (pid >= 0) {
                     Pid p = getPidStatsLocked(pid);
                     if (p.mWakeNesting++ == 0) {
@@ -8788,6 +8898,11 @@ public class BatteryStatsImpl extends BatteryStats {
             if (type == WAKE_TYPE_PARTIAL) {
                 if (mAggregatedPartialWakelockTimer != null) {
                     mAggregatedPartialWakelockTimer.stopRunningLocked(elapsedRealtimeMs);
+                    if (!mAggregatedPartialWakelockTimer.isRunningLocked()) {
+                        // TODO(statsd): Possibly use a worksource instead of a uid.
+                        StatsLog.write(StatsLog.UID_WAKELOCK_STATE_CHANGED, getUid(), type,
+                                0);
+                    }
                 }
                 if (pid >= 0) {
                     Pid p = mPids.get(pid);
@@ -8811,6 +8926,12 @@ public class BatteryStatsImpl extends BatteryStats {
         public void noteStartSensor(int sensor, long elapsedRealtimeMs) {
             DualTimer t = getSensorTimerLocked(sensor, /* create= */ true);
             t.startRunningLocked(elapsedRealtimeMs);
+            // TODO(statsd): Possibly use a worksource instead of a uid.
+            if (sensor == Sensor.GPS) {
+                StatsLog.write(StatsLog.GPS_SCAN_STATE_CHANGED, getUid(), 1);
+            } else {
+                StatsLog.write(StatsLog.SENSOR_STATE_CHANGED, getUid(), sensor, 1);
+            }
         }
 
         public void noteStopSensor(int sensor, long elapsedRealtimeMs) {
@@ -8818,6 +8939,14 @@ public class BatteryStatsImpl extends BatteryStats {
             DualTimer t = getSensorTimerLocked(sensor, false);
             if (t != null) {
                 t.stopRunningLocked(elapsedRealtimeMs);
+                if (!t.isRunningLocked()) { // only tell statsd if truly stopped
+                    // TODO(statsd): Possibly use a worksource instead of a uid.
+                    if (sensor == Sensor.GPS) {
+                        StatsLog.write(StatsLog.GPS_SCAN_STATE_CHANGED, getUid(), 0);
+                    } else {
+                        StatsLog.write(StatsLog.SENSOR_STATE_CHANGED, getUid(), sensor, 0);
+                    }
+                }
             }
         }
 
@@ -9463,7 +9592,7 @@ public class BatteryStatsImpl extends BatteryStats {
     }
 
     public boolean isScreenOn(int state) {
-        return state == Display.STATE_ON;
+        return state == Display.STATE_ON || state == Display.STATE_VR;
     }
 
     public boolean isScreenOff(int state) {
@@ -12791,7 +12920,7 @@ public class BatteryStatsImpl extends BatteryStats {
         mMobileRadioPowerState = DataConnectionRealTimeInfo.DC_POWER_STATE_LOW;
         mMobileRadioActiveTimer = new StopwatchTimer(mClocks, null, -400, null,
                 mOnBatteryTimeBase, in);
-        mMobileRadioActivePerAppTimer = new StopwatchTimer(mClocks, null, -401, null, 
+        mMobileRadioActivePerAppTimer = new StopwatchTimer(mClocks, null, -401, null,
                 mOnBatteryTimeBase, in);
         mMobileRadioActiveAdjustedTime = new LongSamplingCounter(mOnBatteryTimeBase, in);
         mMobileRadioActiveUnknownTime = new LongSamplingCounter(mOnBatteryTimeBase, in);
@@ -13090,7 +13219,7 @@ public class BatteryStatsImpl extends BatteryStats {
                 }
             }
         } else {
-            // TODO: There should be two 0's printed here, not just one.
+            out.writeInt(0);
             out.writeInt(0);
         }
 

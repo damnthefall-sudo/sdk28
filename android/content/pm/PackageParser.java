@@ -3711,17 +3711,15 @@ public class PackageParser {
                 ai.flags |= ApplicationInfo.FLAG_IS_GAME;
             }
 
-            if (false) {
-                if (sa.getBoolean(
-                        com.android.internal.R.styleable.AndroidManifestApplication_cantSaveState,
-                        false)) {
-                    ai.privateFlags |= ApplicationInfo.PRIVATE_FLAG_CANT_SAVE_STATE;
+            if (sa.getBoolean(
+                    com.android.internal.R.styleable.AndroidManifestApplication_cantSaveState,
+                    false)) {
+                ai.privateFlags |= ApplicationInfo.PRIVATE_FLAG_CANT_SAVE_STATE;
 
-                    // A heavy-weight application can not be in a custom process.
-                    // We can do direct compare because we intern all strings.
-                    if (ai.processName != null && ai.processName != ai.packageName) {
-                        outError[0] = "cantSaveState applications can not use custom processes";
-                    }
+                // A heavy-weight application can not be in a custom process.
+                // We can do direct compare because we intern all strings.
+                if (ai.processName != null && !ai.processName.equals(ai.packageName)) {
+                    outError[0] = "cantSaveState applications can not use custom processes";
                 }
             }
         }
@@ -6847,6 +6845,11 @@ public class PackageParser {
             dest.writeParcelable(info, flags);
             dest.writeInt(tree ? 1 : 0);
             dest.writeParcelable(group, flags);
+        }
+
+        /** @hide */
+        public boolean isAppOp() {
+            return info.isAppOp();
         }
 
         private Permission(Parcel in) {

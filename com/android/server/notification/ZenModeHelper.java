@@ -59,6 +59,7 @@ import android.util.SparseArray;
 import android.util.proto.ProtoOutputStream;
 
 import com.android.internal.R;
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.logging.MetricsLogger;
 import com.android.server.LocalServices;
 
@@ -87,7 +88,7 @@ public class ZenModeHelper {
     private final Context mContext;
     private final H mHandler;
     private final SettingsObserver mSettingsObserver;
-    private final AppOpsManager mAppOps;
+    @VisibleForTesting protected final AppOpsManager mAppOps;
     protected ZenModeConfig mDefaultConfig;
     private final ArrayList<Callback> mCallbacks = new ArrayList<Callback>();
     private final ZenModeFiltering mFiltering;
@@ -102,9 +103,9 @@ public class ZenModeHelper {
     private final String SCHEDULED_DEFAULT_RULE_1 = "SCHEDULED_DEFAULT_RULE_1";
     private final String SCHEDULED_DEFAULT_RULE_2 = "SCHEDULED_DEFAULT_RULE_2";
 
-    private int mZenMode;
+    @VisibleForTesting protected int mZenMode;
     private int mUser = UserHandle.USER_SYSTEM;
-    protected ZenModeConfig mConfig;
+    @VisibleForTesting protected ZenModeConfig mConfig;
     private AudioManagerInternal mAudioManager;
     protected PackageManager mPm;
     private long mSuppressedEffects;
@@ -125,12 +126,6 @@ public class ZenModeHelper {
         mAppOps = (AppOpsManager) context.getSystemService(Context.APP_OPS_SERVICE);
 
         mDefaultConfig = new ZenModeConfig();
-        mDefaultRuleWeeknightsName = mContext.getResources()
-                .getString(R.string.zen_mode_default_weeknights_name);
-        mDefaultRuleWeekendsName = mContext.getResources()
-                .getString(R.string.zen_mode_default_weekends_name);
-        mDefaultRuleEventsName = mContext.getResources()
-                .getString(R.string.zen_mode_default_events_name);
         setDefaultZenRules(mContext);
         mConfig = mDefaultConfig;
         mConfigs.put(UserHandle.USER_SYSTEM, mConfig);
@@ -435,6 +430,7 @@ public class ZenModeHelper {
     }
 
     private void appendDefaultRules (ZenModeConfig config) {
+        getDefaultRuleNames();
         appendDefaultScheduleRules(config);
         appendDefaultEventRules(config);
     }
@@ -595,8 +591,9 @@ public class ZenModeHelper {
             pw.println(config);
             return;
         }
-        pw.printf("allow(calls=%b,callsFrom=%s,repeatCallers=%b,messages=%b,messagesFrom=%s,"
+        pw.printf("allow(alarms=%b,media=%bcalls=%b,callsFrom=%s,repeatCallers=%b,messages=%b,messagesFrom=%s,"
                 + "events=%b,reminders=%b,whenScreenOff=%b,whenScreenOn=%b)\n",
+                config.allowAlarms, config.allowMediaSystemOther,
                 config.allowCalls, ZenModeConfig.sourceToString(config.allowCallsFrom),
                 config.allowRepeatCallers, config.allowMessages,
                 ZenModeConfig.sourceToString(config.allowMessagesFrom),
@@ -813,7 +810,18 @@ public class ZenModeHelper {
         }
     }
 
-    private void applyRestrictions() {
+    private void getDefaultRuleNames() {
+        // on locale-change, these values differ
+        mDefaultRuleWeeknightsName = mContext.getResources()
+                .getString(R.string.zen_mode_default_weeknights_name);
+        mDefaultRuleWeekendsName = mContext.getResources()
+                .getString(R.string.zen_mode_default_weekends_name);
+        mDefaultRuleEventsName = mContext.getResources()
+                .getString(R.string.zen_mode_default_events_name);
+    }
+
+    @VisibleForTesting
+    protected void applyRestrictions() {
         final boolean zen = mZenMode != Global.ZEN_MODE_OFF;
 
         // notification restrictions
@@ -822,6 +830,10 @@ public class ZenModeHelper {
         // call restrictions
         final boolean muteCalls = zen && !mConfig.allowCalls && !mConfig.allowRepeatCallers
                 || (mSuppressedEffects & SUPPRESSED_EFFECT_CALLS) != 0;
+        // alarm restrictions
+        final boolean muteAlarms = zen && !mConfig.allowAlarms;
+        // alarm restrictions
+        final boolean muteMediaAndSystemSounds = zen && !mConfig.allowMediaSystemOther;
         // total silence restrictions
         final boolean muteEverything = mZenMode == Global.ZEN_MODE_NO_INTERRUPTIONS;
 
@@ -833,13 +845,18 @@ public class ZenModeHelper {
                 applyRestrictions(muteNotifications || muteEverything, usage);
             } else if (suppressionBehavior == AudioAttributes.SUPPRESSIBLE_CALL) {
                 applyRestrictions(muteCalls || muteEverything, usage);
+            } else if (suppressionBehavior == AudioAttributes.SUPPRESSIBLE_ALARM) {
+                applyRestrictions(muteAlarms || muteEverything, usage);
+            } else if (suppressionBehavior == AudioAttributes.SUPPRESSIBLE_MEDIA_SYSTEM_OTHER) {
+                applyRestrictions(muteMediaAndSystemSounds || muteEverything, usage);
             } else {
                 applyRestrictions(muteEverything, usage);
             }
         }
     }
 
-    private void applyRestrictions(boolean mute, int usage) {
+    @VisibleForTesting
+    protected void applyRestrictions(boolean mute, int usage) {
         final String[] exceptionPackages = null; // none (for now)
         mAppOps.setRestriction(AppOpsManager.OP_VIBRATE, usage,
                 mute ? AppOpsManager.MODE_IGNORED : AppOpsManager.MODE_ALLOWED,
@@ -916,6 +933,7 @@ public class ZenModeHelper {
         weeknights.days = ZenModeConfig.WEEKNIGHT_DAYS;
         weeknights.startHour = 22;
         weeknights.endHour = 7;
+        weeknights.exitAtAlarm = true;
         final ZenRule rule1 = new ZenRule();
         rule1.enabled = false;
         rule1.name = mDefaultRuleWeeknightsName;
@@ -931,6 +949,7 @@ public class ZenModeHelper {
         weekends.startHour = 23;
         weekends.startMinute = 30;
         weekends.endHour = 10;
+        weekends.exitAtAlarm = true;
         final ZenRule rule2 = new ZenRule();
         rule2.enabled = false;
         rule2.name = mDefaultRuleWeekendsName;

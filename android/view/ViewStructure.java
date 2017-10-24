@@ -365,6 +365,30 @@ public abstract class ViewStructure {
     public abstract void setDataIsSensitive(boolean sensitive);
 
     /**
+     * Sets the minimum width in ems of the text associated with this view, when supported.
+     *
+     * <p>Should only be set when the node is used for autofill purposes - it will be ignored
+     * when used for Assist.
+     */
+    public void setMinTextEms(@SuppressWarnings("unused") int minEms) {}
+
+    /**
+     * Sets the maximum width in ems of the text associated with this view, when supported.
+     *
+     * <p>Should only be set when the node is used for autofill purposes - it will be ignored
+     * when used for Assist.
+     */
+    public void setMaxTextEms(@SuppressWarnings("unused") int maxEms) {}
+
+    /**
+     * Sets the maximum length of the text associated with this view, when supported.
+     *
+     * <p>Should only be set when the node is used for autofill purposes - it will be ignored
+     * when used for Assist.
+     */
+    public void setMaxTextLength(@SuppressWarnings("unused") int maxLength) {}
+
+    /**
      * Call when done populating a {@link ViewStructure} returned by
      * {@link #asyncNewChild}.
      */

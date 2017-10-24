@@ -13,7 +13,6 @@ import android.icu.util.ULocale;
 import android.text.Primitive.PrimitiveType;
 import android.text.StaticLayout.LineBreaks;
 
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -72,13 +71,11 @@ public class StaticLayout_Delegate {
 
     @LayoutlibDelegate
     /*package*/ static void nAddStyleRun(long nativeBuilder, long nativePaint, int start,
-            int end, boolean isRtl, String languageTags, long[] hyphenators) {
+            int end, boolean isRtl) {
         Builder builder = sBuilderManager.getDelegate(nativeBuilder);
         if (builder == null) {
             return;
         }
-        builder.mLocales = languageTags;
-        builder.mNativeHyphenators = hyphenators;
 
         int bidiFlags = isRtl ? Paint.BIDI_FORCE_RTL : Paint.BIDI_FORCE_LTR;
         measureText(nativePaint, builder.mText, start, end - start, builder.mWidths,
@@ -86,30 +83,20 @@ public class StaticLayout_Delegate {
     }
 
     @LayoutlibDelegate
-    /*package*/ static void nAddReplacementRun(long nativeBuilder, int start, int end, float width,
-            String languageTags, long[] hyphenators) {
+    /*package*/ static void nAddReplacementRun(long nativeBuilder, long nativePaint, int start,
+            int end, float width) {
         Builder builder = sBuilderManager.getDelegate(nativeBuilder);
         if (builder == null) {
             return;
         }
-        builder.mLocales = languageTags;
-        builder.mNativeHyphenators = hyphenators;
         builder.mWidths[start] = width;
         Arrays.fill(builder.mWidths, start + 1, end, 0.0f);
     }
 
     @LayoutlibDelegate
-    /*package*/ static void nGetWidths(long nativeBuilder, float[] floatsArray) {
-        Builder builder = sBuilderManager.getDelegate(nativeBuilder);
-        if (builder != null) {
-            System.arraycopy(builder.mWidths, 0, floatsArray, 0, builder.mWidths.length);
-        }
-    }
-
-    @LayoutlibDelegate
     /*package*/ static int nComputeLineBreaks(long nativeBuilder, LineBreaks recycle,
             int[] recycleBreaks, float[] recycleWidths, float[] recycleAscents,
-            float[] recycleDescents, int[] recycleFlags, int recycleLength) {
+            float[] recycleDescents, int[] recycleFlags, int recycleLength, float[] charWidths) {
 
         Builder builder = sBuilderManager.getDelegate(nativeBuilder);
         if (builder == null) {
@@ -118,7 +105,7 @@ public class StaticLayout_Delegate {
 
         // compute all possible breakpoints.
         int length = builder.mWidths.length;
-        BreakIterator it = BreakIterator.getLineInstance(new ULocale(builder.mLocales));
+        BreakIterator it = BreakIterator.getLineInstance();
         it.setText(new Segment(builder.mText, 0, length));
 
         // average word length in english is 5. So, initialize the possible breaks with a guess.
@@ -149,6 +136,7 @@ public class StaticLayout_Delegate {
                         builder.mTabStopCalculator);
         }
         builder.mLineBreaker.computeBreaks(recycle);
+        System.arraycopy(builder.mWidths, 0, charWidths, 0, builder.mWidths.length);
         return recycle.breaks.length;
     }
 
@@ -206,11 +194,9 @@ public class StaticLayout_Delegate {
      * Java representation of the native Builder class.
      */
     private static class Builder {
-        String mLocales;
         char[] mText;
         float[] mWidths;
         LineBreaker mLineBreaker;
-        long[] mNativeHyphenators;
         int mBreakStrategy;
         LineWidth mLineWidth;
         TabStops mTabStopCalculator;

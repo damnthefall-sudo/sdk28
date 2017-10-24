@@ -20,9 +20,12 @@ import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 import android.support.annotation.WorkerThread;
 
+import java.lang.ref.WeakReference;
 import java.util.AbstractList;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Lazy loading list that pages in content from a {@link DataSource}.
@@ -90,9 +93,30 @@ import java.util.concurrent.Executor;
  * @param <T> The type of the entries in the list.
  */
 public abstract class PagedList<T> extends AbstractList<T> {
-    // Since we currently rely on implementation details of two implementations,
-    // prevent external subclassing
-    PagedList() {
+    @NonNull
+    final Executor mMainThreadExecutor;
+    @NonNull
+    final Executor mBackgroundThreadExecutor;
+    @NonNull
+    final Config mConfig;
+    @NonNull
+    final PagedStorage<?, T> mStorage;
+
+    int mLastLoad = 0;
+    T mLastItem = null;
+
+    private final AtomicBoolean mDetached = new AtomicBoolean(false);
+
+    protected final ArrayList<WeakReference<Callback>> mCallbacks = new ArrayList<>();
+
+    PagedList(@NonNull PagedStorage<?, T> storage,
+            @NonNull Executor mainThreadExecutor,
+            @NonNull Executor backgroundThreadExecutor,
+            @NonNull Config config) {
+        mStorage = storage;
+        mMainThreadExecutor = mainThreadExecutor;
+        mBackgroundThreadExecutor = backgroundThreadExecutor;
+        mConfig = config;
     }
 
     /**
@@ -117,7 +141,7 @@ public abstract class PagedList<T> extends AbstractList<T> {
             @NonNull Executor backgroundThreadExecutor,
             @NonNull Config config,
             @Nullable K key) {
-        if (dataSource.isContiguous() || !config.mEnablePlaceholders) {
+        if (dataSource.isContiguous() || !config.enablePlaceholders) {
             if (!dataSource.isContiguous()) {
                 //noinspection unchecked
                 dataSource = (DataSource<K, T>) ((TiledDataSource<T>) dataSource).getAsContiguous();
@@ -280,7 +304,13 @@ public abstract class PagedList<T> extends AbstractList<T> {
      */
     @Override
     @Nullable
-    public abstract T get(int index);
+    public T get(int index) {
+        T item = mStorage.get(index);
+        if (item != null) {
+            mLastItem = item;
+        }
+        return item;
+    }
 
 
     /**
@@ -288,7 +318,10 @@ public abstract class PagedList<T> extends AbstractList<T> {
      *
      * @param index Index at which to load.
      */
-    public abstract void loadAround(int index);
+    public void loadAround(int index) {
+        mLastLoad = index + getPositionOffset();
+        loadAroundInternal(index);
+    }
 
 
     /**
@@ -297,7 +330,9 @@ public abstract class PagedList<T> extends AbstractList<T> {
      * @return Current total size of the list.
      */
     @Override
-    public abstract int size();
+    public int size() {
+        return mStorage.size();
+    }
 
     /**
      * Returns whether the list is immutable. Immutable lists may not become mutable again, and may
@@ -305,17 +340,37 @@ public abstract class PagedList<T> extends AbstractList<T> {
      *
      * @return True if the PagedList is immutable.
      */
-    public abstract boolean isImmutable();
+    @SuppressWarnings("WeakerAccess")
+    public boolean isImmutable() {
+        return isDetached();
+    }
 
     /**
      * Returns an immutable snapshot of the PagedList. If this PagedList is already
      * immutable, it will be returned.
      *
-     * @return Immutable snapshot of PagedList, which may be the PagedList itself.
+     * @return Immutable snapshot of PagedList data.
      */
-    public abstract List<T> snapshot();
+    @NonNull
+    public List<T> snapshot() {
+        if (isImmutable()) {
+            return this;
+        }
+
+        return new SnapshotPagedList<>(this);
+    }
 
     abstract boolean isContiguous();
+
+    /**
+     * Return the Config used to construct this PagedList.
+     *
+     * @return the Config of this PagedList
+     */
+    @NonNull
+    public Config getConfig() {
+        return mConfig;
+    }
 
     /**
      * Return the key for the position passed most recently to {@link #loadAround(int)}.
@@ -328,9 +383,7 @@ public abstract class PagedList<T> extends AbstractList<T> {
      * @return Key of position most recently passed to {@link #loadAround(int)}.
      */
     @Nullable
-    public Object getLastKey() {
-        return null;
-    }
+    public abstract Object getLastKey();
 
     /**
      * True if the PagedList has detached the DataSource it was loading from, and will no longer
@@ -338,8 +391,9 @@ public abstract class PagedList<T> extends AbstractList<T> {
      *
      * @return True if the data source is detached.
      */
+    @SuppressWarnings("WeakerAccess")
     public boolean isDetached() {
-        return true;
+        return mDetached.get();
     }
 
     /**
@@ -349,7 +403,9 @@ public abstract class PagedList<T> extends AbstractList<T> {
      * signal to stop loading. The PagedList will continue to present existing data, but will not
      * initiate new loads.
      */
+    @SuppressWarnings("WeakerAccess")
     public void detach() {
+        mDetached.set(true);
     }
 
     /**
@@ -361,7 +417,7 @@ public abstract class PagedList<T> extends AbstractList<T> {
      * If the DataSource is a {@link KeyedDataSource}, and thus doesn't use positions, returns 0.
      */
     public int getPositionOffset() {
-        return 0;
+        return mStorage.getPositionOffset();
     }
 
     /**
@@ -385,16 +441,69 @@ public abstract class PagedList<T> extends AbstractList<T> {
      * @param callback         Callback to dispatch to.
      * @see #removeWeakCallback(Callback)
      */
-    public abstract void addWeakCallback(@Nullable PagedList<T> previousSnapshot,
-            @NonNull Callback callback);
+    @SuppressWarnings("WeakerAccess")
+    public void addWeakCallback(@Nullable List<T> previousSnapshot, @NonNull Callback callback) {
+        if (previousSnapshot != null && previousSnapshot != this) {
+            PagedList<T> storageSnapshot = (PagedList<T>) previousSnapshot;
+            //noinspection unchecked
+            dispatchUpdatesSinceSnapshot(storageSnapshot, callback);
+        }
 
+        // first, clean up any empty weak refs
+        for (int i = mCallbacks.size() - 1; i >= 0; i--) {
+            Callback currentCallback = mCallbacks.get(i).get();
+            if (currentCallback == null) {
+                mCallbacks.remove(i);
+            }
+        }
+
+        // then add the new one
+        mCallbacks.add(new WeakReference<>(callback));
+    }
     /**
      * Removes a previously added callback.
      *
      * @param callback Callback, previously added.
-     * @see #addWeakCallback(PagedList, Callback)
+     * @see #addWeakCallback(List, Callback)
      */
-    public abstract void removeWeakCallback(Callback callback);
+    @SuppressWarnings("WeakerAccess")
+    public void removeWeakCallback(@NonNull Callback callback) {
+        for (int i = mCallbacks.size() - 1; i >= 0; i--) {
+            Callback currentCallback = mCallbacks.get(i).get();
+            if (currentCallback == null || currentCallback == callback) {
+                // found callback, or empty weak ref
+                mCallbacks.remove(i);
+            }
+        }
+    }
+
+    void notifyInserted(int position, int count) {
+        if (count != 0) {
+            for (int i = mCallbacks.size() - 1; i >= 0; i--) {
+                Callback callback = mCallbacks.get(i).get();
+                if (callback != null) {
+                    callback.onInserted(position, count);
+                }
+            }
+        }
+    }
+
+    void notifyChanged(int position, int count) {
+        if (count != 0) {
+            for (int i = mCallbacks.size() - 1; i >= 0; i--) {
+                Callback callback = mCallbacks.get(i).get();
+
+                if (callback != null) {
+                    callback.onChanged(position, count);
+                }
+            }
+        }
+    }
+
+    abstract void dispatchUpdatesSinceSnapshot(@NonNull PagedList<T> snapshot,
+            @NonNull Callback callback);
+
+    abstract void loadAroundInternal(int index);
 
     /**
      * Callback signaling when content is loaded into the list.
@@ -442,17 +551,41 @@ public abstract class PagedList<T> extends AbstractList<T> {
      * {@link Builder#setPageSize(int)}, which defines number of items loaded at a time}.
      */
     public static class Config {
-        final int mPageSize;
-        final int mPrefetchDistance;
-        final boolean mEnablePlaceholders;
-        final int mInitialLoadSizeHint;
+        /**
+         * Size of each page loaded by the PagedList.
+         */
+        public final int pageSize;
+
+        /**
+         * Prefetch distance which defines how far ahead to load.
+         * <p>
+         * If this value is set to 50, the paged list will attempt to load 50 items in advance of
+         * data that's already been accessed.
+         *
+         * @see PagedList#loadAround(int)
+         */
+        @SuppressWarnings("WeakerAccess")
+        public final int prefetchDistance;
+
+        /**
+         * Defines whether the PagedList may display null placeholders, if the DataSource provides
+         * them.
+         */
+        @SuppressWarnings("WeakerAccess")
+        public final boolean enablePlaceholders;
+
+        /**
+         * Size hint for initial load of PagedList, often larger than a regular page.
+         */
+        @SuppressWarnings("WeakerAccess")
+        public final int initialLoadSizeHint;
 
         private Config(int pageSize, int prefetchDistance,
                 boolean enablePlaceholders, int initialLoadSizeHint) {
-            mPageSize = pageSize;
-            mPrefetchDistance = prefetchDistance;
-            mEnablePlaceholders = enablePlaceholders;
-            mInitialLoadSizeHint = initialLoadSizeHint;
+            this.pageSize = pageSize;
+            this.prefetchDistance = prefetchDistance;
+            this.enablePlaceholders = enablePlaceholders;
+            this.initialLoadSizeHint = initialLoadSizeHint;
         }
 
         /**
@@ -545,10 +678,15 @@ public abstract class PagedList<T> extends AbstractList<T> {
              * Defines how many items to load when first load occurs, if you are using a
              * {@link KeyedDataSource}.
              * <p>
-             * If you are using an {@link TiledDataSource}, this value is currently ignored.
-             * Otherwise, this value will be passed to
-             * {@link KeyedDataSource#loadInitial(int)} to load a (typically) larger amount
-             * of data on first load.
+             * This value is typically larger than page size, so on first load data there's a large
+             * enough range of content loaded to cover small scrolls.
+             * <p>
+             * If used with a {@link TiledDataSource}, this value is rounded to the nearest number
+             * of pages, with a minimum of two pages, and loaded with a single call to
+             * {@link TiledDataSource#loadRange(int, int)}.
+             * <p>
+             * If used with a {@link KeyedDataSource}, this value will be passed to
+             * {@link KeyedDataSource#loadInitial(int)}.
              * <p>
              * If not set, defaults to three times page size.
              *

@@ -84,9 +84,6 @@ public class SystemProperties {
     /**
      * Get the String value for the given {@code key}.
      *
-     * <b>WARNING:</b> Do not use this method if the value may not be a valid UTF string! This
-     * method will crash in native code.
-     *
      * @param key the key to lookup
      * @return an empty string if the {@code key} isn't found
      */
@@ -98,9 +95,6 @@ public class SystemProperties {
 
     /**
      * Get the String value for the given {@code key}.
-     *
-     * <b>WARNING:</b> Do not use this method if the value may not be a valid UTF string! This
-     * method will crash in native code.
      *
      * @param key the key to lookup
      * @param def the default value in case the property is not set or empty
@@ -163,7 +157,7 @@ public class SystemProperties {
      * @throws IllegalArgumentException if the {@code val} exceeds 91 characters
      */
     public static void set(@NonNull String key, @Nullable String val) {
-        if (val != null && val.length() > PROP_VALUE_MAX) {
+        if (val != null && !val.startsWith("ro.") && val.length() > PROP_VALUE_MAX) {
             throw new IllegalArgumentException("value of system property '" + key
                     + "' is longer than " + PROP_VALUE_MAX + " characters: " + val);
         }

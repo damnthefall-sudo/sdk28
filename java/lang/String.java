@@ -543,8 +543,10 @@ public final class String
         throw new UnsupportedOperationException("Use StringFactory instead.");
     }
 
+    // Android-removed: Unused package-private constructor String(char[] value, boolean share).
 
-    // BEGIN Android-changed: Deprecated & unsupported as all calls are intercepted by the runtime.
+    // BEGIN Android-added: Constructor for internal use.
+    // Not implemented in java as all calls are intercepted by the runtime.
     /**
      * Package private constructor
      *
@@ -554,7 +556,7 @@ public final class String
     String(int offset, int count, char[] value) {
         throw new UnsupportedOperationException("Use StringFactory instead.");
     }
-    // END Android-changed: Deprecated & unsupported as all calls are intercepted by the runtime.
+    // END Android-added: Constructor for internal use.
 
     /**
      * Returns the length of this string.
@@ -1558,12 +1560,6 @@ public final class String
             return indexOfSupplementary(ch, fromIndex);
         }
     }
-
-    // BEGIN Android-added: Native method to access char storage managed by runtime.
-    // TODO(b/67411061): This seems to be unused, see whether we can remove it.
-    @FastNative
-    private native int fastIndexOf(int c, int start);
-    // END Android-added: Native method to access char storage managed by runtime.
 
     /**
      * Handles (rare) calls of indexOf with a supplementary character.

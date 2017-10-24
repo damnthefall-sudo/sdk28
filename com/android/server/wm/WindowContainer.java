@@ -73,12 +73,12 @@ class WindowContainer<E extends WindowContainer> extends ConfigurationContainer<
 
 
     @Override
-    final protected int getChildCount() {
+    protected int getChildCount() {
         return mChildren.size();
     }
 
     @Override
-    final protected E getChildAt(int index) {
+    protected E getChildAt(int index) {
         return mChildren.get(index);
     }
 
@@ -674,20 +674,6 @@ a     * Returns whether this child is on top of the window hierarchy.
     }
 
     /**
-     * Dumps the names of this container children in the input print writer indenting each
-     * level with the input prefix.
-     */
-    void dumpChildrenNames(StringBuilder out, String prefix) {
-        final String childPrefix = prefix + " ";
-        out.append(getName() + "\n");
-        for (int i = mChildren.size() - 1; i >= 0; --i) {
-            final WindowContainer wc = mChildren.get(i);
-            out.append(childPrefix + "#" + i + " ");
-            wc.dumpChildrenNames(out, childPrefix);
-        }
-    }
-
-    /**
      * Write to a protocol buffer output stream. Protocol buffer message definition is at
      * {@link com.android.server.wm.proto.WindowContainerProto}.
      *
@@ -702,10 +688,6 @@ a     * Returns whether this child is on top of the window hierarchy.
         super.writeToProto(protoOutputStream, CONFIGURATION_CONTAINER);
         protoOutputStream.write(ORIENTATION, mOrientation);
         protoOutputStream.end(token);
-    }
-
-    String getName() {
-        return toString();
     }
 
     private ForAllWindowsConsumerWrapper obtainConsumerWrapper(Consumer<WindowState> consumer) {

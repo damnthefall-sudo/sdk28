@@ -19,7 +19,6 @@ package com.android.server.am;
 import static android.app.ActivityManager.LOCK_TASK_MODE_LOCKED;
 import static android.app.ActivityManager.LOCK_TASK_MODE_NONE;
 import static android.app.ActivityManager.LOCK_TASK_MODE_PINNED;
-import static android.app.ActivityManager.StackId.INVALID_STACK_ID;
 import static android.app.StatusBarManager.DISABLE_BACK;
 import static android.app.StatusBarManager.DISABLE_HOME;
 import static android.app.StatusBarManager.DISABLE_MASK;
@@ -59,7 +58,6 @@ import android.provider.Settings;
 import android.util.Slog;
 import android.util.SparseArray;
 
-import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.statusbar.IStatusBarService;
 import com.android.internal.widget.LockPatternUtils;
@@ -329,7 +327,9 @@ public class LockTaskController {
             if (getDevicePolicyManager() != null) {
                 getDevicePolicyManager().notifyLockTaskModeChanged(false, null, userId);
             }
-            getLockTaskNotify().show(false);
+            if (mLockTaskModeState == LOCK_TASK_MODE_PINNED) {
+                getLockTaskNotify().showPinningExitToast();
+            }
             try {
                 boolean shouldLockKeyguard = Settings.Secure.getIntForUser(
                         mContext.getContentResolver(),
@@ -351,10 +351,13 @@ public class LockTaskController {
     }
 
     /**
-     * Show the lock task violation toast.
+     * Show the lock task violation toast. Currently we only show toast for screen pinning mode, and
+     * no-op if the device is in locked mode.
      */
     void showLockTaskToast() {
-        mHandler.post(() -> getLockTaskNotify().showToast(mLockTaskModeState));
+        if (mLockTaskModeState == LOCK_TASK_MODE_PINNED) {
+            mHandler.post(() -> getLockTaskNotify().showEscapeToast());
+        }
     }
 
     // Starting lock task
@@ -433,7 +436,7 @@ public class LockTaskController {
             mWindowManager.executeAppTransition();
         } else if (lockTaskModeState != LOCK_TASK_MODE_NONE) {
             mSupervisor.handleNonResizableTaskIfNeeded(task, WINDOWING_MODE_UNDEFINED,
-                    DEFAULT_DISPLAY, task.getStackId(), true /* forceNonResizable */);
+                    DEFAULT_DISPLAY, task.getStack(), true /* forceNonResizable */);
         }
     }
 
@@ -441,7 +444,9 @@ public class LockTaskController {
     private void performStartLockTask(String packageName, int userId, int lockTaskModeState) {
         // When lock task starts, we disable the status bars.
         try {
-            getLockTaskNotify().show(true);
+            if (lockTaskModeState == LOCK_TASK_MODE_PINNED) {
+                getLockTaskNotify().showPinningStartToast();
+            }
             mLockTaskModeState = lockTaskModeState;
             if (getStatusBarService() != null) {
                 int flags = 0;
@@ -494,11 +499,7 @@ public class LockTaskController {
         }
 
         for (int displayNdx = mSupervisor.getChildCount() - 1; displayNdx >= 0; --displayNdx) {
-            ArrayList<ActivityStack> stacks = mSupervisor.getChildAt(displayNdx).mStacks;
-            for (int stackNdx = stacks.size() - 1; stackNdx >= 0; --stackNdx) {
-                final ActivityStack stack = stacks.get(stackNdx);
-                stack.onLockTaskPackagesUpdatedLocked();
-            }
+            mSupervisor.getChildAt(displayNdx).onLockTaskPackagesUpdated();
         }
 
         final ActivityRecord r = mSupervisor.topRunningActivityLocked();

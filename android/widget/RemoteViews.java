@@ -131,7 +131,7 @@ public class RemoteViews implements Parcelable, Filter {
      *
      * @hide
      */
-    private ApplicationInfo mApplication;
+    public ApplicationInfo mApplication;
 
     /**
      * The resource ID of the layout file. (Added to the parcel)
@@ -1519,8 +1519,7 @@ public class RemoteViews implements Parcelable, Filter {
 
         @Override
         public boolean hasSameAppInfo(ApplicationInfo parentInfo) {
-            return mNestedViews.mApplication.packageName.equals(parentInfo.packageName)
-                    && mNestedViews.mApplication.uid == parentInfo.uid;
+            return mNestedViews.hasSameAppInfo(parentInfo);
         }
 
         @Override
@@ -2138,8 +2137,7 @@ public class RemoteViews implements Parcelable, Filter {
         if (landscape == null || portrait == null) {
             throw new RuntimeException("Both RemoteViews must be non-null");
         }
-        if (landscape.mApplication.uid != portrait.mApplication.uid
-                || !landscape.mApplication.packageName.equals(portrait.mApplication.packageName)) {
+        if (!landscape.hasSameAppInfo(portrait.mApplication)) {
             throw new RuntimeException("Both RemoteViews must share the same package and user");
         }
         mApplication = portrait.mApplication;
@@ -2653,7 +2651,11 @@ public class RemoteViews implements Parcelable, Filter {
     /**
      * Equivalent to calling
      * {@link android.view.View#setOnClickListener(android.view.View.OnClickListener)}
-     * to launch the provided {@link PendingIntent}.
+     * to launch the provided {@link PendingIntent}. The source bounds
+     * ({@link Intent#getSourceBounds()}) of the intent will be set to the bounds of the clicked
+     * view in screen space.
+     * Note that any activity options associated with the pendingIntent may get overridden
+     * before starting the intent.
      *
      * When setting the on-click action of items within collections (eg. {@link ListView},
      * {@link StackView} etc.), this method will not work. Instead, use {@link
@@ -3548,6 +3550,15 @@ public class RemoteViews implements Parcelable, Filter {
         }
 
         return applicationInfo;
+    }
+
+    /**
+     * Returns true if the {@link #mApplication} is same as the provided info.
+     *
+     * @hide
+     */
+    public boolean hasSameAppInfo(ApplicationInfo info) {
+        return mApplication.packageName.equals(info.packageName) && mApplication.uid == info.uid;
     }
 
     /**

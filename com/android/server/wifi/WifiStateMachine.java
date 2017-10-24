@@ -701,6 +701,9 @@ public class WifiStateMachine extends StateMachine implements WifiNative.WifiRss
     /* Enable/Disable AutoJoin when associated */
     static final int CMD_ENABLE_AUTOJOIN_WHEN_ASSOCIATED                = BASE + 167;
 
+    /* Get all matching Passpoint configurations */
+    static final int CMD_GET_ALL_MATCHING_CONFIGS                       = BASE + 168;
+
     /**
      * Used to handle messages bounced between WifiStateMachine and IpManager.
      */
@@ -1935,6 +1938,15 @@ public class WifiStateMachine extends StateMachine implements WifiNative.WifiRss
         WifiConfiguration config = (WifiConfiguration) resultMsg.obj;
         resultMsg.recycle();
         return config;
+    }
+
+    List<WifiConfiguration> getAllMatchingWifiConfigs(ScanResult scanResult,
+            AsyncChannel channel) {
+        Message resultMsg = channel.sendMessageSynchronously(CMD_GET_ALL_MATCHING_CONFIGS,
+                scanResult);
+        List<WifiConfiguration> configs = (List<WifiConfiguration>) resultMsg.obj;
+        resultMsg.recycle();
+        return configs;
     }
 
     /**
@@ -4130,6 +4142,9 @@ public class WifiStateMachine extends StateMachine implements WifiNative.WifiRss
                     mWifiDiagnostics.reportConnectionEvent(
                             (Long) message.obj, BaseWifiDiagnostics.CONNECTION_EVENT_FAILED);
                     break;
+                case CMD_GET_ALL_MATCHING_CONFIGS:
+                    replyToMessage(message, message.what, new ArrayList<WifiConfiguration>());
+                    break;
                 case 0:
                     // We want to notice any empty messages (with what == 0) that might crop up.
                     // For example, we may have recycled a message sent to multiple handlers.
@@ -4165,7 +4180,7 @@ public class WifiStateMachine extends StateMachine implements WifiNative.WifiRss
             switch (message.what) {
                 case CMD_START_SUPPLICANT:
                     Pair<Integer, IClientInterface> statusAndInterface =
-                            mWifiNative.setupForClientMode();
+                            mWifiNative.setupForClientMode(mInterfaceName);
                     if (statusAndInterface.first == WifiNative.SETUP_SUCCESS) {
                         mClientInterface = statusAndInterface.second;
                     } else {
@@ -5493,6 +5508,10 @@ public class WifiStateMachine extends StateMachine implements WifiNative.WifiRss
                 case CMD_ENABLE_P2P:
                     p2pSendMessage(WifiStateMachine.CMD_ENABLE_P2P);
                     break;
+                case CMD_GET_ALL_MATCHING_CONFIGS:
+                    replyToMessage(message, message.what,
+                            mPasspointManager.getAllMatchingWifiConfigs((ScanResult) message.obj));
+                    break;
                 default:
                     return NOT_HANDLED;
             }
@@ -6023,14 +6042,11 @@ public class WifiStateMachine extends StateMachine implements WifiNative.WifiRss
     class ObtainingIpState extends State {
         @Override
         public void enter() {
-            WifiConfiguration currentConfig = getCurrentWifiConfiguration();
-            boolean isUsingStaticIp =
+            final WifiConfiguration currentConfig = getCurrentWifiConfiguration();
+            final boolean isUsingStaticIp =
                     (currentConfig.getIpAssignment() == IpConfiguration.IpAssignment.STATIC);
             if (mVerboseLoggingEnabled) {
-                String key = "";
-                if (getCurrentWifiConfiguration() != null) {
-                    key = getCurrentWifiConfiguration().configKey();
-                }
+                final String key = currentConfig.configKey();
                 log("enter ObtainingIpState netId=" + Integer.toString(mLastNetworkId)
                         + " " + key + " "
                         + " roam=" + mIsAutoRoaming
@@ -6070,12 +6086,16 @@ public class WifiStateMachine extends StateMachine implements WifiNative.WifiRss
                 prov = IpManager.buildProvisioningConfiguration()
                             .withPreDhcpAction()
                             .withApfCapabilities(mWifiNative.getApfCapabilities())
+                            .withNetwork(getCurrentNetwork())
+                            .withDisplayName(currentConfig.SSID)
                             .build();
             } else {
                 StaticIpConfiguration staticIpConfig = currentConfig.getStaticIpConfiguration();
                 prov = IpManager.buildProvisioningConfiguration()
                             .withStaticConfiguration(staticIpConfig)
                             .withApfCapabilities(mWifiNative.getApfCapabilities())
+                            .withNetwork(getCurrentNetwork())
+                            .withDisplayName(currentConfig.SSID)
                             .build();
             }
             mIpManager.startProvisioning(prov);
@@ -6954,7 +6974,8 @@ public class WifiStateMachine extends StateMachine implements WifiNative.WifiRss
             mMode = config.getTargetMode();
 
             IApInterface apInterface = null;
-            Pair<Integer, IApInterface> statusAndInterface = mWifiNative.setupForSoftApMode();
+            Pair<Integer, IApInterface> statusAndInterface =
+                    mWifiNative.setupForSoftApMode(mInterfaceName);
             if (statusAndInterface.first == WifiNative.SETUP_SUCCESS) {
                 apInterface = statusAndInterface.second;
             } else {

@@ -65,15 +65,13 @@ public class MbmsStreamingServiceBase extends IMbmsStreamingService.Stub {
     @Override
     public final int initialize(final IMbmsStreamingSessionCallback callback,
             final int subscriptionId) throws RemoteException {
-        final int uid = Binder.getCallingUid();
-        callback.asBinder().linkToDeath(new DeathRecipient() {
-            @Override
-            public void binderDied() {
-                onAppCallbackDied(uid, subscriptionId);
-            }
-        }, 0);
+        if (callback == null) {
+            throw new NullPointerException("Callback must not be null");
+        }
 
-        return initialize(new MbmsStreamingSessionCallback() {
+        final int uid = Binder.getCallingUid();
+
+        int result = initialize(new MbmsStreamingSessionCallback() {
             @Override
             public void onError(final int errorCode, final String message) {
                 try {
@@ -101,6 +99,17 @@ public class MbmsStreamingServiceBase extends IMbmsStreamingService.Stub {
                 }
             }
         }, subscriptionId);
+
+        if (result == MbmsErrors.SUCCESS) {
+            callback.asBinder().linkToDeath(new DeathRecipient() {
+                @Override
+                public void binderDied() {
+                    onAppCallbackDied(uid, subscriptionId);
+                }
+            }, 0);
+        }
+
+        return result;
     }
 
 
@@ -152,15 +161,13 @@ public class MbmsStreamingServiceBase extends IMbmsStreamingService.Stub {
     @Override
     public int startStreaming(final int subscriptionId, String serviceId,
             final IStreamingServiceCallback callback) throws RemoteException {
-        final int uid = Binder.getCallingUid();
-        callback.asBinder().linkToDeath(new DeathRecipient() {
-            @Override
-            public void binderDied() {
-                onAppCallbackDied(uid, subscriptionId);
-            }
-        }, 0);
+        if (callback == null) {
+            throw new NullPointerException("Callback must not be null");
+        }
 
-        return startStreaming(subscriptionId, serviceId, new StreamingServiceCallback() {
+        final int uid = Binder.getCallingUid();
+
+        int result = startStreaming(subscriptionId, serviceId, new StreamingServiceCallback() {
             @Override
             public void onError(final int errorCode, final String message) {
                 try {
@@ -207,6 +214,17 @@ public class MbmsStreamingServiceBase extends IMbmsStreamingService.Stub {
                 }
             }
         });
+
+        if (result == MbmsErrors.SUCCESS) {
+            callback.asBinder().linkToDeath(new DeathRecipient() {
+                @Override
+                public void binderDied() {
+                    onAppCallbackDied(uid, subscriptionId);
+                }
+            }, 0);
+        }
+
+        return result;
     }
 
     /**

@@ -21,9 +21,12 @@ import static android.content.Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS;
 import static android.content.Intent.FLAG_ACTIVITY_NEW_TASK;
 
 import android.annotation.UserIdInt;
+import android.app.ActivityManager;
 import android.app.AlarmManager;
 import android.app.AppGlobals;
 import android.app.AppOpsManager;
+import android.app.IApplicationThread;
+import android.app.IServiceConnection;
 import android.app.KeyguardManager;
 import android.app.PendingIntent;
 import android.app.admin.DevicePolicyManagerInternal;
@@ -71,7 +74,6 @@ import android.os.SystemClock;
 import android.os.Trace;
 import android.os.UserHandle;
 import android.os.UserManager;
-import android.os.storage.StorageManager;
 import android.service.appwidget.AppWidgetServiceDumpProto;
 import android.service.appwidget.WidgetProto;
 import android.text.TextUtils;
@@ -100,7 +102,6 @@ import com.android.internal.os.BackgroundThread;
 import com.android.internal.os.SomeArgs;
 import com.android.internal.util.DumpUtils;
 import com.android.internal.util.FastXmlSerializer;
-import com.android.internal.widget.IRemoteViewsAdapterConnection;
 import com.android.internal.widget.IRemoteViewsFactory;
 import com.android.server.LocalServices;
 import com.android.server.WidgetBackupProvider;
@@ -159,7 +160,9 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
     // Bump if the stored widgets need to be upgraded.
     private static final int CURRENT_VERSION = 1;
 
-    private static final AtomicLong REQUEST_COUNTER = new AtomicLong();
+    // Every widget update request is associated which an increasing sequence number. This is
+    // used to verify which request has successfully been received by the host.
+    private static final AtomicLong UPDATE_COUNTER = new AtomicLong();
 
     private final BroadcastReceiver mBroadcastReceiver = new BroadcastReceiver() {
         @Override
@@ -189,10 +192,6 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
             }
         }
     };
-
-    // Manages active connections to RemoteViewsServices.
-    private final HashMap<Pair<Integer, FilterComparison>, ServiceConnection>
-            mBoundRemoteViewsServices = new HashMap<>();
 
     // Manages persistent references to RemoteViewsServices from different App Widgets.
     private final HashMap<Pair<Integer, FilterComparison>, HashSet<Integer>>
@@ -814,9 +813,9 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
             Host host = lookupOrAddHostLocked(id);
             host.callbacks = callbacks;
 
+            long updateSequenceNo = UPDATE_COUNTER.incrementAndGet();
             int N = appWidgetIds.length;
             ArrayList<PendingHostUpdate> outUpdates = new ArrayList<>(N);
-
             LongSparseArray<PendingHostUpdate> updatesMap = new LongSparseArray<>();
             for (int i = 0; i < N; i++) {
                 if (host.getPendingUpdatesForId(appWidgetIds[i], updatesMap)) {
@@ -828,6 +827,8 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
                     }
                 }
             }
+            // Reset the update counter once all the updates have been calculated
+            host.lastWidgetUpdateSequenceNo = updateSequenceNo;
             return new ParceledListSlice<>(outUpdates);
         }
     }
@@ -1206,16 +1207,13 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
     }
 
     @Override
-    public void bindRemoteViewsService(String callingPackage, int appWidgetId,
-            Intent intent, IBinder callbacks) {
+    public boolean bindRemoteViewsService(String callingPackage, int appWidgetId, Intent intent,
+            IApplicationThread caller, IBinder activtiyToken, IServiceConnection connection,
+            int flags) {
         final int userId = UserHandle.getCallingUserId();
-
         if (DEBUG) {
             Slog.i(TAG, "bindRemoteViewsService() " + userId);
         }
-
-        // Make sure the package runs under the caller uid.
-        mSecurityPolicy.enforceCallFromPackage(callingPackage);
 
         synchronized (mLock) {
             ensureGroupStateLoadedLocked(userId);
@@ -1251,76 +1249,35 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
             mSecurityPolicy.enforceServiceExistsAndRequiresBindRemoteViewsPermission(
                     componentName, widget.provider.getUserId());
 
-            // Good to go - the service pakcage is correct, it exists for the correct
+            // Good to go - the service package is correct, it exists for the correct
             // user, and requires the bind permission.
 
-            // If there is already a connection made for this service intent, then
-            // disconnect from that first. (This does not allow multiple connections
-            // to the same service under the same key).
-            ServiceConnectionProxy connection = null;
-            FilterComparison fc = new FilterComparison(intent);
-            Pair<Integer, FilterComparison> key = Pair.create(appWidgetId, fc);
+            final long callingIdentity = Binder.clearCallingIdentity();
+            try {
+                // Ask ActivityManager to bind it. Notice that we are binding the service with the
+                // caller app instead of DevicePolicyManagerService.
+                if(ActivityManager.getService().bindService(
+                        caller, activtiyToken, intent,
+                        intent.resolveTypeIfNeeded(mContext.getContentResolver()),
+                        connection, flags, mContext.getOpPackageName(),
+                        widget.provider.getUserId()) != 0) {
 
-            if (mBoundRemoteViewsServices.containsKey(key)) {
-                connection = (ServiceConnectionProxy) mBoundRemoteViewsServices.get(key);
-                connection.disconnect();
-                unbindService(connection);
-                mBoundRemoteViewsServices.remove(key);
-            }
-
-            // Bind to the RemoteViewsService (which will trigger a callback to the
-            // RemoteViewsAdapter.onServiceConnected())
-            connection = new ServiceConnectionProxy(callbacks);
-            bindService(intent, connection, widget.provider.info.getProfile());
-            mBoundRemoteViewsServices.put(key, connection);
-
-            // Add it to the mapping of RemoteViewsService to appWidgetIds so that we
-            // can determine when we can call back to the RemoteViewsService later to
-            // destroy associated factories.
-            Pair<Integer, FilterComparison> serviceId = Pair.create(widget.provider.id.uid, fc);
-            incrementAppWidgetServiceRefCount(appWidgetId, serviceId);
-        }
-    }
-
-    @Override
-    public void unbindRemoteViewsService(String callingPackage, int appWidgetId, Intent intent) {
-        final int userId = UserHandle.getCallingUserId();
-
-        if (DEBUG) {
-            Slog.i(TAG, "unbindRemoteViewsService() " + userId);
-        }
-
-        // Make sure the package runs under the caller uid.
-        mSecurityPolicy.enforceCallFromPackage(callingPackage);
-
-        synchronized (mLock) {
-            ensureGroupStateLoadedLocked(userId);
-
-            // Unbind from the RemoteViewsService (which will trigger a callback to the bound
-            // RemoteViewsAdapter)
-            Pair<Integer, FilterComparison> key = Pair.create(appWidgetId,
-                    new FilterComparison(intent));
-            if (mBoundRemoteViewsServices.containsKey(key)) {
-                // We don't need to use the appWidgetId until after we are sure there is something
-                // to unbind. Note that this may mask certain issues with apps calling unbind()
-                // more than necessary.
-
-                // NOTE: The lookup is enforcing security across users by making
-                // sure the caller can only access widgets it hosts or provides.
-                Widget widget = lookupWidgetLocked(appWidgetId,
-                        Binder.getCallingUid(), callingPackage);
-
-                if (widget == null) {
-                    throw new IllegalArgumentException("Bad widget id " + appWidgetId);
+                    // Add it to the mapping of RemoteViewsService to appWidgetIds so that we
+                    // can determine when we can call back to the RemoteViewsService later to
+                    // destroy associated factories.
+                    incrementAppWidgetServiceRefCount(appWidgetId,
+                            Pair.create(widget.provider.id.uid, new FilterComparison(intent)));
+                    return true;
                 }
-
-                ServiceConnectionProxy connection = (ServiceConnectionProxy)
-                        mBoundRemoteViewsServices.get(key);
-                connection.disconnect();
-                mContext.unbindService(connection);
-                mBoundRemoteViewsServices.remove(key);
+            } catch (RemoteException ex) {
+                // Same process, should not happen.
+            } finally {
+                Binder.restoreCallingIdentity(callingIdentity);
             }
         }
+
+        // Failed to bind.
+        return false;
     }
 
     @Override
@@ -1751,7 +1708,9 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
 
     private void deleteAppWidgetLocked(Widget widget) {
         // We first unbind all services that are bound to this id
-        unbindAppWidgetRemoteViewsServicesLocked(widget);
+        // Check if we need to destroy any services (if no other app widgets are
+        // referencing the same service)
+        decrementAppWidgetServiceRefCount(widget);
 
         Host host = widget.host;
         host.widgets.remove(widget);
@@ -1793,28 +1752,6 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
         }
     }
 
-    // Unbinds from a RemoteViewsService when we delete an app widget
-    private void unbindAppWidgetRemoteViewsServicesLocked(Widget widget) {
-        int appWidgetId = widget.appWidgetId;
-        // Unbind all connections to Services bound to this AppWidgetId
-        Iterator<Pair<Integer, Intent.FilterComparison>> it = mBoundRemoteViewsServices.keySet()
-                .iterator();
-        while (it.hasNext()) {
-            final Pair<Integer, Intent.FilterComparison> key = it.next();
-            if (key.first == appWidgetId) {
-                final ServiceConnectionProxy conn = (ServiceConnectionProxy)
-                        mBoundRemoteViewsServices.get(key);
-                conn.disconnect();
-                mContext.unbindService(conn);
-                it.remove();
-            }
-        }
-
-        // Check if we need to destroy any services (if no other app widgets are
-        // referencing the same service)
-        decrementAppWidgetServiceRefCount(widget);
-    }
-
     // Destroys the cached factory on the RemoteViewsService's side related to the specified intent
     private void destroyRemoteViewsService(final Intent intent, Widget widget) {
         final ServiceConnection conn = new ServiceConnection() {
@@ -1850,7 +1787,7 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
     // Adds to the ref-count for a given RemoteViewsService intent
     private void incrementAppWidgetServiceRefCount(int appWidgetId,
             Pair<Integer, FilterComparison> serviceId) {
-        HashSet<Integer> appWidgetIds = null;
+        final HashSet<Integer> appWidgetIds;
         if (mRemoteViewsServicesAppWidgets.containsKey(serviceId)) {
             appWidgetIds = mRemoteViewsServicesAppWidgets.get(serviceId);
         } else {
@@ -1914,9 +1851,9 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
             // method with a wrong id. In that case, ignore the call.
             return;
         }
-        long requestId = REQUEST_COUNTER.incrementAndGet();
+        long requestId = UPDATE_COUNTER.incrementAndGet();
         if (widget != null) {
-            widget.updateRequestIds.put(viewId, requestId);
+            widget.updateSequenceNos.put(viewId, requestId);
         }
         if (widget == null || widget.host == null || widget.host.zombie
                 || widget.host.callbacks == null || widget.provider == null
@@ -1941,7 +1878,7 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
             int appWidgetId, int viewId, long requestId) {
         try {
             callbacks.viewDataChanged(appWidgetId, viewId);
-            host.lastWidgetUpdateRequestId = requestId;
+            host.lastWidgetUpdateSequenceNo = requestId;
         } catch (RemoteException re) {
             // It failed; remove the callback. No need to prune because
             // we know that this host is still referenced by this instance.
@@ -1988,9 +1925,9 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
     }
 
     private void scheduleNotifyUpdateAppWidgetLocked(Widget widget, RemoteViews updateViews) {
-        long requestId = REQUEST_COUNTER.incrementAndGet();
+        long requestId = UPDATE_COUNTER.incrementAndGet();
         if (widget != null) {
-            widget.updateRequestIds.put(ID_VIEWS_UPDATE, requestId);
+            widget.updateSequenceNos.put(ID_VIEWS_UPDATE, requestId);
         }
         if (widget == null || widget.provider == null || widget.provider.zombie
                 || widget.host.callbacks == null || widget.host.zombie) {
@@ -2013,7 +1950,7 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
             int appWidgetId, RemoteViews views, long requestId) {
         try {
             callbacks.updateAppWidget(appWidgetId, views);
-            host.lastWidgetUpdateRequestId = requestId;
+            host.lastWidgetUpdateSequenceNo = requestId;
         } catch (RemoteException re) {
             synchronized (mLock) {
                 Slog.e(TAG, "Widget host dead: " + host.id, re);
@@ -2023,11 +1960,11 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
     }
 
     private void scheduleNotifyProviderChangedLocked(Widget widget) {
-        long requestId = REQUEST_COUNTER.incrementAndGet();
+        long requestId = UPDATE_COUNTER.incrementAndGet();
         if (widget != null) {
             // When the provider changes, reset everything else.
-            widget.updateRequestIds.clear();
-            widget.updateRequestIds.append(ID_PROVIDER_CHANGED, requestId);
+            widget.updateSequenceNos.clear();
+            widget.updateSequenceNos.append(ID_PROVIDER_CHANGED, requestId);
         }
         if (widget == null || widget.provider == null || widget.provider.zombie
                 || widget.host.callbacks == null || widget.host.zombie) {
@@ -2050,7 +1987,7 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
             int appWidgetId, AppWidgetProviderInfo info, long requestId) {
         try {
             callbacks.providerChanged(appWidgetId, info);
-            host.lastWidgetUpdateRequestId = requestId;
+            host.lastWidgetUpdateSequenceNo = requestId;
         } catch (RemoteException re) {
             synchronized (mLock){
                 Slog.e(TAG, "Widget host dead: " + host.id, re);
@@ -3887,7 +3824,11 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
         boolean zombie; // if we're in safe mode, don't prune this just because nobody references it
 
         int tag = TAG_UNDEFINED; // for use while saving state (the index)
-        long lastWidgetUpdateRequestId; // request id for the last update successfully sent
+        // Sequence no for the last update successfully sent. This is updated whenever a
+        // widget update is successfully sent to the host callbacks. As all new/undelivered updates
+        // will have sequenceNo greater than this, all those updates will be sent when the host
+        // callbacks are attached again.
+        long lastWidgetUpdateSequenceNo;
 
         public int getUserId() {
             return UserHandle.getUserId(id.uid);
@@ -3914,18 +3855,18 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
          */
         public boolean getPendingUpdatesForId(int appWidgetId,
                 LongSparseArray<PendingHostUpdate> outUpdates) {
-            long updateRequestId = lastWidgetUpdateRequestId;
+            long updateSequenceNo = lastWidgetUpdateSequenceNo;
             int N = widgets.size();
             for (int i = 0; i < N; i++) {
                 Widget widget = widgets.get(i);
                 if (widget.appWidgetId == appWidgetId) {
                     outUpdates.clear();
-                    for (int j = widget.updateRequestIds.size() - 1; j >= 0; j--) {
-                        long requestId = widget.updateRequestIds.valueAt(j);
-                        if (requestId <= updateRequestId) {
+                    for (int j = widget.updateSequenceNos.size() - 1; j >= 0; j--) {
+                        long requestId = widget.updateSequenceNos.valueAt(j);
+                        if (requestId <= updateSequenceNo) {
                             continue;
                         }
-                        int id = widget.updateRequestIds.keyAt(j);
+                        int id = widget.updateSequenceNos.keyAt(j);
                         final PendingHostUpdate update;
                         switch (id) {
                             case ID_PROVIDER_CHANGED:
@@ -4021,8 +3962,8 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
         RemoteViews maskedViews;
         Bundle options;
         Host host;
-        // Request ids for various operations
-        SparseLongArray updateRequestIds = new SparseLongArray(2);
+        // Map of request type to updateSequenceNo.
+        SparseLongArray updateSequenceNos = new SparseLongArray(2);
 
         @Override
         public String toString() {
@@ -4045,40 +3986,6 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
 
         public RemoteViews getEffectiveViewsLocked() {
             return maskedViews != null ? maskedViews : views;
-        }
-    }
-
-    /**
-     * Acts as a proxy between the ServiceConnection and the RemoteViewsAdapterConnection. This
-     * needs to be a static inner class since a reference to the ServiceConnection is held globally
-     * and may lead us to leak AppWidgetService instances (if there were more than one).
-     */
-    private static final class ServiceConnectionProxy implements ServiceConnection {
-        private final IRemoteViewsAdapterConnection mConnectionCb;
-
-        ServiceConnectionProxy(IBinder connectionCb) {
-            mConnectionCb = IRemoteViewsAdapterConnection.Stub
-                    .asInterface(connectionCb);
-        }
-
-        public void onServiceConnected(ComponentName name, IBinder service) {
-            try {
-                mConnectionCb.onServiceConnected(service);
-            } catch (RemoteException re) {
-                Slog.e(TAG, "Error passing service interface", re);
-            }
-        }
-
-        public void onServiceDisconnected(ComponentName name) {
-            disconnect();
-        }
-
-        public void disconnect() {
-            try {
-                mConnectionCb.onServiceDisconnected();
-            } catch (RemoteException re) {
-                Slog.e(TAG, "Error clearing service interface", re);
-            }
         }
     }
 
@@ -4635,7 +4542,9 @@ class AppWidgetServiceImpl extends IAppWidgetService.Stub implements WidgetBacku
                         // reconstructed due to the restore
                         host.widgets.remove(widget);
                         provider.widgets.remove(widget);
-                        unbindAppWidgetRemoteViewsServicesLocked(widget);
+                        // Check if we need to destroy any services (if no other app widgets are
+                        // referencing the same service)
+                        decrementAppWidgetServiceRefCount(widget);
                         removeWidgetLocked(widget);
                     }
                 }

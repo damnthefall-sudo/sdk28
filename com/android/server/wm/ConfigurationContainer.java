@@ -21,11 +21,14 @@ import static android.app.WindowConfiguration.ACTIVITY_TYPE_HOME;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_RECENTS;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_STANDARD;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_UNDEFINED;
+import static android.app.WindowConfiguration.WINDOWING_MODE_FREEFORM;
 import static android.app.WindowConfiguration.WINDOWING_MODE_FULLSCREEN;
+import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED;
 import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_PRIMARY;
 import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_SECONDARY;
 import static android.app.WindowConfiguration.WINDOWING_MODE_UNDEFINED;
 import static android.app.WindowConfiguration.activityTypeToString;
+import static android.app.WindowConfiguration.windowingModeToString;
 import static com.android.server.wm.proto.ConfigurationContainerProto.FULL_CONFIGURATION;
 import static com.android.server.wm.proto.ConfigurationContainerProto.MERGED_OVERRIDE_CONFIGURATION;
 import static com.android.server.wm.proto.ConfigurationContainerProto.OVERRIDE_CONFIGURATION;
@@ -35,6 +38,7 @@ import android.app.WindowConfiguration;
 import android.content.res.Configuration;
 import android.util.proto.ProtoOutputStream;
 
+import java.io.PrintWriter;
 import java.util.ArrayList;
 
 /**
@@ -182,6 +186,11 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
         return windowingMode == WINDOWING_MODE_SPLIT_SCREEN_SECONDARY;
     }
 
+    public boolean inSplitScreenPrimaryWindowingMode() {
+        return mFullConfiguration.windowConfiguration.getWindowingMode()
+                == WINDOWING_MODE_SPLIT_SCREEN_PRIMARY;
+    }
+
     /**
      * Returns true if this container can be put in either
      * {@link WindowConfiguration#WINDOWING_MODE_SPLIT_SCREEN_PRIMARY} or
@@ -190,6 +199,14 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
      */
     public boolean supportsSplitScreenWindowingMode() {
         return mFullConfiguration.windowConfiguration.supportSplitScreenWindowingMode();
+    }
+
+    public boolean inPinnedWindowingMode() {
+        return mFullConfiguration.windowConfiguration.getWindowingMode() == WINDOWING_MODE_PINNED;
+    }
+
+    public boolean inFreeformWindowingMode() {
+        return mFullConfiguration.windowConfiguration.getWindowingMode() == WINDOWING_MODE_FREEFORM;
     }
 
     /** Returns the activity type associated with the the configuration container. */
@@ -325,6 +342,26 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
         mFullConfiguration.writeToProto(protoOutputStream, FULL_CONFIGURATION);
         mMergedOverrideConfiguration.writeToProto(protoOutputStream, MERGED_OVERRIDE_CONFIGURATION);
         protoOutputStream.end(token);
+    }
+
+    /**
+     * Dumps the names of this container children in the input print writer indenting each
+     * level with the input prefix.
+     */
+    public void dumpChildrenNames(PrintWriter pw, String prefix) {
+        final String childPrefix = prefix + " ";
+        pw.println(getName()
+                + " type=" + activityTypeToString(getActivityType())
+                + " mode=" + windowingModeToString(getWindowingMode()));
+        for (int i = getChildCount() - 1; i >= 0; --i) {
+            final E cc = getChildAt(i);
+            pw.print(childPrefix + "#" + i + " ");
+            cc.dumpChildrenNames(pw, childPrefix);
+        }
+    }
+
+    String getName() {
+        return toString();
     }
 
     abstract protected int getChildCount();

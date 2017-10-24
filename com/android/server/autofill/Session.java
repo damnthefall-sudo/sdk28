@@ -54,6 +54,7 @@ import android.os.SystemClock;
 import android.service.autofill.AutofillService;
 import android.service.autofill.Dataset;
 import android.service.autofill.FillContext;
+import android.service.autofill.FillEventHistory;
 import android.service.autofill.FillRequest;
 import android.service.autofill.FillResponse;
 import android.service.autofill.InternalSanitizer;
@@ -90,6 +91,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -495,7 +497,7 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
             notifyUnavailableToClient(false);
         }
         synchronized (mLock) {
-            processResponseLocked(response, requestFlags);
+            processResponseLocked(response, null, requestFlags);
         }
 
         final LogMaker log = newLogMaker(MetricsEvent.AUTOFILL_REQUEST, servicePackageName)
@@ -762,13 +764,21 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
         }
 
         final Parcelable result = data.getParcelable(AutofillManager.EXTRA_AUTHENTICATION_RESULT);
-        if (sDebug) Slog.d(TAG, "setAuthenticationResultLocked(): result=" + result);
+        final Bundle newClientState = data.getBundle(AutofillManager.EXTRA_CLIENT_STATE);
+        if (sDebug) {
+            Slog.d(TAG, "setAuthenticationResultLocked(): result=" + result
+                    + ", clientState=" + newClientState);
+        }
         if (result instanceof FillResponse) {
             writeLog(MetricsEvent.AUTOFILL_AUTHENTICATED);
-            replaceResponseLocked(authenticatedResponse, (FillResponse) result);
+            replaceResponseLocked(authenticatedResponse, (FillResponse) result, newClientState);
         } else if (result instanceof Dataset) {
             if (datasetIdx != AutofillManager.AUTHENTICATION_ID_DATASET_ID_UNDEFINED) {
                 writeLog(MetricsEvent.AUTOFILL_DATASET_AUTHENTICATED);
+                if (newClientState != null) {
+                    if (sDebug) Slog.d(TAG,  "Updating client state from auth dataset");
+                    mClientState = newClientState;
+                }
                 final Dataset dataset = (Dataset) result;
                 authenticatedResponse.getDatasets().set(datasetIdx, dataset);
                 autoFill(requestId, datasetIdx, dataset, false);
@@ -829,6 +839,191 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
     private SaveInfo getSaveInfoLocked() {
         final FillResponse response = getLastResponseLocked(null);
         return response == null ? null : response.getSaveInfo();
+    }
+
+    /**
+     * Generates a {@link android.service.autofill.FillEventHistory.Event#TYPE_CONTEXT_COMMITTED}
+     * when necessary.
+     */
+    public void logContextCommittedLocked() {
+        final FillResponse lastResponse = getLastResponseLocked("logContextCommited()");
+        if (lastResponse == null) return;
+
+        final int flags = lastResponse.getFlags();
+        if ((flags & FillResponse.FLAG_TRACK_CONTEXT_COMMITED) == 0) {
+            if (sDebug) Slog.d(TAG, "logContextCommittedLocked(): ignored by flags " + flags);
+            return;
+        }
+
+        ArraySet<String> ignoredDatasets = null;
+        ArrayList<AutofillId> changedFieldIds = null;
+        ArrayList<String> changedDatasetIds = null;
+        ArrayMap<AutofillId, ArraySet<String>> manuallyFilledIds = null;
+
+        boolean hasAtLeastOneDataset = false;
+        final int responseCount = mResponses.size();
+        for (int i = 0; i < responseCount; i++) {
+            final FillResponse response = mResponses.valueAt(i);
+            final List<Dataset> datasets = response.getDatasets();
+            if (datasets == null || datasets.isEmpty()) {
+                if (sVerbose) Slog.v(TAG,  "logContextCommitted() no datasets at " + i);
+            } else {
+                for (int j = 0; j < datasets.size(); j++) {
+                    final Dataset dataset = datasets.get(j);
+                    final String datasetId = dataset.getId();
+                    if (datasetId == null) {
+                        if (sVerbose) {
+                            Slog.v(TAG, "logContextCommitted() skipping idless dataset " + dataset);
+                        }
+                    } else {
+                        hasAtLeastOneDataset = true;
+                        if (mSelectedDatasetIds == null
+                                || !mSelectedDatasetIds.contains(datasetId)) {
+                            if (sVerbose) Slog.v(TAG, "adding ignored dataset " + datasetId);
+                            if (ignoredDatasets == null) {
+                                ignoredDatasets = new ArraySet<>();
+                            }
+                            ignoredDatasets.add(datasetId);
+                        }
+                    }
+                }
+            }
+        }
+        if (!hasAtLeastOneDataset) {
+            if (sVerbose) Slog.v(TAG, "logContextCommittedLocked(): skipped (no datasets)");
+            return;
+        }
+
+        for (int i = 0; i < mViewStates.size(); i++) {
+            final ViewState viewState = mViewStates.valueAt(i);
+            final int state = viewState.getState();
+
+            // When value changed, we need to log if it was:
+            // - autofilled -> changedDatasetIds
+            // - not autofilled but matches a dataset value -> manuallyFilledIds
+            if ((state & ViewState.STATE_CHANGED) != 0) {
+
+                // Check if autofilled value was changed
+                if ((state & ViewState.STATE_AUTOFILLED) != 0) {
+                    final String datasetId = viewState.getDatasetId();
+                    if (datasetId == null) {
+                        // Sanity check - should never happen.
+                        Slog.w(TAG, "logContextCommitted(): no dataset id on " + viewState);
+                        continue;
+                    }
+
+                    // Must first check if final changed value is not the same as value sent by
+                    // service.
+                    final AutofillValue autofilledValue = viewState.getAutofilledValue();
+                    final AutofillValue currentValue = viewState.getCurrentValue();
+                    if (autofilledValue != null && autofilledValue.equals(currentValue)) {
+                        if (sDebug) {
+                            Slog.d(TAG, "logContextCommitted(): ignoring changed " + viewState
+                                    + " because it has same value that was autofilled");
+                        }
+                        continue;
+                    }
+
+                    if (sDebug) {
+                        Slog.d(TAG, "logContextCommitted() found changed state: " + viewState);
+                    }
+                    if (changedFieldIds == null) {
+                        changedFieldIds = new ArrayList<>();
+                        changedDatasetIds = new ArrayList<>();
+                    }
+                    changedFieldIds.add(viewState.id);
+                    changedDatasetIds.add(datasetId);
+                } else {
+                    // Check if value match a dataset.
+                    final AutofillValue currentValue = viewState.getCurrentValue();
+                    if (currentValue == null) {
+                        if (sDebug) {
+                            Slog.d(TAG, "logContextCommitted(): skipping view witout current value "
+                                    + "( " + viewState + ")");
+                        }
+                        continue;
+                    }
+                    for (int j = 0; j < responseCount; j++) {
+                        final FillResponse response = mResponses.valueAt(j);
+                        final List<Dataset> datasets = response.getDatasets();
+                        if (datasets == null || datasets.isEmpty()) {
+                            if (sVerbose) Slog.v(TAG,  "logContextCommitted() no datasets at " + j);
+                        } else {
+                            for (int k = 0; k < datasets.size(); k++) {
+                                final Dataset dataset = datasets.get(k);
+                                final String datasetId = dataset.getId();
+                                if (datasetId == null) {
+                                    if (sVerbose) {
+                                        Slog.v(TAG, "logContextCommitted() skipping idless dataset "
+                                                + dataset);
+                                    }
+                                } else {
+                                    final ArrayList<AutofillValue> values = dataset.getFieldValues();
+                                    for (int l = 0; l < values.size(); l++) {
+                                        final AutofillValue candidate = values.get(l);
+                                        if (currentValue.equals(candidate)) {
+                                            if (sDebug) {
+                                                Slog.d(TAG, "field " + viewState.id
+                                                        + " was manually filled with value set by "
+                                                        + "dataset " + datasetId);
+                                            }
+                                            if (manuallyFilledIds == null) {
+                                                manuallyFilledIds = new ArrayMap<>();
+                                            }
+                                            ArraySet<String> datasetIds =
+                                                    manuallyFilledIds.get(viewState.id);
+                                            if (datasetIds == null) {
+                                                datasetIds = new ArraySet<>(1);
+                                                manuallyFilledIds.put(viewState.id, datasetIds);
+                                            }
+                                            datasetIds.add(datasetId);
+                                        }
+                                    }
+                                    if (mSelectedDatasetIds == null
+                                            || !mSelectedDatasetIds.contains(datasetId)) {
+                                        if (sVerbose) {
+                                            Slog.v(TAG, "adding ignored dataset " + datasetId);
+                                        }
+                                        if (ignoredDatasets == null) {
+                                            ignoredDatasets = new ArraySet<>();
+                                        }
+                                        ignoredDatasets.add(datasetId);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (sVerbose) {
+            Slog.v(TAG, "logContextCommitted(): id=" + id
+                    + ", selectedDatasetids=" + mSelectedDatasetIds
+                    + ", ignoredDatasetIds=" + ignoredDatasets
+                    + ", changedAutofillIds=" + changedFieldIds
+                    + ", changedDatasetIds=" + changedDatasetIds
+                    + ", manuallyFilledIds=" + manuallyFilledIds);
+        }
+
+        ArrayList<AutofillId> manuallyFilledFieldIds = null;
+        ArrayList<ArrayList<String>> manuallyFilledDatasetIds = null;
+
+        // Must "flatten" the map to the parcellable collection primitives
+        if (manuallyFilledIds != null) {
+            final int size = manuallyFilledIds.size();
+            manuallyFilledFieldIds = new ArrayList<>(size);
+            manuallyFilledDatasetIds = new ArrayList<>(size);
+            for (int i = 0; i < size; i++) {
+                final AutofillId fieldId = manuallyFilledIds.keyAt(i);
+                final ArraySet<String> datasetIds = manuallyFilledIds.valueAt(i);
+                manuallyFilledFieldIds.add(fieldId);
+                manuallyFilledDatasetIds.add(new ArrayList<>(datasetIds));
+            }
+        }
+        mService.logContextCommitted(id, mClientState, mSelectedDatasetIds, ignoredDatasets,
+                changedFieldIds, changedDatasetIds,
+                manuallyFilledFieldIds, manuallyFilledDatasetIds);
     }
 
     /**
@@ -962,6 +1157,7 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
                     boolean isValid;
                     try {
                         isValid = validator.isValid(valueFinder);
+                        if (sDebug) Slog.d(TAG, validator + " returned " + isValid);
                         log.setType(isValid
                                 ? MetricsEvent.TYPE_SUCCESS
                                 : MetricsEvent.TYPE_DISMISS);
@@ -1400,11 +1596,10 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
      * Checks whether a view should be ignored.
      */
     private boolean isIgnoredLocked(AutofillId id) {
-        if (mResponses == null || mResponses.size() == 0) {
-            return false;
-        }
         // Always check the latest response only
-        final FillResponse response = mResponses.valueAt(mResponses.size() - 1);
+        final FillResponse response = getLastResponseLocked(null);
+        if (response == null) return false;
+
         return ArrayUtils.contains(response.getIgnoredIds(), id);
     }
 
@@ -1481,18 +1676,21 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
     }
 
     private void updateTrackedIdsLocked() {
-        if (mResponses == null || mResponses.size() == 0) {
-            return;
-        }
-
         // Only track the views of the last response as only those are reported back to the
         // service, see #showSaveLocked
-        final FillResponse response = mResponses.valueAt(getLastResponseIndexLocked());
+        final FillResponse response = getLastResponseLocked(null);
+        if (response == null) return;
 
         ArraySet<AutofillId> trackedViews = null;
         boolean saveOnAllViewsInvisible = false;
+        boolean saveOnFinish = true;
         final SaveInfo saveInfo = response.getSaveInfo();
+        final AutofillId saveTriggerId;
         if (saveInfo != null) {
+            saveTriggerId = saveInfo.getTriggerId();
+            if (saveTriggerId != null) {
+                writeLog(MetricsEvent.AUTOFILL_EXPLICIT_SAVE_TRIGGER_DEFINITION);
+            }
             saveOnAllViewsInvisible =
                     (saveInfo.getFlags() & SaveInfo.FLAG_SAVE_ON_ALL_VIEWS_INVISIBLE) != 0;
 
@@ -1509,6 +1707,12 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
                     Collections.addAll(trackedViews, saveInfo.getOptionalIds());
                 }
             }
+            if ((saveInfo.getFlags() & SaveInfo.FLAG_DONT_SAVE_ON_FINISH) != 0) {
+                saveOnFinish = false;
+            }
+
+        } else {
+            saveTriggerId = null;
         }
 
         // Must also track that are part of datasets, otherwise the FillUI won't be hidden when
@@ -1533,17 +1737,18 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
 
         try {
             if (sVerbose) {
-                Slog.v(TAG, "updateTrackedIdsLocked(): " + trackedViews + " => " + fillableIds);
+                Slog.v(TAG, "updateTrackedIdsLocked(): " + trackedViews + " => " + fillableIds
+                        + " (triggering on " + saveTriggerId + ")");
             }
             mClient.setTrackedViews(id, toArray(trackedViews), saveOnAllViewsInvisible,
-                    toArray(fillableIds));
+                    saveOnFinish, toArray(fillableIds), saveTriggerId);
         } catch (RemoteException e) {
             Slog.w(TAG, "Cannot set tracked ids", e);
         }
     }
 
     private void replaceResponseLocked(@NonNull FillResponse oldResponse,
-            @NonNull FillResponse newResponse) {
+            @NonNull FillResponse newResponse, @Nullable Bundle newClientState) {
         // Disassociate view states with the old response
         setViewStatesLocked(oldResponse, ViewState.STATE_INITIAL, true);
         // Move over the id
@@ -1551,7 +1756,7 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
         // Replace the old response
         mResponses.put(newResponse.getRequestId(), newResponse);
         // Now process the new response
-        processResponseLocked(newResponse, 0);
+        processResponseLocked(newResponse, newClientState, 0);
     }
 
     private void processNullResponseLocked(int flags) {
@@ -1565,7 +1770,8 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
         removeSelf();
     }
 
-    private void processResponseLocked(@NonNull FillResponse newResponse, int flags) {
+    private void processResponseLocked(@NonNull FillResponse newResponse,
+            @Nullable Bundle newClientState, int flags) {
         // Make sure we are hiding the UI which will be shown
         // only if handling the current response requires it.
         mUi.hideAll(this);
@@ -1573,14 +1779,18 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
         final int requestId = newResponse.getRequestId();
         if (sVerbose) {
             Slog.v(TAG, "processResponseLocked(): mCurrentViewId=" + mCurrentViewId
-                    + ",flags=" + flags + ", reqId=" + requestId + ", resp=" + newResponse);
+                    + ",flags=" + flags + ", reqId=" + requestId + ", resp=" + newResponse
+                    + ",newClientState=" + newClientState);
         }
 
         if (mResponses == null) {
-            mResponses = new SparseArray<>(4);
+            // Set initial capacity as 2 to handle cases where service always requires auth.
+            // TODO: add a metric for number of responses set by server, so we can use its average
+            // as the initial array capacitiy.
+            mResponses = new SparseArray<>(2);
         }
         mResponses.put(requestId, newResponse);
-        mClientState = newResponse.getClientState();
+        mClientState = newClientState != null ? newClientState : newResponse.getClientState();
 
         setViewStatesLocked(newResponse, ViewState.STATE_FILLABLE, false);
         updateTrackedIdsLocked();
@@ -1653,6 +1863,10 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
             final AutofillId id = ids.get(j);
             final AutofillValue value = values.get(j);
             final ViewState viewState = createOrUpdateViewStateLocked(id, state, value);
+            final String datasetId = dataset.getId();
+            if (datasetId != null) {
+                viewState.setDatasetId(datasetId);
+            }
             if (response != null) {
                 viewState.setResponse(response);
             } else if (clearResponse) {
