@@ -651,6 +651,26 @@ public class Resources_Delegate {
     }
 
     @LayoutlibDelegate
+    static float getFloat(Resources resources, int id) {
+        Pair<String, ResourceValue> value = getResourceValue(resources, id, mPlatformResourceFlag);
+
+        if (value != null) {
+            ResourceValue resValue = value.getSecond();
+
+            if (resValue != null) {
+                String v = resValue.getValue();
+                if (v != null) {
+                    try {
+                        return Float.parseFloat(v);
+                    } catch (NumberFormatException ignore) {
+                    }
+                }
+            }
+        }
+        return 0;
+    }
+
+    @LayoutlibDelegate
     static boolean getBoolean(Resources resources, int id) throws NotFoundException {
         Pair<String, ResourceValue> value = getResourceValue(resources, id, mPlatformResourceFlag);
 

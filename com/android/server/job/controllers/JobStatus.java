@@ -22,6 +22,7 @@ import android.app.job.JobInfo;
 import android.app.job.JobWorkItem;
 import android.content.ClipData;
 import android.content.ComponentName;
+import android.net.Network;
 import android.net.Uri;
 import android.os.RemoteException;
 import android.os.SystemClock;
@@ -167,6 +168,7 @@ public final class JobStatus {
     // These are filled in by controllers when preparing for execution.
     public ArraySet<Uri> changedUris;
     public ArraySet<String> changedAuthorities;
+    public Network network;
 
     public int lastEvaluatedPriority;
 
@@ -216,6 +218,8 @@ public final class JobStatus {
      * being observed.
      */
     ContentObserverController.JobInstance contentObserverJobInstance;
+
+    private long totalNetworkBytes = JobInfo.NETWORK_BYTES_UNKNOWN;
 
     /** Provide a handle to the service that this job will be run on. */
     public int getServiceToken() {
@@ -294,6 +298,8 @@ public final class JobStatus {
 
         mLastSuccessfulRunTime = lastSuccessfulRunTime;
         mLastFailedRunTime = lastFailedRunTime;
+
+        updateEstimatedNetworkBytesLocked();
     }
 
     /** Copy constructor: used specifically when cloning JobStatus objects for persistence,
@@ -387,6 +393,7 @@ public final class JobStatus {
                     sourcePackageName, sourceUserId, toShortString()));
         }
         pendingWork.add(work);
+        updateEstimatedNetworkBytesLocked();
     }
 
     public JobWorkItem dequeueWorkLocked() {
@@ -399,6 +406,7 @@ public final class JobStatus {
                 executingWork.add(work);
                 work.bumpDeliveryCount();
             }
+            updateEstimatedNetworkBytesLocked();
             return work;
         }
         return null;
@@ -457,6 +465,7 @@ public final class JobStatus {
             pendingWork = null;
             executingWork = null;
             incomingJob.nextPendingWorkId = nextPendingWorkId;
+            incomingJob.updateEstimatedNetworkBytesLocked();
         } else {
             // We are completely stopping the job...  need to clean up work.
             ungrantWorkList(am, pendingWork);
@@ -464,6 +473,7 @@ public final class JobStatus {
             ungrantWorkList(am, executingWork);
             executingWork = null;
         }
+        updateEstimatedNetworkBytesLocked();
     }
 
     public void prepareLocked(IActivityManager am) {
@@ -564,6 +574,38 @@ public final class JobStatus {
 
     public int getFlags() {
         return job.getFlags();
+    }
+
+    private void updateEstimatedNetworkBytesLocked() {
+        totalNetworkBytes = computeEstimatedNetworkBytesLocked();
+    }
+
+    private long computeEstimatedNetworkBytesLocked() {
+        // If any component of the job has unknown usage, we don't have a
+        // complete picture of what data will be used, and we have to treat the
+        // entire job as unknown.
+        long totalNetworkBytes = 0;
+        long networkBytes = job.getEstimatedNetworkBytes();
+        if (networkBytes == JobInfo.NETWORK_BYTES_UNKNOWN) {
+            return JobInfo.NETWORK_BYTES_UNKNOWN;
+        } else {
+            totalNetworkBytes += networkBytes;
+        }
+        if (pendingWork != null) {
+            for (int i = 0; i < pendingWork.size(); i++) {
+                networkBytes = pendingWork.get(i).getEstimatedNetworkBytes();
+                if (networkBytes == JobInfo.NETWORK_BYTES_UNKNOWN) {
+                    return JobInfo.NETWORK_BYTES_UNKNOWN;
+                } else {
+                    totalNetworkBytes += networkBytes;
+                }
+            }
+        }
+        return totalNetworkBytes;
+    }
+
+    public long getEstimatedNetworkBytes() {
+        return totalNetworkBytes;
     }
 
     /** Does this job have any sort of networking constraint? */
@@ -1045,6 +1087,9 @@ public final class JobStatus {
             if (job.getNetworkType() != JobInfo.NETWORK_TYPE_NONE) {
                 pw.print(prefix); pw.print("  Network type: "); pw.println(job.getNetworkType());
             }
+            if (totalNetworkBytes != JobInfo.NETWORK_BYTES_UNKNOWN) {
+                pw.print(prefix); pw.print("  Network bytes: "); pw.println(totalNetworkBytes);
+            }
             if (job.getMinLatencyMillis() != 0) {
                 pw.print(prefix); pw.print("  Minimum latency: ");
                 TimeUtils.formatDuration(job.getMinLatencyMillis(), pw);
@@ -1100,6 +1145,9 @@ public final class JobStatus {
                     pw.print(prefix); pw.print("  "); pw.println(changedUris.valueAt(i));
                 }
             }
+        }
+        if (network != null) {
+            pw.print(prefix); pw.print("Network: "); pw.println(network);
         }
         if (pendingWork != null && pendingWork.size() > 0) {
             pw.print(prefix); pw.println("Pending work:");

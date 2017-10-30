@@ -67,12 +67,12 @@ public class ViewGroup_Delegate {
             Outline outline) {
         float elevation = getElevation(child, parent);
         if(outline.mMode == Outline.MODE_ROUND_RECT && outline.mRect != null) {
-            RectShadowPainter.paintShadow(outline, elevation, canvas);
+            RectShadowPainter.paintShadow(outline, elevation, canvas, child.getAlpha());
             return;
         }
         BufferedImage shadow = null;
         if (outline.mPath != null) {
-            shadow = getPathShadow(outline, canvas, elevation);
+            shadow = getPathShadow(outline, canvas, elevation, child.getAlpha());
         }
         if (shadow == null) {
             return;
@@ -91,7 +91,8 @@ public class ViewGroup_Delegate {
         return child.getZ() - parent.getZ();
     }
 
-    private static BufferedImage getPathShadow(Outline outline, Canvas canvas, float elevation) {
+    private static BufferedImage getPathShadow(Outline outline, Canvas canvas, float elevation,
+            float alpha) {
         Rect clipBounds = canvas.getClipBounds();
         if (clipBounds.isEmpty()) {
           return null;
@@ -101,7 +102,7 @@ public class ViewGroup_Delegate {
         Graphics2D graphics = image.createGraphics();
         graphics.draw(Path_Delegate.getDelegate(outline.mPath.mNativePath).getJavaShape());
         graphics.dispose();
-        return ShadowPainter.createDropShadow(image, (int) elevation);
+        return ShadowPainter.createDropShadow(image, (int) elevation, alpha);
     }
 
     // Copied from android.view.View#draw(Canvas, ViewGroup, long) and removed code paths

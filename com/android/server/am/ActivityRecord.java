@@ -165,6 +165,7 @@ import android.view.IAppTransitionAnimationSpecsFuture;
 import android.view.IApplicationToken;
 import android.view.WindowManager.LayoutParams;
 
+import com.android.internal.R;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.app.ResolverActivity;
 import com.android.internal.content.ReferrerIntent;
@@ -203,7 +204,6 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
     private static final String TAG_VISIBILITY = TAG + POSTFIX_VISIBILITY;
 
     private static final boolean SHOW_ACTIVITY_START_TIME = true;
-    private static final String RECENTS_PACKAGE_NAME = "com.android.systemui.recents";
 
     private static final String ATTR_ID = "id";
     private static final String TAG_INTENT = "intent";
@@ -232,7 +232,9 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
     final String processName; // process where this component wants to run
     final String taskAffinity; // as per ActivityInfo.taskAffinity
     final boolean stateNotNeeded; // As per ActivityInfo.flags
-    boolean fullscreen; // covers the full screen?
+    boolean fullscreen; // The activity is opaque and fills the entire space of this task.
+    // TODO: See if it possible to combine this with the fullscreen field.
+    final boolean hasWallpaper; // Has a wallpaper window as a background.
     final boolean noDisplay;  // activity is not displayed?
     private final boolean componentSpecified;  // did caller specify an explicit component?
     final boolean rootVoiceInteraction;  // was this the root activity of a voice interaction?
@@ -274,6 +276,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
     ActivityState state;    // current state we are in
     Bundle  icicle;         // last saved activity state
     PersistableBundle persistentState; // last persistently saved activity state
+    // TODO: See if this is still needed.
     boolean frontOfTask;    // is this the root activity of its task?
     boolean launchFailed;   // set if a launched failed, to abort on 2nd try
     boolean haveState;      // have we gotten the last activity state?
@@ -883,9 +886,14 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
 
         Entry ent = AttributeCache.instance().get(packageName,
                 realTheme, com.android.internal.R.styleable.Window, userId);
-        fullscreen = ent != null && !ActivityInfo.isTranslucentOrFloating(ent.array);
-        noDisplay = ent != null && ent.array.getBoolean(
-                com.android.internal.R.styleable.Window_windowNoDisplay, false);
+        if (ent != null) {
+            fullscreen = !ActivityInfo.isTranslucentOrFloating(ent.array);
+            hasWallpaper = ent.array.getBoolean(R.styleable.Window_windowShowWallpaper, false);
+            noDisplay = ent.array.getBoolean(R.styleable.Window_windowNoDisplay, false);
+        } else {
+            hasWallpaper = false;
+            noDisplay = false;
+        }
 
         setActivityType(_componentSpecified, _launchedFromUid, _intent, options, sourceRecord);
 
@@ -1049,7 +1057,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
                 // We only allow home activities to be resizeable if they explicitly requested it.
                 info.resizeMode = RESIZE_MODE_UNRESIZEABLE;
             }
-        } else if (realActivity.getClassName().contains(RECENTS_PACKAGE_NAME)) {
+        } else if (service.getRecentTasks().isRecentsComponent(realActivity, appInfo.uid)) {
             activityType = ACTIVITY_TYPE_RECENTS;
         } else if (options != null && options.getLaunchActivityType() == ACTIVITY_TYPE_ASSISTANT
                 && canLaunchAssistActivity(launchedFromPackage)) {
@@ -1553,17 +1561,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
             return false;
         }
 
-        boolean isVisible = !behindFullscreenActivity || mLaunchTaskBehind;
-
-        if (service.mSupportsLeanbackOnly && isVisible && isActivityTypeRecents()) {
-            // On devices that support leanback only (Android TV), Recents activity can only be
-            // visible if the home stack is the focused stack or we are in split-screen mode.
-            final ActivityDisplay display = getDisplay();
-            boolean hasSplitScreenStack = display != null && display.hasSplitScreenPrimaryStack();
-            isVisible = hasSplitScreenStack || mStackSupervisor.isFocusedStack(getStack());
-        }
-
-        return isVisible;
+        return !behindFullscreenActivity || mLaunchTaskBehind;
     }
 
     void makeVisibleIfNeeded(ActivityRecord starting) {
@@ -2065,7 +2063,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
             final File iconFile = new File(TaskPersister.getUserImagesDir(task.userId),
                     iconFilename);
             final String iconFilePath = iconFile.getAbsolutePath();
-            service.mRecentTasks.saveImage(icon, iconFilePath);
+            service.getRecentTasks().saveImage(icon, iconFilePath);
             _taskDescription.setIconFilename(iconFilePath);
         }
         taskDescription = _taskDescription;
@@ -2812,7 +2810,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
 
     public void writeToProto(ProtoOutputStream proto, long fieldId) {
         final long token = proto.start(fieldId);
-        super.writeToProto(proto, CONFIGURATION_CONTAINER);
+        super.writeToProto(proto, CONFIGURATION_CONTAINER, false /* trim */);
         writeIdentifierToProto(proto, IDENTIFIER);
         proto.write(STATE, state.toString());
         proto.write(VISIBLE, visible);

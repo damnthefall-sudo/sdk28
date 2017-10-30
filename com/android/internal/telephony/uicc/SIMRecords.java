@@ -28,11 +28,13 @@ import android.telephony.PhoneNumberUtils;
 import android.telephony.Rlog;
 import android.telephony.SmsMessage;
 import android.telephony.SubscriptionInfo;
+import android.telephony.SubscriptionManager;
 import android.text.TextUtils;
 
 import com.android.internal.telephony.CommandsInterface;
 import com.android.internal.telephony.MccTable;
 import com.android.internal.telephony.SmsConstants;
+import com.android.internal.telephony.SubscriptionController;
 import com.android.internal.telephony.gsm.SimTlv;
 import com.android.internal.telephony.uicc.IccCardApplicationStatus.AppState;
 import com.android.internal.telephony.uicc.IccCardApplicationStatus.AppType;
@@ -1645,6 +1647,33 @@ public class SIMRecords extends IccRecords {
         } else {
             setSpnFromConfig(getOperatorNumeric());
         }
+
+        /* update display name with carrier override */
+        setDisplayName();
+    }
+
+    private void setDisplayName() {
+        SubscriptionManager subManager = SubscriptionManager.from(mContext);
+        int[] subId = subManager.getSubId(mParentApp.getPhoneId());
+
+        if ((subId == null) || subId.length <= 0) {
+            log("subId not valid for Phone " + mParentApp.getPhoneId());
+            return;
+        }
+
+        SubscriptionInfo subInfo = subManager.getActiveSubscriptionInfo(subId[0]);
+        if (subInfo != null && subInfo.getNameSource()
+                    != SubscriptionManager.NAME_SOURCE_USER_INPUT) {
+            CharSequence oldSubName = subInfo.getDisplayName();
+            String newCarrierName = mTelephonyManager.getSimOperatorName(subId[0]);
+
+            if (!TextUtils.isEmpty(newCarrierName) && !newCarrierName.equals(oldSubName)) {
+                log("sim name[" + mParentApp.getPhoneId() + "] = " + newCarrierName);
+                SubscriptionController.getInstance().setDisplayName(newCarrierName, subId[0]);
+            }
+        } else {
+            log("SUB[" + mParentApp.getPhoneId() + "] " + subId[0] + " SubInfo not created yet");
+        }
     }
 
     private void setSpnFromConfig(String carrier) {
@@ -2072,10 +2101,14 @@ public class SIMRecords extends IccRecords {
             return null;
         }
         int numPlmns = data.length / packedBcdPlmnLenBytes;
-        String[] ret = new String[numPlmns];
+        int numValidPlmns = 0;
+        String[] parsed = new String[numPlmns];
         for (int i = 0; i < numPlmns; i++) {
-            ret[i] = IccUtils.bcdPlmnToString(data, i * packedBcdPlmnLenBytes);
+            parsed[numValidPlmns] = IccUtils.bcdPlmnToString(data, i * packedBcdPlmnLenBytes);
+            // we count the valid (non empty) records and only increment if valid
+            if (!TextUtils.isEmpty(parsed[numValidPlmns])) numValidPlmns++;
         }
+        String[] ret = Arrays.copyOf(parsed, numValidPlmns);
         if (VDBG) logv(description + " PLMNs: " + Arrays.toString(ret));
         return ret;
     }

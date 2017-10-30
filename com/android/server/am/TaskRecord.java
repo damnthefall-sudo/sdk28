@@ -30,7 +30,9 @@ import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED;
 import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_PRIMARY;
 import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_SECONDARY;
 import static android.content.Intent.FLAG_ACTIVITY_NEW_DOCUMENT;
+import static android.content.Intent.FLAG_ACTIVITY_NEW_TASK;
 import static android.content.Intent.FLAG_ACTIVITY_RETAIN_IN_RECENTS;
+import static android.content.Intent.FLAG_ACTIVITY_TASK_ON_HOME;
 import static android.content.pm.ActivityInfo.FLAG_RELINQUISH_TASK_IDENTITY;
 import static android.content.pm.ActivityInfo.LOCK_TASK_LAUNCH_MODE_ALWAYS;
 import static android.content.pm.ActivityInfo.LOCK_TASK_LAUNCH_MODE_DEFAULT;
@@ -74,7 +76,6 @@ import static com.android.server.am.proto.TaskRecordProto.MIN_WIDTH;
 import static com.android.server.am.proto.TaskRecordProto.ORIG_ACTIVITY;
 import static com.android.server.am.proto.TaskRecordProto.REAL_ACTIVITY;
 import static com.android.server.am.proto.TaskRecordProto.RESIZE_MODE;
-import static com.android.server.am.proto.TaskRecordProto.RETURN_TO_TYPE;
 import static com.android.server.am.proto.TaskRecordProto.STACK_ID;
 import static com.android.server.am.proto.TaskRecordProto.ACTIVITY_TYPE;
 
@@ -111,6 +112,7 @@ import android.util.proto.ProtoOutputStream;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.app.IVoiceInteractor;
 import com.android.internal.util.XmlUtils;
+import com.android.server.am.ActivityStack.ActivityState;
 import com.android.server.wm.AppWindowContainerController;
 import com.android.server.wm.ConfigurationContainer;
 import com.android.server.wm.StackWindowController;
@@ -172,7 +174,6 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
     // Current version of the task record we persist. Used to check if we need to run any upgrade
     // code.
     private static final int PERSIST_TASK_VERSION = 1;
-    private static final String TASK_THUMBNAIL_SUFFIX = "_task_thumbnail";
 
     static final int INVALID_TASK_ID = -1;
     private static final int INVALID_MIN_SIZE = -1;
@@ -187,13 +188,13 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
             REPARENT_KEEP_STACK_AT_FRONT,
             REPARENT_LEAVE_STACK_IN_PLACE
     })
-    public @interface ReparentMoveStackMode {}
+    @interface ReparentMoveStackMode {}
     // Moves the stack to the front if it was not at the front
-    public static final int REPARENT_MOVE_STACK_TO_FRONT = 0;
+    static final int REPARENT_MOVE_STACK_TO_FRONT = 0;
     // Only moves the stack to the front if it was focused or front most already
-    public static final int REPARENT_KEEP_STACK_AT_FRONT = 1;
+    static final int REPARENT_KEEP_STACK_AT_FRONT = 1;
     // Do not move the stack as a part of reparenting
-    public static final int REPARENT_LEAVE_STACK_IN_PLACE = 2;
+    static final int REPARENT_LEAVE_STACK_IN_PLACE = 2;
 
     final int taskId;       // Unique identifier for this task.
     String affinity;        // The affinity name for this task, or null; may change identity.
@@ -231,9 +232,6 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
     private boolean mSupportsPictureInPicture;  // Whether or not this task and its activities
             // support PiP. Based on the {@link ActivityInfo#FLAG_SUPPORTS_PICTURE_IN_PICTURE} flag
             // of the root activity.
-    boolean mTemporarilyUnresizable; // Separate flag from mResizeMode used to suppress resize
-                                     // changes on a temporary basis.
-
     /** Can't be put in lockTask mode. */
     final static int LOCK_TASK_AUTH_DONT_LOCK = 0;
     /** Can enter app pinning with user approval. Can never start over existing lockTask task. */
@@ -268,12 +266,6 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
      * (positive) or back (negative). Absolute value indicates time. */
     long mLastTimeMoved = System.currentTimeMillis();
 
-    /** Indication of what to run next when task exits. */
-    // TODO: Shouldn't be needed if we have things in visual order. I.e. we stop using stacks or
-    // have a stack per standard application type...
-    /*@WindowConfiguration.ActivityType*/
-    private int mTaskToReturnTo = ACTIVITY_TYPE_STANDARD;
-
     /** If original intent did not allow relinquishing task identity, save that information */
     private boolean mNeverRelinquishIdentity = true;
 
@@ -281,7 +273,6 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
     // do not want to delete the stack when the task goes empty.
     private boolean mReuseTask = false;
 
-    private final String mFilename;
     CharSequence lastDescription; // Last description captured for this item.
 
     int mAffiliatedTaskId; // taskId of parent affiliation or self if no parent.
@@ -327,8 +318,6 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
     TaskRecord(ActivityManagerService service, int _taskId, ActivityInfo info, Intent _intent,
             IVoiceInteractionSession _voiceSession, IVoiceInteractor _voiceInteractor) {
         mService = service;
-        mFilename = String.valueOf(_taskId) + TASK_THUMBNAIL_SUFFIX +
-                TaskPersister.IMAGE_EXTENSION;
         userId = UserHandle.getUserId(info.applicationInfo.uid);
         taskId = _taskId;
         lastActiveTime = SystemClock.elapsedRealtime();
@@ -348,8 +337,6 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
     TaskRecord(ActivityManagerService service, int _taskId, ActivityInfo info, Intent _intent,
             TaskDescription _taskDescription) {
         mService = service;
-        mFilename = String.valueOf(_taskId) + TASK_THUMBNAIL_SUFFIX +
-                TaskPersister.IMAGE_EXTENSION;
         userId = UserHandle.getUserId(info.applicationInfo.uid);
         taskId = _taskId;
         lastActiveTime = SystemClock.elapsedRealtime();
@@ -368,7 +355,6 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
         maxRecents = Math.min(Math.max(info.maxRecents, 1),
                 ActivityManager.getMaxAppRecentsLimitStatic());
 
-        mTaskToReturnTo = ACTIVITY_TYPE_HOME;
         lastTaskDescription = _taskDescription;
         touchActiveTime();
         mService.mTaskChangeNotificationController.notifyTaskCreated(_taskId, realActivity);
@@ -385,8 +371,6 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
             int resizeMode, boolean supportsPictureInPicture, boolean _realActivitySuspended,
             boolean userSetupComplete, int minWidth, int minHeight) {
         mService = service;
-        mFilename = String.valueOf(_taskId) + TASK_THUMBNAIL_SUFFIX +
-                TaskPersister.IMAGE_EXTENSION;
         taskId = _taskId;
         intent = _intent;
         affinityIntent = _affinityIntent;
@@ -401,7 +385,6 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
         isAvailable = true;
         autoRemoveRecents = _autoRemoveRecents;
         askedCompatMode = _askedCompatMode;
-        mTaskToReturnTo = ACTIVITY_TYPE_HOME;
         userId = _userId;
         mUserSetupComplete = userSetupComplete;
         effectiveUid = _effectiveUid;
@@ -707,7 +690,7 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
             } else if (toStackWindowingMode == WINDOWING_MODE_FREEFORM) {
                 Rect bounds = getLaunchBounds();
                 if (bounds == null) {
-                    toStack.layoutTaskInStack(this, null);
+                    mService.mStackSupervisor.getLaunchingBoundsController().layoutTask(this, null);
                     bounds = mBounds;
                 }
                 kept = resize(bounds, RESIZE_MODE_FORCED, !mightReplaceWindow, deferResume);
@@ -904,29 +887,9 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
         return this.intent.filterEquals(intent);
     }
 
-    void setTaskToReturnTo(/*@WindowConfiguration.ActivityType*/ int taskToReturnTo) {
-        mTaskToReturnTo = taskToReturnTo == ACTIVITY_TYPE_RECENTS
-                ? ACTIVITY_TYPE_HOME : taskToReturnTo;
-    }
-
-    void setTaskToReturnTo(ActivityRecord source) {
-        if (source.isActivityTypeRecents()) {
-            setTaskToReturnTo(ACTIVITY_TYPE_RECENTS);
-        } else if (source.isActivityTypeAssistant()) {
-            setTaskToReturnTo(ACTIVITY_TYPE_ASSISTANT);
-        }
-    }
-
-    int getTaskToReturnTo() {
-        return mTaskToReturnTo;
-    }
-
-    boolean returnsToHomeTask() {
-        return mTaskToReturnTo == ACTIVITY_TYPE_HOME;
-    }
-
-    boolean returnsToStandardTask() {
-        return mTaskToReturnTo == ACTIVITY_TYPE_STANDARD;
+    boolean returnsToHomeStack() {
+        final int returnHomeFlags = FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_TASK_ON_HOME;
+        return (intent.getFlags() & returnHomeFlags) == returnHomeFlags;
     }
 
     void setPrevAffiliate(TaskRecord prevAffiliate) {
@@ -1096,6 +1059,36 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
             }
         }
         return null;
+    }
+
+    /**
+     * Return the number of running activities, and the number of non-finishing/initializing
+     * activities in the provided {@param reportOut} respectively.
+     */
+    void getNumRunningActivities(TaskActivitiesReport reportOut) {
+        reportOut.reset();
+        for (int i = mActivities.size() - 1; i >= 0; --i) {
+            final ActivityRecord r = mActivities.get(i);
+            if (r.finishing) {
+                continue;
+            }
+
+            reportOut.base = r;
+
+            // Increment the total number of non-finishing activities
+            reportOut.numActivities++;
+
+            if (reportOut.top == null || (reportOut.top.state == ActivityState.INITIALIZING)) {
+                reportOut.top = r;
+                // Reset the number of running activities until we hit the first non-initializing
+                // activity
+                reportOut.numRunning = 0;
+            }
+            if (r.app != null && r.app.thread != null) {
+                // Increment the number of actually running activities
+                reportOut.numRunning++;
+            }
+        }
     }
 
     boolean okToShowLocked() {
@@ -1447,17 +1440,9 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
                 " mLockTaskAuth=" + lockTaskAuthToString());
     }
 
-    boolean isOverHomeStack() {
-        return mTaskToReturnTo == ACTIVITY_TYPE_HOME;
-    }
-
-    boolean isOverAssistantStack() {
-        return mTaskToReturnTo == ACTIVITY_TYPE_ASSISTANT;
-    }
-
     private boolean isResizeable(boolean checkSupportsPip) {
         return (mService.mForceResizableActivities || ActivityInfo.isResizeableMode(mResizeMode)
-                || (checkSupportsPip && mSupportsPictureInPicture)) && !mTemporarilyUnresizable;
+                || (checkSupportsPip && mSupportsPictureInPicture));
     }
 
     boolean isResizeable() {
@@ -2089,7 +2074,7 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
             if (mLastNonFullscreenBounds != null) {
                 updateOverrideConfiguration(mLastNonFullscreenBounds);
             } else {
-                inStack.layoutTaskInStack(this, null);
+                mService.mStackSupervisor.getLaunchingBoundsController().layoutTask(this, null);
             }
         } else {
             updateOverrideConfiguration(inStack.mBounds);
@@ -2164,13 +2149,11 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
             pw.print(prefix); pw.print("realActivity=");
             pw.println(realActivity.flattenToShortString());
         }
-        if (autoRemoveRecents || isPersistable || !isActivityTypeStandard()
-                || mTaskToReturnTo != ACTIVITY_TYPE_STANDARD || numFullscreen != 0) {
+        if (autoRemoveRecents || isPersistable || !isActivityTypeStandard() || numFullscreen != 0) {
             pw.print(prefix); pw.print("autoRemoveRecents="); pw.print(autoRemoveRecents);
                     pw.print(" isPersistable="); pw.print(isPersistable);
                     pw.print(" numFullscreen="); pw.print(numFullscreen);
-                    pw.print(" activityType="); pw.print(getActivityType());
-                    pw.print(" mTaskToReturnTo="); pw.println(mTaskToReturnTo);
+                    pw.print(" activityType="); pw.println(getActivityType());
         }
         if (rootWasReset || mNeverRelinquishIdentity || mReuseTask
                 || mLockTaskAuth != LOCK_TASK_AUTH_PINNABLE) {
@@ -2253,7 +2236,7 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
 
     public void writeToProto(ProtoOutputStream proto, long fieldId) {
         final long token = proto.start(fieldId);
-        super.writeToProto(proto, CONFIGURATION_CONTAINER);
+        super.writeToProto(proto, CONFIGURATION_CONTAINER, false /* trim */);
         proto.write(ID, taskId);
         for (int i = mActivities.size() - 1; i >= 0; i--) {
             ActivityRecord activity = mActivities.get(i);
@@ -2270,7 +2253,6 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
             proto.write(ORIG_ACTIVITY, origActivity.flattenToShortString());
         }
         proto.write(ACTIVITY_TYPE, getActivityType());
-        proto.write(RETURN_TO_TYPE, mTaskToReturnTo);
         proto.write(RESIZE_MODE, mResizeMode);
         proto.write(FULLSCREEN, mFullscreen);
         if (mBounds != null) {
@@ -2279,5 +2261,20 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
         proto.write(MIN_WIDTH, mMinWidth);
         proto.write(MIN_HEIGHT, mMinHeight);
         proto.end(token);
+    }
+
+    /**
+     * See {@link #getNumRunningActivities(TaskActivitiesReport)}.
+     */
+    static class TaskActivitiesReport {
+        int numRunning;
+        int numActivities;
+        ActivityRecord top;
+        ActivityRecord base;
+
+        void reset() {
+            numRunning = numActivities = 0;
+            top = base = null;
+        }
     }
 }

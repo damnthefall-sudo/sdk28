@@ -337,6 +337,12 @@ public abstract class PackageManagerInternal {
     public abstract boolean isPackagePersistent(String packageName);
 
     /**
+     * Returns whether or not the given package represents a legacy system application released
+     * prior to runtime permissions.
+     */
+    public abstract boolean isLegacySystemApp(PackageParser.Package pkg);
+
+    /**
      * Get all overlay packages for a user.
      * @param userId The user for which to get the overlays.
      * @return A list of overlay packages. An empty list is returned if the
@@ -467,7 +473,4 @@ public abstract class PackageManagerInternal {
     /** Updates the flags for the given permission. */
     public abstract void updatePermissionFlagsTEMP(@NonNull String permName,
             @NonNull String packageName, int flagMask, int flagValues, int userId);
-    /** Returns a PermissionGroup. */
-    public abstract @Nullable PackageParser.PermissionGroup getPermissionGroupTEMP(
-            @NonNull String groupName);
 }

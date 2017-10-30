@@ -210,6 +210,12 @@ public class CarrierConfigManager {
     public static final String KEY_SUPPORT_SWAP_AFTER_MERGE_BOOL = "support_swap_after_merge_bool";
 
     /**
+     * Determine whether user can edit voicemail number in Settings.
+     */
+    public static final String KEY_EDITABLE_VOICEMAIL_NUMBER_SETTING_BOOL =
+            "editable_voicemail_number_setting_bool";
+
+    /**
      * Since the default voicemail number is empty, if a SIM card does not have a voicemail number
      * available the user cannot use voicemail. This flag allows the user to edit the voicemail
      * number in such cases, and is false by default.
@@ -1615,6 +1621,13 @@ public class CarrierConfigManager {
     public static final String KEY_SKIP_CF_FAIL_TO_DISABLE_DIALOG_BOOL =
             "skip_cf_fail_to_disable_dialog_bool";
 
+    /**
+     * List of the FAC (feature access codes) to dial as a normal call.
+     * @hide
+     */
+    public static final String KEY_FEATURE_ACCESS_CODES_STRING_ARRAY =
+            "feature_access_codes_string_array";
+
     /** The default value for every variable. */
     private final static PersistableBundle sDefaults;
 
@@ -1674,6 +1687,7 @@ public class CarrierConfigManager {
         sDefaults.putBoolean(KEY_SUPPORT_PAUSE_IMS_VIDEO_CALLS_BOOL, false);
         sDefaults.putBoolean(KEY_SUPPORT_SWAP_AFTER_MERGE_BOOL, true);
         sDefaults.putBoolean(KEY_USE_HFA_FOR_PROVISIONING_BOOL, false);
+        sDefaults.putBoolean(KEY_EDITABLE_VOICEMAIL_NUMBER_SETTING_BOOL, true);
         sDefaults.putBoolean(KEY_EDITABLE_VOICEMAIL_NUMBER_BOOL, false);
         sDefaults.putBoolean(KEY_USE_OTASP_FOR_PROVISIONING_BOOL, false);
         sDefaults.putBoolean(KEY_VOICEMAIL_NOTIFICATION_PERSISTENT_BOOL, false);
@@ -1887,6 +1901,7 @@ public class CarrierConfigManager {
         sDefaults.putStringArray(KEY_ROAMING_OPERATOR_STRING_ARRAY, null);
         sDefaults.putBoolean(KEY_SHOW_IMS_REGISTRATION_STATUS_BOOL, false);
         sDefaults.putBoolean(KEY_DISABLE_CHARGE_INDICATION_BOOL, false);
+        sDefaults.putStringArray(KEY_FEATURE_ACCESS_CODES_STRING_ARRAY, null);
     }
 
     /**

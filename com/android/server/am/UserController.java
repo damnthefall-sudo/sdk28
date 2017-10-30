@@ -117,20 +117,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 class UserController implements Handler.Callback {
     private static final String TAG = TAG_WITH_CLASS_NAME ? "UserController" : TAG_AM;
 
-    /**
-     * Maximum number of users we allow to be running at a time, including the system user and
-     * its profiles.
-     * Note changing this to 2 is not recommended, since that would mean, if the user uses
-     * work profile and then switch to a secondary user, then the work profile user would be killed,
-     * which should work fine, but aggressively killing the work profile user that has just been
-     * running could cause data loss.  (Even without work profile, witching from secondary user A
-     * to secondary user B would cause similar issues on user B.)
-     *
-     * TODO: Consider adding or replacing with "MAX_RUNNING_*SECONDARY*_USERS", which is the max
-     * number of running *secondary, switchable* users.
-     */
-    static final int MAX_RUNNING_USERS = 3;
-
     // Amount of time we wait for observers to handle a user switch before
     // giving up on them and unfreezing the screen.
     static final int USER_SWITCH_TIMEOUT_MS = 3 * 1000;
@@ -156,6 +142,17 @@ class UserController implements Handler.Callback {
     // USER_SWITCH_TIMEOUT_MS, an error is reported. Usually it indicates a problem in the observer
     // when it never calls back.
     private static final int USER_SWITCH_CALLBACKS_TIMEOUT_MS = 5 * 1000;
+
+    /**
+     * Maximum number of users we allow to be running at a time, including system user.
+     *
+     * <p>This parameter only affects how many background users will be stopped when switching to a
+     * new user. It has no impact on {@link #startUser(int, boolean)} behavior.
+     *
+     * <p>Note: Current and system user (and their related profiles) are never stopped when
+     * switching users. Due to that, the actual number of running users can exceed mMaxRunningUsers
+     */
+    int mMaxRunningUsers;
 
     // Lock for internal state.
     private final Object mLock = new Object();
@@ -245,26 +242,26 @@ class UserController implements Handler.Callback {
         finishUserBoot(uss);
         startProfiles();
         synchronized (mLock) {
-            stopRunningUsersLU(MAX_RUNNING_USERS);
+            stopRunningUsersLU(mMaxRunningUsers);
         }
     }
 
     void stopRunningUsersLU(int maxRunningUsers) {
-        int num = mUserLru.size();
+        int currentlyRunning = mUserLru.size();
         int i = 0;
-        while (num > maxRunningUsers && i < mUserLru.size()) {
+        while (currentlyRunning > maxRunningUsers && i < mUserLru.size()) {
             Integer oldUserId = mUserLru.get(i);
             UserState oldUss = mStartedUsers.get(oldUserId);
             if (oldUss == null) {
                 // Shouldn't happen, but be sane if it does.
                 mUserLru.remove(i);
-                num--;
+                currentlyRunning--;
                 continue;
             }
             if (oldUss.state == UserState.STATE_STOPPING
                     || oldUss.state == UserState.STATE_SHUTDOWN) {
                 // This user is already stopping, doesn't count.
-                num--;
+                currentlyRunning--;
                 i++;
                 continue;
             }
@@ -272,16 +269,15 @@ class UserController implements Handler.Callback {
                 // Owner/System user and current user can't be stopped. We count it as running
                 // when it is not a pure system user.
                 if (UserInfo.isSystemOnly(oldUserId)) {
-                    num--;
+                    currentlyRunning--;
                 }
                 i++;
                 continue;
             }
             // This is a user to be stopped.
-            if (stopUsersLU(oldUserId, false, null) != USER_OP_SUCCESS) {
-                num--;
+            if (stopUsersLU(oldUserId, false, null) == USER_OP_SUCCESS) {
+                currentlyRunning--;
             }
-            num--;
             i++;
         }
     }
@@ -814,7 +810,7 @@ class UserController implements Handler.Callback {
         }
         final int profilesToStartSize = profilesToStart.size();
         int i = 0;
-        for (; i < profilesToStartSize && i < (MAX_RUNNING_USERS - 1); ++i) {
+        for (; i < profilesToStartSize && i < (mMaxRunningUsers - 1); ++i) {
             startUser(profilesToStart.get(i).id, /* foreground= */ false);
         }
         if (i < profilesToStartSize) {
@@ -2021,7 +2017,7 @@ class UserController implements Handler.Callback {
 
         void loadUserRecents(int userId) {
             synchronized (mService) {
-                mService.mRecentTasks.loadUserRecentsLocked(userId);
+                mService.getRecentTasks().loadUserRecentsLocked(userId);
             }
         }
 

@@ -61,7 +61,7 @@ import android.net.Network;
 import android.net.NetworkUtils;
 import android.net.StaticIpConfiguration;
 import android.net.Uri;
-import android.net.ip.IpManager;
+import android.net.ip.IpClient;
 import android.net.wifi.IWifiManager;
 import android.net.wifi.ScanResult;
 import android.net.wifi.ScanSettings;
@@ -854,32 +854,6 @@ public class WifiServiceImpl extends IWifiManager.Stub {
         enforceAccessPermission();
         mLog.info("getWifiEnabledState uid=%").c(Binder.getCallingUid()).flush();
         return mWifiStateMachine.syncGetWifiState();
-    }
-
-    /**
-     * see {@link android.net.wifi.WifiManager#setWifiApEnabled(WifiConfiguration, boolean)}
-     * @param wifiConfig SSID, security and channel details as
-     *        part of WifiConfiguration
-     * @param enabled true to enable and false to disable
-     */
-    @Override
-    public void setWifiApEnabled(WifiConfiguration wifiConfig, boolean enabled) {
-        enforceChangePermission();
-        mWifiPermissionsUtil.enforceTetherChangePermission(mContext);
-
-        mLog.info("setWifiApEnabled uid=% enable=%").c(Binder.getCallingUid()).c(enabled).flush();
-
-        if (mUserManager.hasUserRestriction(UserManager.DISALLOW_CONFIG_TETHERING)) {
-            throw new SecurityException("DISALLOW_CONFIG_TETHERING is enabled for this user.");
-        }
-        // null wifiConfig is a meaningful input for CMD_SET_AP
-        if (wifiConfig == null || isValid(wifiConfig)) {
-            int mode = WifiManager.IFACE_IP_MODE_UNSPECIFIED;
-            SoftApModeConfiguration softApConfig = new SoftApModeConfiguration(mode, wifiConfig);
-            mWifiController.sendMessage(CMD_SET_AP, enabled ? 1 : 0, 0, softApConfig);
-        } else {
-            Slog.e(TAG, "Invalid WifiConfiguration");
-        }
     }
 
     /**
@@ -2304,11 +2278,11 @@ public class WifiServiceImpl extends IWifiManager.Stub {
             // WifiMetrics proto bytes were requested. Dump only these.
             mWifiStateMachine.updateWifiMetrics();
             mWifiMetrics.dump(fd, pw, args);
-        } else if (args != null && args.length > 0 && IpManager.DUMP_ARG.equals(args[0])) {
-            // IpManager dump was requested. Pass it along and take no further action.
-            String[] ipManagerArgs = new String[args.length - 1];
-            System.arraycopy(args, 1, ipManagerArgs, 0, ipManagerArgs.length);
-            mWifiStateMachine.dumpIpManager(fd, pw, ipManagerArgs);
+        } else if (args != null && args.length > 0 && IpClient.DUMP_ARG.equals(args[0])) {
+            // IpClient dump was requested. Pass it along and take no further action.
+            String[] ipClientArgs = new String[args.length - 1];
+            System.arraycopy(args, 1, ipClientArgs, 0, ipClientArgs.length);
+            mWifiStateMachine.dumpIpClient(fd, pw, ipClientArgs);
         } else if (args != null && args.length > 0 && WifiScoreReport.DUMP_ARG.equals(args[0])) {
             WifiScoreReport wifiScoreReport = mWifiStateMachine.getWifiScoreReport();
             if (wifiScoreReport != null) wifiScoreReport.dump(fd, pw, args);

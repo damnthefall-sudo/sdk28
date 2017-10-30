@@ -19,6 +19,7 @@ package com.android.server.pm.permission;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.content.pm.PackageParser;
+import android.content.pm.PermissionGroupInfo;
 import android.content.pm.PermissionInfo;
 import android.content.pm.PackageManager.NameNotFoundException;
 import android.content.pm.PackageManager.PermissionInfoFlags;
@@ -57,13 +58,17 @@ public abstract class PermissionManagerInternal {
         }
         public void onInstallPermissionRevoked() {
         }
-        public void onPermissionUpdated(int userId) {
+        public void onPermissionUpdated(int[] updatedUserIds, boolean sync) {
         }
         public void onPermissionRemoved() {
         }
         public void onInstallPermissionUpdated() {
         }
     }
+
+    public abstract void systemReady();
+
+    public abstract boolean isPermissionsReviewRequired(PackageParser.Package pkg, int userId);
 
     public abstract void grantRuntimePermission(
             @NonNull String permName, @NonNull String packageName, boolean overridePolicy,
@@ -78,9 +83,12 @@ public abstract class PermissionManagerInternal {
     public abstract void revokeRuntimePermission(@NonNull String permName,
             @NonNull String packageName, boolean overridePolicy, int callingUid, int userId,
             @Nullable PermissionCallback callback);
-    public abstract int[] revokeUnusedSharedUserPermissions(@NonNull SharedUserSetting suSetting,
-            @NonNull int[] allUserIds);
 
+    public abstract void updatePermissions(@Nullable String packageName,
+            @Nullable PackageParser.Package pkg, boolean replaceGrant,
+            @NonNull Collection<PackageParser.Package> allPacakges, PermissionCallback callback);
+    public abstract void updateAllPermissions(@Nullable String volumeUuid, boolean sdkUpdated,
+            @NonNull Collection<PackageParser.Package> allPacakges, PermissionCallback callback);
 
     /**
      * Add all permissions in the given package.
@@ -89,21 +97,27 @@ public abstract class PermissionManagerInternal {
      * the permission settings.
      */
     public abstract void addAllPermissions(@NonNull PackageParser.Package pkg, boolean chatty);
+    public abstract void addAllPermissionGroups(@NonNull PackageParser.Package pkg, boolean chatty);
     public abstract void removeAllPermissions(@NonNull PackageParser.Package pkg, boolean chatty);
     public abstract boolean addDynamicPermission(@NonNull PermissionInfo info, boolean async,
             int callingUid, @Nullable PermissionCallback callback);
     public abstract void removeDynamicPermission(@NonNull String permName, int callingUid,
             @Nullable PermissionCallback callback);
 
-    public abstract int updatePermissions(@Nullable String changingPkg,
-            @Nullable PackageParser.Package pkgInfo, int flags);
-    public abstract int updatePermissionTrees(@Nullable String changingPkg,
-            @Nullable PackageParser.Package pkgInfo, int flags);
-
     public abstract @Nullable String[] getAppOpPermissionPackages(@NonNull String permName);
 
     public abstract int getPermissionFlags(@NonNull String permName,
             @NonNull String packageName, int callingUid, int userId);
+    /**
+     * Retrieve all of the information we know about a particular group of permissions.
+     */
+    public abstract @Nullable PermissionGroupInfo getPermissionGroupInfo(
+            @NonNull String groupName, int flags, int callingUid);
+    /**
+     * Retrieve all of the known permission groups in the system.
+     */
+    public abstract @Nullable List<PermissionGroupInfo> getAllPermissionGroups(int flags,
+            int callingUid);
     /**
      * Retrieve all of the information we know about a particular permission.
      */
@@ -132,6 +146,7 @@ public abstract class PermissionManagerInternal {
 
     public abstract int checkPermission(@NonNull String permName, @NonNull String packageName,
             int callingUid, int userId);
+    public abstract int checkUidPermission(String permName, int uid, int callingUid);
 
     /**
      * Enforces the request is from the system or an app that has INTERACT_ACROSS_USERS
@@ -147,8 +162,5 @@ public abstract class PermissionManagerInternal {
     public abstract @NonNull DefaultPermissionGrantPolicy getDefaultPermissionGrantPolicy();
 
     /** HACK HACK methods to allow for partial migration of data to the PermissionManager class */
-    public abstract Iterator<BasePermission> getPermissionIteratorTEMP();
     public abstract @Nullable BasePermission getPermissionTEMP(@NonNull String permName);
-    public abstract void putPermissionTEMP(@NonNull String permName,
-            @NonNull BasePermission permission);
 }

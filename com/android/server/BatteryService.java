@@ -43,6 +43,7 @@ import android.hardware.health.V2_0.IHealthInfoCallback;
 import android.hardware.health.V2_0.IHealth;
 import android.hardware.health.V2_0.Result;
 import android.os.BatteryManager;
+import android.os.BatteryManagerProto;
 import android.os.BatteryManagerInternal;
 import android.os.BatteryProperty;
 import android.os.Binder;
@@ -252,39 +253,33 @@ public final class BatteryService extends SystemService {
             mHealthServiceWrapper.init(mHealthHalCallback,
                     new HealthServiceWrapper.IServiceManagerSupplier() {},
                     new HealthServiceWrapper.IHealthSupplier() {});
-        } catch (RemoteException | NoSuchElementException ex) {
-            Slog.w(TAG, "health: cannot register callback. "
-                        + "BatteryService will be started with dummy values. Reason: "
-                        + ex.getClass().getSimpleName() + ": " + ex.getMessage());
-            update(new HealthInfo());
-            return;
+        } catch (RemoteException ex) {
+            Slog.e(TAG, "health: cannot register callback. (RemoteException)");
+            throw ex.rethrowFromSystemServer();
+        } catch (NoSuchElementException ex) {
+            Slog.e(TAG, "health: cannot register callback. (no supported health HAL service)");
+            throw ex;
         }
 
         // init register for new service notifications, and IServiceManager should return the
         // existing service in a near future. Wait for this.update() to instantiate
         // the initial mHealthInfo.
-        long timeWaited = 0;
+        long beforeWait = SystemClock.uptimeMillis();
         synchronized (mLock) {
-            long beforeWait = SystemClock.uptimeMillis();
-            while (mHealthInfo == null &&
-                    (timeWaited = SystemClock.uptimeMillis() - beforeWait) < HEALTH_HAL_WAIT_MS) {
+            while (mHealthInfo == null) {
+                Slog.i(TAG, "health: Waited " + (SystemClock.uptimeMillis() - beforeWait) +
+                        "ms for callbacks. Waiting another " + HEALTH_HAL_WAIT_MS + " ms...");
                 try {
-                    mLock.wait(HEALTH_HAL_WAIT_MS - timeWaited);
+                    mLock.wait(HEALTH_HAL_WAIT_MS);
                 } catch (InterruptedException ex) {
-                    break;
+                    Slog.i(TAG, "health: InterruptedException when waiting for update. "
+                        + " Continuing...");
                 }
-            }
-            if (mHealthInfo == null) {
-                Slog.w(TAG, "health: Waited " + timeWaited + "ms for callbacks but received "
-                        + "nothing. BatteryService will be started with dummy values.");
-                update(new HealthInfo());
-                return;
             }
         }
 
-        if (DEBUG) {
-            Slog.d(TAG, "health: Waited " + timeWaited + "ms and received the update.");
-        }
+        Slog.i(TAG, "health: Waited " + (SystemClock.uptimeMillis() - beforeWait)
+                + "ms and received the update.");
     }
 
     private void updateBatteryWarningLevelLocked() {
@@ -913,13 +908,13 @@ public final class BatteryService extends SystemService {
 
         synchronized (mLock) {
             proto.write(BatteryServiceDumpProto.ARE_UPDATES_STOPPED, mUpdatesStopped);
-            int batteryPluggedValue = BatteryServiceDumpProto.BATTERY_PLUGGED_NONE;
+            int batteryPluggedValue = BatteryManagerProto.PLUG_TYPE_NONE;
             if (mHealthInfo.legacy.chargerAcOnline) {
-                batteryPluggedValue = BatteryServiceDumpProto.BATTERY_PLUGGED_AC;
+                batteryPluggedValue = BatteryManagerProto.PLUG_TYPE_AC;
             } else if (mHealthInfo.legacy.chargerUsbOnline) {
-                batteryPluggedValue = BatteryServiceDumpProto.BATTERY_PLUGGED_USB;
+                batteryPluggedValue = BatteryManagerProto.PLUG_TYPE_USB;
             } else if (mHealthInfo.legacy.chargerWirelessOnline) {
-                batteryPluggedValue = BatteryServiceDumpProto.BATTERY_PLUGGED_WIRELESS;
+                batteryPluggedValue = BatteryManagerProto.PLUG_TYPE_WIRELESS;
             }
             proto.write(BatteryServiceDumpProto.PLUGGED, batteryPluggedValue);
             proto.write(BatteryServiceDumpProto.MAX_CHARGING_CURRENT, mHealthInfo.legacy.maxChargingCurrent);
@@ -1060,6 +1055,7 @@ public final class BatteryService extends SystemService {
         }
         public int getProperty(int id, final BatteryProperty prop) throws RemoteException {
             IHealth service = mHealthServiceWrapper.getLastService();
+            if (service == null) throw new RemoteException("no health service");
             final MutableInt outResult = new MutableInt(Result.NOT_SUPPORTED);
             switch(id) {
                 case BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER:
@@ -1101,8 +1097,10 @@ public final class BatteryService extends SystemService {
             }
             return outResult.value;
         }
-        public void scheduleUpdate() {
-            Slog.e(TAG, "health: must not call scheduleUpdate on battery properties");
+        public void scheduleUpdate() throws RemoteException {
+            IHealth service = mHealthServiceWrapper.getLastService();
+            if (service == null) throw new RemoteException("no health service");
+            service.update();
         }
     }
 

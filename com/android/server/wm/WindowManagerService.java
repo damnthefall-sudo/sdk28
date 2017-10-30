@@ -357,8 +357,6 @@ public class WindowManagerService extends IWindowManager.Stub
     // trying to apply a new one.
     private static final boolean ALWAYS_KEEP_CURRENT = true;
 
-    private static final float DRAG_SHADOW_ALPHA_TRANSPARENT = .7071f;
-
     // Enums for animation scale update types.
     @Retention(RetentionPolicy.SOURCE)
     @IntDef({WINDOW_ANIMATION_SCALE, TRANSITION_ANIMATION_SCALE, ANIMATION_DURATION_SCALE})
@@ -394,13 +392,14 @@ public class WindowManagerService extends IWindowManager.Stub
 
     private final PriorityDump.PriorityDumper mPriorityDumper = new PriorityDump.PriorityDumper() {
         @Override
-        public void dumpCritical(FileDescriptor fd, PrintWriter pw, String[] args) {
-            doDump(fd, pw, new String[] {"-a"});
+        public void dumpCritical(FileDescriptor fd, PrintWriter pw, String[] args,
+                boolean asProto) {
+            doDump(fd, pw, new String[] {"-a"}, asProto);
         }
 
         @Override
-        public void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
-            doDump(fd, pw, args);
+        public void dump(FileDescriptor fd, PrintWriter pw, String[] args, boolean asProto) {
+            doDump(fd, pw, args, asProto);
         }
     };
 
@@ -752,7 +751,7 @@ public class WindowManagerService extends IWindowManager.Stub
     boolean mAllowTheaterModeWakeFromLayout;
 
     TaskPositioner mTaskPositioner;
-    DragState mDragState = null;
+    final DragDropController mDragDropController = new DragDropController();
 
     // For frozen screen animations.
     private int mExitAnimId, mEnterAnimId;
@@ -789,7 +788,7 @@ public class WindowManagerService extends IWindowManager.Stub
         public void onInputEvent(InputEvent event, int displayId) {
             boolean handled = false;
             try {
-                if (mDragState == null) {
+                if (mDragDropController.mDragState == null) {
                     // The drag has ended but the clean-up message has not been processed by
                     // window manager. Drop events that occur after this until window manager
                     // has a chance to clean-up the input handle.
@@ -828,12 +827,12 @@ public class WindowManagerService extends IWindowManager.Stub
                                     + newX + "," + newY);
                             mMuteInput = true;
                             synchronized (mWindowMap) {
-                                endDrag = mDragState.notifyDropLw(newX, newY);
+                                endDrag = mDragDropController.mDragState.notifyDropLw(newX, newY);
                             }
                         } else {
                             synchronized (mWindowMap) {
                                 // move the surface and tell the involved window(s) where we are
-                                mDragState.notifyMoveLw(newX, newY);
+                                mDragDropController.mDragState.notifyMoveLw(newX, newY);
                             }
                         }
                     } break;
@@ -843,7 +842,7 @@ public class WindowManagerService extends IWindowManager.Stub
                                 + newX + "," + newY);
                         mMuteInput = true;
                         synchronized (mWindowMap) {
-                            endDrag = mDragState.notifyDropLw(newX, newY);
+                            endDrag = mDragDropController.mDragState.notifyDropLw(newX, newY);
                         }
                     } break;
 
@@ -860,7 +859,7 @@ public class WindowManagerService extends IWindowManager.Stub
                         synchronized (mWindowMap) {
                             // endDragLw will post back to looper to dispose the receiver
                             // since we still need the receiver for the last finishInputEvent.
-                            mDragState.endDragLw();
+                            mDragDropController.mDragState.endDragLw();
                         }
                         mStylusButtonDownAtStart = false;
                         mIsStartEvent = true;
@@ -4637,73 +4636,6 @@ public class WindowManagerService extends IWindowManager.Stub
     }
 
     // -------------------------------------------------------------
-    // Drag and drop
-    // -------------------------------------------------------------
-
-    IBinder prepareDragSurface(IWindow window, SurfaceSession session,
-            int flags, int width, int height, Surface outSurface) {
-        if (DEBUG_DRAG) {
-            Slog.d(TAG_WM, "prepare drag surface: w=" + width + " h=" + height
-                    + " flags=" + Integer.toHexString(flags) + " win=" + window
-                    + " asbinder=" + window.asBinder());
-        }
-
-        final int callerPid = Binder.getCallingPid();
-        final int callerUid = Binder.getCallingUid();
-        final long origId = Binder.clearCallingIdentity();
-        IBinder token = null;
-
-        try {
-            synchronized (mWindowMap) {
-                try {
-                    if (mDragState == null) {
-                        // TODO(multi-display): support other displays
-                        final DisplayContent displayContent = getDefaultDisplayContentLocked();
-                        final Display display = displayContent.getDisplay();
-
-                        SurfaceControl surface = new SurfaceControl(session, "drag surface",
-                                width, height, PixelFormat.TRANSLUCENT, SurfaceControl.HIDDEN);
-                        surface.setLayerStack(display.getLayerStack());
-                        float alpha = 1;
-                        if ((flags & View.DRAG_FLAG_OPAQUE) == 0) {
-                            alpha = DRAG_SHADOW_ALPHA_TRANSPARENT;
-                        }
-                        surface.setAlpha(alpha);
-
-                        if (SHOW_TRANSACTIONS) Slog.i(TAG_WM, "  DRAG "
-                                + surface + ": CREATE");
-                        outSurface.copyFrom(surface);
-                        final IBinder winBinder = window.asBinder();
-                        token = new Binder();
-                        mDragState = new DragState(this, token, surface, flags, winBinder);
-                        mDragState.mPid = callerPid;
-                        mDragState.mUid = callerUid;
-                        mDragState.mOriginalAlpha = alpha;
-                        token = mDragState.mToken = new Binder();
-
-                        // 5 second timeout for this window to actually begin the drag
-                        mH.removeMessages(H.DRAG_START_TIMEOUT, winBinder);
-                        Message msg = mH.obtainMessage(H.DRAG_START_TIMEOUT, winBinder);
-                        mH.sendMessageDelayed(msg, 5000);
-                    } else {
-                        Slog.w(TAG_WM, "Drag already in progress");
-                    }
-                } catch (OutOfResourcesException e) {
-                    Slog.e(TAG_WM, "Can't allocate drag surface w=" + width + " h=" + height, e);
-                    if (mDragState != null) {
-                        mDragState.reset();
-                        mDragState = null;
-                    }
-                }
-            }
-        } finally {
-            Binder.restoreCallingIdentity(origId);
-        }
-
-        return token;
-    }
-
-    // -------------------------------------------------------------
     // Input Events and Focus Management
     // -------------------------------------------------------------
 
@@ -4866,6 +4798,7 @@ public class WindowManagerService extends IWindowManager.Stub
         public static final int REPORT_WINDOWS_CHANGE = 19;
         public static final int DRAG_START_TIMEOUT = 20;
         public static final int DRAG_END_TIMEOUT = 21;
+
         public static final int REPORT_HARD_KEYBOARD_STATUS_CHANGE = 22;
         public static final int BOOT_TIMEOUT = 23;
         public static final int WAITING_FOR_DRAWN_TIMEOUT = 24;
@@ -5120,47 +5053,12 @@ public class WindowManagerService extends IWindowManager.Stub
                     break;
                 }
 
-                case DRAG_START_TIMEOUT: {
-                    IBinder win = (IBinder)msg.obj;
-                    if (DEBUG_DRAG) {
-                        Slog.w(TAG_WM, "Timeout starting drag by win " + win);
-                    }
-                    synchronized (mWindowMap) {
-                        // !!! TODO: ANR the app that has failed to start the drag in time
-                        if (mDragState != null) {
-                            mDragState.unregister();
-                            mDragState.reset();
-                            mDragState = null;
-                        }
-                    }
-                    break;
-                }
-
-                case DRAG_END_TIMEOUT: {
-                    IBinder win = (IBinder)msg.obj;
-                    if (DEBUG_DRAG) {
-                        Slog.w(TAG_WM, "Timeout ending drag to win " + win);
-                    }
-                    synchronized (mWindowMap) {
-                        // !!! TODO: ANR the drag-receiving app
-                        if (mDragState != null) {
-                            mDragState.mDragResult = false;
-                            mDragState.endDragLw();
-                        }
-                    }
-                    break;
-                }
-
+                case DRAG_START_TIMEOUT:
+                case DRAG_END_TIMEOUT:
                 case TEAR_DOWN_DRAG_AND_DROP_INPUT: {
-                    if (DEBUG_DRAG) Slog.d(TAG_WM, "Drag ending; tearing down input channel");
-                    DragState.InputInterceptor interceptor = (DragState.InputInterceptor) msg.obj;
-                    if (interceptor != null) {
-                        synchronized (mWindowMap) {
-                            interceptor.tearDown();
-                        }
-                    }
+                    mDragDropController.handleMessage(WindowManagerService.this, msg);
+                    break;
                 }
-                break;
 
                 case REPORT_HARD_KEYBOARD_STATUS_CHANGE: {
                     notifyHardKeyboardStatusChange();
@@ -6532,9 +6430,16 @@ public class WindowManagerService extends IWindowManager.Stub
         }
     }
 
-    private void writeToProtoLocked(ProtoOutputStream proto) {
+    /**
+     * Write to a protocol buffer output stream. Protocol buffer message definition is at
+     * {@link com.android.server.wm.proto.WindowManagerServiceProto}.
+     *
+     * @param proto     Stream to write the WindowContainer object to.
+     * @param trim      If true, reduce the amount of data written.
+     */
+    private void writeToProtoLocked(ProtoOutputStream proto, boolean trim) {
         mPolicy.writeToProto(proto, POLICY);
-        mRoot.writeToProto(proto, ROOT_WINDOW_CONTAINER);
+        mRoot.writeToProto(proto, ROOT_WINDOW_CONTAINER, trim);
         if (mCurrentFocus != null) {
             mCurrentFocus.writeIdentifierToProto(proto, FOCUSED_WINDOW);
         }
@@ -6825,10 +6730,9 @@ public class WindowManagerService extends IWindowManager.Stub
         PriorityDump.dump(mPriorityDumper, fd, pw, args);
     }
 
-    private void doDump(FileDescriptor fd, PrintWriter pw, String[] args) {
+    private void doDump(FileDescriptor fd, PrintWriter pw, String[] args, boolean useProto) {
         if (!DumpUtils.checkDumpPermission(mContext, TAG, pw)) return;
         boolean dumpAll = false;
-        boolean useProto = false;
 
         int opti = 0;
         while (opti < args.length) {
@@ -6839,8 +6743,6 @@ public class WindowManagerService extends IWindowManager.Stub
             opti++;
             if ("-a".equals(opt)) {
                 dumpAll = true;
-            } else if ("--proto".equals(opt)) {
-                useProto = true;
             } else if ("-h".equals(opt)) {
                 pw.println("Window manager dump options:");
                 pw.println("  [-a] [-h] [cmd] ...");
@@ -6870,7 +6772,7 @@ public class WindowManagerService extends IWindowManager.Stub
         if (useProto) {
             final ProtoOutputStream proto = new ProtoOutputStream(fd);
             synchronized (mWindowMap) {
-                writeToProtoLocked(proto);
+                writeToProtoLocked(proto, false /* trim */);
             }
             proto.flush();
             return;
@@ -7268,7 +7170,7 @@ public class WindowManagerService extends IWindowManager.Stub
         }
 
         synchronized (mWindowMap) {
-            if (mDragState != null) {
+            if (mDragDropController.mDragState != null) {
                 // Drag cursor overrides the app cursor.
                 return;
             }
@@ -7702,7 +7604,8 @@ public class WindowManagerService extends IWindowManager.Stub
     }
 
     boolean hasWideColorGamutSupport() {
-        return mHasWideColorGamutSupport;
+        return mHasWideColorGamutSupport &&
+                !SystemProperties.getBoolean("persist.sys.sf.native_mode", false);
     }
 
     void updateNonSystemOverlayWindowsVisibilityIfNeeded(WindowState win, boolean surfaceShown) {
