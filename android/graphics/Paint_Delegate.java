@@ -950,7 +950,7 @@ public class Paint_Delegate {
     }
 
     @LayoutlibDelegate
-    /*package*/ static void nSetTextLocalesByMinikinLangListId(long paintPtr,
+    /*package*/ static void nSetTextLocalesByMinikinLocaleListId(long paintPtr,
             int mMinikinLangListId) {
         // FIXME
     }

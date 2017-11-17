@@ -16,14 +16,16 @@
 
 package android.os;
 
+import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.app.AppGlobals;
 import android.content.Context;
 import android.util.Log;
 
 import com.android.internal.util.FastPrintWriter;
+import com.android.internal.util.Preconditions;
 import com.android.internal.util.TypedProperties;
 
-import dalvik.bytecode.OpcodeInfo;
 import dalvik.system.VMDebug;
 
 import org.apache.harmony.dalvik.ddmc.Chunk;
@@ -46,8 +48,6 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.HashMap;
 import java.util.Map;
-
-
 
 
 /**
@@ -1959,13 +1959,7 @@ public final class Debug
      */
     @Deprecated
     public static class InstructionCount {
-        private static final int NUM_INSTR =
-            OpcodeInfo.MAXIMUM_PACKED_VALUE + 1;
-
-        private int[] mCounts;
-
         public InstructionCount() {
-            mCounts = new int[NUM_INSTR];
         }
 
         /**
@@ -1975,13 +1969,7 @@ public final class Debug
          * @return true if counting was started
          */
         public boolean resetAndStart() {
-            try {
-                VMDebug.startInstructionCounting();
-                VMDebug.resetInstructionCount();
-            } catch (UnsupportedOperationException uoe) {
-                return false;
-            }
-            return true;
+            return false;
         }
 
         /**
@@ -1989,13 +1977,7 @@ public final class Debug
          * counting process.
          */
         public boolean collect() {
-            try {
-                VMDebug.stopInstructionCounting();
-                VMDebug.getInstructionCount(mCounts);
-            } catch (UnsupportedOperationException uoe) {
-                return false;
-            }
-            return true;
+            return false;
         }
 
         /**
@@ -2003,13 +1985,7 @@ public final class Debug
          * all threads).
          */
         public int globalTotal() {
-            int count = 0;
-
-            for (int i = 0; i < NUM_INSTR; i++) {
-                count += mCounts[i];
-            }
-
-            return count;
+            return 0;
         }
 
         /**
@@ -2017,15 +1993,7 @@ public final class Debug
          * executed globally.
          */
         public int globalMethodInvocations() {
-            int count = 0;
-
-            for (int i = 0; i < NUM_INSTR; i++) {
-                if (OpcodeInfo.isInvoke(i)) {
-                    count += mCounts[i];
-                }
-            }
-
-            return count;
+            return 0;
         }
     }
 
@@ -2381,5 +2349,25 @@ public final class Debug
      */
     public static String getCaller() {
         return getCaller(Thread.currentThread().getStackTrace(), 0);
+    }
+
+    /**
+     * Attach a library as a jvmti agent to the current runtime.
+     *
+     * @param library library containing the agent
+     * @param options options passed to the agent
+     *
+     * @throws IOException If the agent could not be attached
+     */
+    public static void attachJvmtiAgent(@NonNull String library, @Nullable String options)
+            throws IOException {
+        Preconditions.checkNotNull(library);
+        Preconditions.checkArgument(!library.contains("="));
+
+        if (options == null) {
+            VMDebug.attachAgent(library);
+        } else {
+            VMDebug.attachAgent(library + "=" + options);
+        }
     }
 }

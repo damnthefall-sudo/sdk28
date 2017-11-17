@@ -20,6 +20,7 @@ import android.content.Context;
 import android.content.res.XmlResourceParser;
 import android.icu.text.TimeZoneFormat;
 import android.icu.text.TimeZoneNames;
+import android.support.annotation.VisibleForTesting;
 import android.support.v4.text.BidiFormatter;
 import android.support.v4.text.TextDirectionHeuristicsCompat;
 import android.text.SpannableString;
@@ -31,6 +32,8 @@ import android.util.Log;
 import android.view.View;
 
 import com.android.settingslib.R;
+
+import libcore.util.TimeZoneFinder;
 
 import org.xmlpull.v1.XmlPullParserException;
 
@@ -349,7 +352,8 @@ public class ZoneGetter {
         return gmtText;
     }
 
-    private static final class ZoneGetterData {
+    @VisibleForTesting
+    public static final class ZoneGetterData {
         public final String[] olsonIdsToDisplay;
         public final CharSequence[] gmtOffsetTexts;
         public final TimeZone[] timeZones;
@@ -376,10 +380,13 @@ public class ZoneGetter {
             }
 
             // Create a lookup of local zone IDs.
-            localZoneIds = new HashSet<String>();
-            for (String olsonId : libcore.icu.TimeZoneNames.forLocale(locale)) {
-                localZoneIds.add(olsonId);
-            }
+            final List<String> zoneIds = lookupTimeZoneIdsByCountry(locale.getCountry());
+            localZoneIds = new HashSet<>(zoneIds);
+        }
+
+        @VisibleForTesting
+        public List<String> lookupTimeZoneIdsByCountry(String country) {
+            return TimeZoneFinder.getInstance().lookupTimeZoneIdsByCountry(country);
         }
     }
 }

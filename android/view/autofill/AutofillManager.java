@@ -54,6 +54,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
+// TODO: use java.lang.ref.Cleaner once Android supports Java 9
+import sun.misc.Cleaner;
+
 /**
  * The {@link AutofillManager} provides ways for apps and custom views to integrate with the
  * Autofill Framework lifecycle.
@@ -301,6 +304,9 @@ public final class AutofillManager {
 
     @GuardedBy("mLock")
     private IAutoFillManagerClient mServiceClient;
+
+    @GuardedBy("mLock")
+    private Cleaner mServiceClientCleaner;
 
     @GuardedBy("mLock")
     private AutofillCallback mCallback;
@@ -1172,10 +1178,19 @@ public final class AutofillManager {
         if (mServiceClient == null) {
             mServiceClient = new AutofillManagerClient(this);
             try {
-                final int flags = mService.addClient(mServiceClient, mContext.getUserId());
+                final int userId = mContext.getUserId();
+                final int flags = mService.addClient(mServiceClient, userId);
                 mEnabled = (flags & FLAG_ADD_CLIENT_ENABLED) != 0;
                 sDebug = (flags & FLAG_ADD_CLIENT_DEBUG) != 0;
                 sVerbose = (flags & FLAG_ADD_CLIENT_VERBOSE) != 0;
+                final IAutoFillManager service = mService;
+                final IAutoFillManagerClient serviceClient = mServiceClient;
+                mServiceClientCleaner = Cleaner.create(this, () -> {
+                    try {
+                        service.removeClient(serviceClient, userId);
+                    } catch (RemoteException e) {
+                    }
+                });
             } catch (RemoteException e) {
                 throw e.rethrowFromSystemServer();
             }
@@ -1272,18 +1287,36 @@ public final class AutofillManager {
         }
     }
 
-    private void setState(boolean enabled, boolean resetSession, boolean resetClient) {
+    /** @hide */
+    public static final int SET_STATE_FLAG_ENABLED = 0x01;
+    /** @hide */
+    public static final int SET_STATE_FLAG_RESET_SESSION = 0x02;
+    /** @hide */
+    public static final int SET_STATE_FLAG_RESET_CLIENT = 0x04;
+    /** @hide */
+    public static final int SET_STATE_FLAG_DEBUG = 0x08;
+    /** @hide */
+    public static final int SET_STATE_FLAG_VERBOSE = 0x10;
+
+    private void setState(int flags) {
+        if (sVerbose) Log.v(TAG, "setState(" + flags + ")");
         synchronized (mLock) {
-            mEnabled = enabled;
-            if (!mEnabled || resetSession) {
+            mEnabled = (flags & SET_STATE_FLAG_ENABLED) != 0;
+            if (!mEnabled || (flags & SET_STATE_FLAG_RESET_SESSION) != 0) {
                 // Reset the session state
                 resetSessionLocked();
             }
-            if (resetClient) {
+            if ((flags & SET_STATE_FLAG_RESET_CLIENT) != 0) {
                 // Reset connection to system
                 mServiceClient = null;
+                if (mServiceClientCleaner != null) {
+                    mServiceClientCleaner.clean();
+                    mServiceClientCleaner = null;
+                }
             }
         }
+        sDebug = (flags & SET_STATE_FLAG_DEBUG) != 0;
+        sVerbose = (flags & SET_STATE_FLAG_VERBOSE) != 0;
     }
 
     /**
@@ -1609,6 +1642,7 @@ public final class AutofillManager {
         pw.print(pfx); pw.print("sessionId: "); pw.println(mSessionId);
         pw.print(pfx); pw.print("state: "); pw.println(getStateAsStringLocked());
         pw.print(pfx); pw.print("context: "); pw.println(mContext);
+        pw.print(pfx); pw.print("client: "); pw.println(getClientLocked());
         pw.print(pfx); pw.print("enabled: "); pw.println(mEnabled);
         pw.print(pfx); pw.print("hasService: "); pw.println(mService != null);
         pw.print(pfx); pw.print("hasCallback: "); pw.println(mCallback != null);
@@ -1625,6 +1659,8 @@ public final class AutofillManager {
         pw.print(pfx); pw.print("fillable ids: "); pw.println(mFillableIds);
         pw.print(pfx); pw.print("save trigger id: "); pw.println(mSaveTriggerId);
         pw.print(pfx); pw.print("save on finish(): "); pw.println(mSaveOnFinish);
+        pw.print(pfx); pw.print("debug: "); pw.print(sDebug);
+        pw.print(" verbose: "); pw.println(sVerbose);
     }
 
     private String getStateAsStringLocked() {
@@ -1880,7 +1916,7 @@ public final class AutofillManager {
     public abstract static class AutofillCallback {
 
         /** @hide */
-        @IntDef({EVENT_INPUT_SHOWN, EVENT_INPUT_HIDDEN})
+        @IntDef({EVENT_INPUT_SHOWN, EVENT_INPUT_HIDDEN, EVENT_INPUT_UNAVAILABLE})
         @Retention(RetentionPolicy.SOURCE)
         public @interface AutofillEventType {}
 
@@ -1940,10 +1976,10 @@ public final class AutofillManager {
         }
 
         @Override
-        public void setState(boolean enabled, boolean resetSession, boolean resetClient) {
+        public void setState(int flags) {
             final AutofillManager afm = mAfm.get();
             if (afm != null) {
-                afm.post(() -> afm.setState(enabled, resetSession, resetClient));
+                afm.post(() -> afm.setState(flags));
             }
         }
 

@@ -23,7 +23,11 @@ import android.content.res.Resources;
 import android.content.res.TypedArray;
 import android.graphics.Canvas;
 import android.graphics.Paint;
+import android.graphics.Rect;
+import android.graphics.drawable.Drawable;
 import android.os.Handler;
+import android.os.Parcel;
+import android.os.Parcelable;
 import android.support.annotation.IdRes;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
@@ -33,6 +37,7 @@ import android.support.car.R;
 import android.support.v7.widget.RecyclerView;
 import android.util.AttributeSet;
 import android.util.Log;
+import android.util.SparseArray;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
@@ -41,11 +46,17 @@ import android.widget.FrameLayout;
 /**
  * Custom {@link android.support.v7.widget.RecyclerView} that displays a list of items that
  * resembles a {@link android.widget.ListView} but also has page up and page down arrows on the
- * right side.
+ * left side.
  */
 public class PagedListView extends FrameLayout {
     /** Default maximum number of clicks allowed on a list */
     public static final int DEFAULT_MAX_CLICKS = 6;
+
+    /**
+     * Value to pass to {@link #setMaxPages(int)} to indicate there is no restriction on the
+     * maximum number of pages to show.
+     */
+    public static final int UNLIMITED_PAGES = -1;
 
     /**
      * The amount of time after settling to wait before autoscrolling to the next page when the user
@@ -57,7 +68,7 @@ public class PagedListView extends FrameLayout {
     private static final int INVALID_RESOURCE_ID = -1;
 
     protected final CarRecyclerView mRecyclerView;
-    protected final CarLayoutManager mLayoutManager;
+    protected final PagedLayoutManager mLayoutManager;
     protected final Handler mHandler = new Handler();
     private final boolean mScrollBarEnabled;
     private final PagedScrollBarView mScrollBarView;
@@ -65,8 +76,8 @@ public class PagedListView extends FrameLayout {
     private int mRowsPerPage = -1;
     protected RecyclerView.Adapter<? extends RecyclerView.ViewHolder> mAdapter;
 
-    /** Maximum number of pages to show. Values < 0 show all pages. */
-    private int mMaxPages = -1;
+    /** Maximum number of pages to show. */
+    private int mMaxPages;
 
     protected OnScrollListener mOnScrollListener;
 
@@ -115,8 +126,6 @@ public class PagedListView extends FrameLayout {
      * the item in position 20 instead, for position 1 it will show the item in position 21 instead
      * and so on.
      */
-    // TODO(b/28003781): ItemPositionOffset and ItemCap interfaces should be merged once
-    // we enable AlphaJump outside drawer.
     public interface ItemPositionOffset {
         /** Sets the position offset for the adapter. */
         void setPositionOffset(int positionOffset);
@@ -151,7 +160,7 @@ public class PagedListView extends FrameLayout {
 
         mMaxPages = getDefaultMaxPages();
 
-        mLayoutManager = new CarLayoutManager(context);
+        mLayoutManager = new PagedLayoutManager(context);
         mLayoutManager.setOffsetRows(offsetRows);
         mRecyclerView.setLayoutManager(mLayoutManager);
         mRecyclerView.setOnScrollListener(mRecyclerViewOnScrollListener);
@@ -162,7 +171,7 @@ public class PagedListView extends FrameLayout {
         if (offsetScrollBar) {
             MarginLayoutParams params = (MarginLayoutParams) mRecyclerView.getLayoutParams();
             params.setMarginStart(getResources().getDimensionPixelSize(
-                    R.dimen.car_screen_margin_size));
+                    R.dimen.car_margin));
             params.setMarginEnd(
                     a.getDimensionPixelSize(R.styleable.PagedListView_listEndMargin, 0));
             mRecyclerView.setLayoutParams(params);
@@ -178,6 +187,11 @@ public class PagedListView extends FrameLayout {
 
             mRecyclerView.addItemDecoration(new DividerDecoration(context, dividerStartMargin,
                     dividerStartId, dividerEndId));
+        }
+
+        int itemSpacing = a.getDimensionPixelSize(R.styleable.PagedListView_itemSpacing, 0);
+        if (itemSpacing > 0) {
+            mRecyclerView.addItemDecoration(new ItemSpacingDecoration(itemSpacing));
         }
 
         // Set this to true so that this view consumes clicks events and views underneath
@@ -212,6 +226,16 @@ public class PagedListView extends FrameLayout {
                     }
                 });
 
+        Drawable upButtonIcon = a.getDrawable(R.styleable.PagedListView_upButtonIcon);
+        if (upButtonIcon != null) {
+            setUpButtonIcon(upButtonIcon);
+        }
+
+        Drawable downButtonIcon = a.getDrawable(R.styleable.PagedListView_downButtonIcon);
+        if (downButtonIcon != null) {
+            setDownButtonIcon(downButtonIcon);
+        }
+
         mScrollBarView.setVisibility(mScrollBarEnabled ? VISIBLE : GONE);
 
         // Modify the layout the Scroll Bar is not visible.
@@ -236,7 +260,7 @@ public class PagedListView extends FrameLayout {
         if (e.getAction() == MotionEvent.ACTION_DOWN) {
             // The user has interacted with the list using touch. All movements will now paginate
             // the list.
-            mLayoutManager.setRowOffsetMode(CarLayoutManager.ROW_OFFSET_MODE_PAGE);
+            mLayoutManager.setRowOffsetMode(PagedLayoutManager.ROW_OFFSET_MODE_PAGE);
         }
         return super.onInterceptTouchEvent(e);
     }
@@ -246,7 +270,7 @@ public class PagedListView extends FrameLayout {
         super.requestChildFocus(child, focused);
         // The user has interacted with the list using the controller. Movements through the list
         // will now be one row at a time.
-        mLayoutManager.setRowOffsetMode(CarLayoutManager.ROW_OFFSET_MODE_INDIVIDUAL);
+        mLayoutManager.setRowOffsetMode(PagedLayoutManager.ROW_OFFSET_MODE_INDIVIDUAL);
     }
 
     /**
@@ -312,19 +336,25 @@ public class PagedListView extends FrameLayout {
         mHandler.post(mUpdatePaginationRunnable);
     }
 
+    /** Sets the icon to be used for the up button. */
+    public void setUpButtonIcon(Drawable icon) {
+        mScrollBarView.setUpButtonIcon(icon);
+    }
+
+    /** Sets the icon to be used for the down button. */
+    public void setDownButtonIcon(Drawable icon) {
+        mScrollBarView.setDownButtonIcon(icon);
+    }
+
     /**
      * Sets the adapter for the list.
      *
-     * <p>It <em>must</em> implement {@link ItemCap}, otherwise, will throw an {@link
-     * IllegalArgumentException}.
+     * <p>The given Adapter can implement {@link ItemCap} if it wishes to control the behavior of
+     * a max number of items. Otherwise, methods in the PagedListView to limit the content, such as
+     * {@link #setMaxPages(int)}, will do nothing.
      */
     public void setAdapter(
             @NonNull RecyclerView.Adapter<? extends RecyclerView.ViewHolder> adapter) {
-        if (!(adapter instanceof ItemCap)) {
-            throw new IllegalArgumentException("ERROR: adapter ["
-                    + adapter.getClass().getCanonicalName() + "] MUST implement ItemCap");
-        }
-
         mAdapter = adapter;
         mRecyclerView.setAdapter(adapter);
         updateMaxItems();
@@ -333,7 +363,7 @@ public class PagedListView extends FrameLayout {
     /** @hide */
     @RestrictTo(LIBRARY_GROUP)
     @NonNull
-    public CarLayoutManager getLayoutManager() {
+    public PagedLayoutManager getLayoutManager() {
         return mLayoutManager;
     }
 
@@ -345,15 +375,19 @@ public class PagedListView extends FrameLayout {
 
     /**
      * Sets the maximum number of the pages that can be shown in the PagedListView. The size of a
-     * page is  defined as the number of items that fit completely on the screen at once.
+     * page is defined as the number of items that fit completely on the screen at once.
      *
-     * @param maxPages The maximum number of pages that fit on the screen. Should be positive.
+     * <p>Passing {@link #UNLIMITED_PAGES} will remove any restrictions on a maximum number
+     * of pages.
+     *
+     * <p>Note that for any restriction on maximum pages to work, the adapter passed to this
+     * PagedListView needs to implement {@link ItemCap}.
+     *
+     * @param maxPages The maximum number of pages that fit on the screen. Should be positive or
+     * {@link #UNLIMITED_PAGES}.
      */
     public void setMaxPages(int maxPages) {
-        if (maxPages < 0) {
-            return;
-        }
-        mMaxPages = maxPages;
+        mMaxPages = Math.max(UNLIMITED_PAGES, maxPages);
         updateMaxItems();
     }
 
@@ -362,7 +396,8 @@ public class PagedListView extends FrameLayout {
      * {@link #setMaxPages(int)}. If that method has not been called, then this value should match
      * the default value.
      *
-     * @return The maximum number of pages to be shown.
+     * @return The maximum number of pages to be shown or {@link #UNLIMITED_PAGES} if there is
+     * no limit.
      */
     public int getMaxPages() {
         return mMaxPages;
@@ -370,7 +405,7 @@ public class PagedListView extends FrameLayout {
 
     /**
      * Gets the number of rows per page. Default value of mRowsPerPage is -1. If the first child of
-     * CarLayoutManager is null or the height of the first child is 0, it will return 1.
+     * PagedLayoutManager is null or the height of the first child is 0, it will return 1.
      */
     public int getRowsPerPage() {
         return mRowsPerPage;
@@ -419,6 +454,32 @@ public class PagedListView extends FrameLayout {
      */
     public void removeItemDecoration(@NonNull RecyclerView.ItemDecoration decor) {
         mRecyclerView.removeItemDecoration(decor);
+    }
+
+    /**
+     * Sets spacing between each item in the list. The spacing will not be added before the first
+     * item and after the last.
+     *
+     * @param itemSpacing the spacing between each item.
+     */
+    public void setItemSpacing(int itemSpacing) {
+        ItemSpacingDecoration existing = null;
+        for (int i = 0, count = mRecyclerView.getItemDecorationCount(); i < count; i++) {
+            RecyclerView.ItemDecoration itemDecoration = mRecyclerView.getItemDecorationAt(i);
+            if (itemDecoration instanceof ItemSpacingDecoration) {
+                existing = (ItemSpacingDecoration) itemDecoration;
+                break;
+            }
+        }
+
+        if (itemSpacing == 0 && existing != null) {
+            mRecyclerView.removeItemDecoration(existing);
+        } else if (existing == null) {
+            mRecyclerView.addItemDecoration(new ItemSpacingDecoration(itemSpacing));
+        } else {
+            existing.setItemSpacing(itemSpacing);
+        }
+        mRecyclerView.invalidateItemDecorations();
     }
 
     /**
@@ -520,6 +581,7 @@ public class PagedListView extends FrameLayout {
             return;
         }
         mDefaultMaxPages = newDefault;
+        resetMaxPages();
     }
 
     /** Returns the default number of pages the list should have */
@@ -646,8 +708,15 @@ public class PagedListView extends FrameLayout {
             return;
         }
 
-        final int originalCount = mAdapter.getItemCount();
+        // Ensure mRowsPerPage regardless of if the adapter implements ItemCap.
         updateRowsPerPage();
+
+        // If the adapter does not implement ItemCap, then the max items on it cannot be updated.
+        if (!(mAdapter instanceof ItemCap)) {
+            return;
+        }
+
+        final int originalCount = mAdapter.getItemCount();
         ((ItemCap) mAdapter).setMaxItems(calculateMaxItemCount());
         final int newCount = mAdapter.getItemCount();
         if (newCount == originalCount) {
@@ -681,6 +750,78 @@ public class PagedListView extends FrameLayout {
         } else {
             mRowsPerPage = Math.max(1, (getHeight() - getPaddingTop()) / firstChild.getHeight());
         }
+    }
+
+    @Override
+    protected Parcelable onSaveInstanceState() {
+        SavedState savedState = new SavedState(super.onSaveInstanceState());
+        savedState.mLayoutManagerState = mLayoutManager.onSaveInstanceState();
+        return savedState;
+    }
+
+    @Override
+    protected void onRestoreInstanceState(Parcelable state) {
+        SavedState savedState = (SavedState) state;
+        mLayoutManager.onRestoreInstanceState(savedState.mLayoutManagerState);
+        super.onRestoreInstanceState(savedState.getSuperState());
+    }
+
+    @Override
+    protected void dispatchSaveInstanceState(SparseArray<Parcelable> container) {
+        // There is the possibility of multiple PagedListViews on a page. This means that the ids
+        // of the child Views of PagedListView are no longer unique, and onSaveInstanceState()
+        // cannot be used. As a result, PagedListViews needs to manually dispatch the instance
+        // states. Call dispatchFreezeSelfOnly() so that no child views have onSaveInstanceState()
+        // called by the system.
+        dispatchFreezeSelfOnly(container);
+    }
+
+    @Override
+    protected void dispatchRestoreInstanceState(SparseArray<Parcelable> container) {
+        // Prevent onRestoreInstanceState() from being called on child Views. Instead, PagedListView
+        // will manually handle passing the state. See the comment in dispatchSaveInstanceState()
+        // for more information.
+        dispatchThawSelfOnly(container);
+    }
+
+    /** The state that will be saved across configuration changes. */
+    private static class SavedState extends BaseSavedState {
+        /** The state of the {@link #mLayoutManager} of this PagedListView. */
+        Parcelable mLayoutManagerState;
+
+        SavedState(Parcelable superState) {
+            super(superState);
+        }
+
+        private SavedState(Parcel in) {
+            super(in);
+            mLayoutManagerState =
+                    in.readParcelable(PagedLayoutManager.SavedState.class.getClassLoader());
+        }
+
+        @Override
+        public void writeToParcel(Parcel out, int flags) {
+            super.writeToParcel(out, flags);
+            out.writeParcelable(mLayoutManagerState, flags);
+        }
+
+        public static final ClassLoaderCreator<SavedState> CREATOR =
+                new ClassLoaderCreator<SavedState>() {
+                    @Override
+                    public SavedState createFromParcel(Parcel source, ClassLoader loader) {
+                        return new SavedState(source);
+                    }
+
+                    @Override
+                    public SavedState createFromParcel(Parcel source) {
+                        return createFromParcel(source, null /* loader */);
+                    }
+
+                    @Override
+                    public SavedState[] newArray(int size) {
+                        return new SavedState[size];
+                    }
+                };
     }
 
     private final RecyclerView.OnScrollListener mRecyclerViewOnScrollListener =
@@ -766,16 +907,50 @@ public class PagedListView extends FrameLayout {
     }
 
     /**
+     * A {@link android.support.v7.widget.RecyclerView.ItemDecoration} that will add spacing
+     * between each item in the RecyclerView that it is added to.
+     */
+    private static class ItemSpacingDecoration extends RecyclerView.ItemDecoration {
+
+        private int mHalfItemSpacing;
+
+        private ItemSpacingDecoration(int itemSpacing) {
+            mHalfItemSpacing = itemSpacing / 2;
+        }
+
+        @Override
+        public void getItemOffsets(Rect outRect, View view, RecyclerView parent,
+                RecyclerView.State state) {
+            super.getItemOffsets(outRect, view, parent, state);
+            // Skip top offset for first item and bottom offset for last.
+            int position = parent.getChildAdapterPosition(view);
+            if (position > 0) {
+                outRect.top = mHalfItemSpacing;
+            }
+            if (position < state.getItemCount() - 1) {
+                outRect.bottom = mHalfItemSpacing;
+            }
+        }
+
+        /**
+         * @param itemSpacing sets spacing between each item.
+         */
+        public void setItemSpacing(int itemSpacing) {
+            mHalfItemSpacing = itemSpacing / 2;
+        }
+    }
+
+    /**
      * A {@link android.support.v7.widget.RecyclerView.ItemDecoration} that will draw a dividing
      * line between each item in the RecyclerView that it is added to.
      */
-    public static class DividerDecoration extends RecyclerView.ItemDecoration {
+    private static class DividerDecoration extends RecyclerView.ItemDecoration {
         private final Context mContext;
         private final Paint mPaint;
         private final int mDividerHeight;
         private final int mDividerStartMargin;
         @IdRes private final int mDividerStartId;
-        @IdRes private final int mDvidierEndId;
+        @IdRes private final int mDividerEndId;
 
         /**
          * @param dividerStartMargin The start offset of the dividing line. This offset will be
@@ -792,7 +967,7 @@ public class PagedListView extends FrameLayout {
             mContext = context;
             mDividerStartMargin = dividerStartMargin;
             mDividerStartId = dividerStartId;
-            mDvidierEndId = dividerEndId;
+            mDividerEndId = dividerEndId;
 
             Resources res = context.getResources();
             mPaint = new Paint();
@@ -807,16 +982,20 @@ public class PagedListView extends FrameLayout {
 
         @Override
         public void onDrawOver(Canvas c, RecyclerView parent, RecyclerView.State state) {
-            for (int i = 0, childCount = parent.getChildCount(); i < childCount; i++) {
+            // Draw a divider line between each item. No need to draw the line for the last item.
+            for (int i = 0, childCount = parent.getChildCount(); i < childCount - 1; i++) {
                 View container = parent.getChildAt(i);
+                View nextContainer = parent.getChildAt(i + 1);
+                int spacing = nextContainer.getTop() - container.getBottom();
+
                 View startChild =
                         mDividerStartId != INVALID_RESOURCE_ID
                                 ? container.findViewById(mDividerStartId)
                                 : container;
 
                 View endChild =
-                        mDvidierEndId != INVALID_RESOURCE_ID
-                                ? container.findViewById(mDvidierEndId)
+                        mDividerEndId != INVALID_RESOURCE_ID
+                                ? container.findViewById(mDividerEndId)
                                 : container;
 
                 if (startChild == null || endChild == null) {
@@ -825,14 +1004,24 @@ public class PagedListView extends FrameLayout {
 
                 int left = mDividerStartMargin + startChild.getLeft();
                 int right = endChild.getRight();
-                int bottom = container.getBottom();
+                int bottom = container.getBottom() + spacing / 2 + mDividerHeight / 2;
                 int top = bottom - mDividerHeight;
 
-                // Draw a divider line between each item. No need to draw the line for the last
-                // item.
-                if (i != childCount - 1) {
-                    c.drawRect(left, top, right, bottom, mPaint);
-                }
+                c.drawRect(left, top, right, bottom, mPaint);
+            }
+        }
+
+        @Override
+        public void getItemOffsets(Rect outRect, View view, RecyclerView parent,
+                RecyclerView.State state) {
+            super.getItemOffsets(outRect, view, parent, state);
+            // Skip top offset for first item and bottom offset for last.
+            int position = parent.getChildAdapterPosition(view);
+            if (position > 0) {
+                outRect.top = mDividerHeight / 2;
+            }
+            if (position < state.getItemCount() - 1) {
+                outRect.bottom = mDividerHeight / 2;
             }
         }
     }

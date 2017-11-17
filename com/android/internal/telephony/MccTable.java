@@ -32,7 +32,7 @@ import com.android.internal.app.LocaleStore;
 import com.android.internal.app.LocaleStore.LocaleInfo;
 
 import libcore.icu.ICU;
-import libcore.icu.TimeZoneNames;
+import libcore.util.TimeZoneFinder;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -94,24 +94,8 @@ public final class MccTable {
         if (entry == null) {
             return null;
         }
-        Locale locale = new Locale("", entry.mIso);
-        String[] tz = TimeZoneNames.forLocale(locale);
-        if (tz.length == 0) return null;
-
-        String zoneName = tz[0];
-
-        /* Use Australia/Sydney instead of Australia/Lord_Howe for Australia.
-         * http://b/33228250
-         * Todo: remove the code, see b/62418027
-         */
-        if (mcc == 505  /* Australia / Norfolk Island */) {
-            for (String zone : tz) {
-                if (zone.contains("Sydney")) {
-                    zoneName = zone;
-                }
-            }
-        }
-        return zoneName;
+        final String lowerCaseCountryCode = entry.mIso;
+        return TimeZoneFinder.getInstance().lookupDefaultTimeZoneIdByCountry(lowerCaseCountryCode);
     }
 
     /**
@@ -434,7 +418,7 @@ public final class MccTable {
         String country = MccTable.countryCodeForMcc(mcc);
         Slog.d(LOG_TAG, "WIFI_COUNTRY_CODE set to " + country);
         WifiManager wM = (WifiManager) context.getSystemService(Context.WIFI_SERVICE);
-        wM.setCountryCode(country, false);
+        wM.setCountryCode(country);
     }
 
     static {

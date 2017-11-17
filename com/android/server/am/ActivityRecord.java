@@ -77,7 +77,6 @@ import static android.content.res.Configuration.UI_MODE_TYPE_MASK;
 import static android.content.res.Configuration.UI_MODE_TYPE_VR_HEADSET;
 import static android.os.Build.VERSION_CODES.HONEYCOMB;
 import static android.os.Build.VERSION_CODES.O;
-import static android.os.Build.VERSION_CODES.O_MR1;
 import static android.os.Process.SYSTEM_UID;
 import static android.os.Trace.TRACE_TAG_ACTIVITY_MANAGER;
 import static android.view.WindowManagerPolicy.NAV_BAR_LEFT;
@@ -202,6 +201,8 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
     private static final String TAG_STATES = TAG + POSTFIX_STATES;
     private static final String TAG_SWITCH = TAG + POSTFIX_SWITCH;
     private static final String TAG_VISIBILITY = TAG + POSTFIX_VISIBILITY;
+    // TODO(b/67864419): Remove once recents component is overridden
+    private static final String LEGACY_RECENTS_PACKAGE_NAME = "com.android.systemui.recents";
 
     private static final boolean SHOW_ACTIVITY_START_TIME = true;
 
@@ -886,6 +887,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
 
         Entry ent = AttributeCache.instance().get(packageName,
                 realTheme, com.android.internal.R.styleable.Window, userId);
+
         if (ent != null) {
             fullscreen = !ActivityInfo.isTranslucentOrFloating(ent.array);
             hasWallpaper = ent.array.getBoolean(R.styleable.Window_windowShowWallpaper, false);
@@ -1057,7 +1059,8 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
                 // We only allow home activities to be resizeable if they explicitly requested it.
                 info.resizeMode = RESIZE_MODE_UNRESIZEABLE;
             }
-        } else if (service.getRecentTasks().isRecentsComponent(realActivity, appInfo.uid)) {
+        } else if (realActivity.getClassName().contains(LEGACY_RECENTS_PACKAGE_NAME) ||
+                service.getRecentTasks().isRecentsComponent(realActivity, appInfo.uid)) {
             activityType = ACTIVITY_TYPE_RECENTS;
         } else if (options != null && options.getLaunchActivityType() == ACTIVITY_TYPE_ASSISTANT
                 && canLaunchAssistActivity(launchedFromPackage)) {
@@ -1526,7 +1529,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
 
     void setVisibility(boolean visible) {
         mWindowContainerController.setVisibility(visible, mDeferHidingClient);
-        mStackSupervisor.mActivityMetricsLogger.notifyVisibilityChanged(this, visible);
+        mStackSupervisor.getActivityMetricsLogger().notifyVisibilityChanged(this);
     }
 
     // TODO: Look into merging with #setVisibility()
@@ -1807,7 +1810,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
             }
             stack.mFullyDrawnStartTime = 0;
         }
-        mStackSupervisor.mActivityMetricsLogger.logAppTransitionReportedDrawn(this,
+        mStackSupervisor.getActivityMetricsLogger().logAppTransitionReportedDrawn(this,
                 restoredFromBundle);
         fullyDrawnStartTime = 0;
     }
@@ -1849,7 +1852,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
     @Override
     public void onStartingWindowDrawn(long timestamp) {
         synchronized (service) {
-            mStackSupervisor.mActivityMetricsLogger.notifyStartingWindowDrawn(
+            mStackSupervisor.getActivityMetricsLogger().notifyStartingWindowDrawn(
                     getStackId(), timestamp);
         }
     }
@@ -1857,7 +1860,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
     @Override
     public void onWindowsDrawn(long timestamp) {
         synchronized (service) {
-            mStackSupervisor.mActivityMetricsLogger.notifyWindowsDrawn(getStackId(), timestamp);
+            mStackSupervisor.getActivityMetricsLogger().notifyWindowsDrawn(getStackId(), timestamp);
             if (displayStartTime != 0) {
                 reportLaunchTimeLocked(timestamp);
             }
@@ -2119,11 +2122,6 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
     }
 
     void setRequestedOrientation(int requestedOrientation) {
-        if (ActivityInfo.isFixedOrientation(requestedOrientation) && !fullscreen
-                && appInfo.targetSdkVersion >= O_MR1) {
-            throw new IllegalStateException("Only fullscreen activities can request orientation");
-        }
-
         final int displayId = getDisplayId();
         final Configuration displayConfig =
                 mStackSupervisor.getDisplayOverrideConfiguration(displayId);
@@ -2184,26 +2182,6 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
         mTmpConfig.unset();
         computeBounds(mTmpBounds);
         if (mTmpBounds.equals(mBounds)) {
-            final ActivityStack stack = getStack();
-            if (!mBounds.isEmpty() || task == null || stack == null || !task.mFullscreen) {
-                // We don't want to influence the override configuration here if our task is in
-                // multi-window mode or there is a bounds specified to calculate the override
-                // config. In both of this cases the app should be compatible with whatever the
-                // current configuration is or will be.
-                return;
-            }
-
-            // Currently limited to the top activity for now to avoid situations where non-top
-            // visible activity and top might have conflicting requests putting the non-top activity
-            // windows in an odd state.
-            final ActivityRecord top = mStackSupervisor.topRunningActivityLocked();
-            final Configuration parentConfig = getParent().getConfiguration();
-            if (top != this || isConfigurationCompatible(parentConfig)) {
-                onOverrideConfigurationChanged(mTmpConfig);
-            } else if (isConfigurationCompatible(
-                    mLastReportedConfiguration.getMergedConfiguration())) {
-                onOverrideConfigurationChanged(mLastReportedConfiguration.getMergedConfiguration());
-            }
             return;
         }
 

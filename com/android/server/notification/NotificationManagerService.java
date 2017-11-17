@@ -460,7 +460,7 @@ public class NotificationManagerService extends SystemService {
                 mRankingHelper.readXml(parser, forRestore);
             }
             // No non-system managed services are allowed on low ram devices
-            if (!ActivityManager.isLowRamDeviceStatic()) {
+            if (canUseManagedServices()) {
                 if (mListeners.getConfig().xmlTag.equals(parser.getName())) {
                     mListeners.readXml(parser);
                     migratedManagedServices = true;
@@ -546,12 +546,6 @@ public class NotificationManagerService extends SystemService {
         mConditionProviders.writeXml(out, forBackup);
         out.endTag(null, TAG_NOTIFICATION_POLICY);
         out.endDocument();
-    }
-
-    /** Use this to check if a package can post a notification or toast. */
-    private boolean checkNotificationOp(String pkg, int uid) {
-        return mAppOps.checkOp(AppOpsManager.OP_POST_NOTIFICATION, uid, pkg)
-                == AppOpsManager.MODE_ALLOWED && !isPackageSuspendedForUser(pkg, uid);
     }
 
     private static final class ToastRecord
@@ -1225,7 +1219,6 @@ public class NotificationManagerService extends SystemService {
     void setAccessibilityManager(AccessibilityManager am) {
         mAccessibilityManager = am;
     }
-
 
     // TODO: All tests should use this init instead of the one-off setters above.
     @VisibleForTesting
@@ -2727,9 +2720,9 @@ public class NotificationManagerService extends SystemService {
         protected void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
             if (!DumpUtils.checkDumpAndUsageStatsPermission(getContext(), TAG, pw)) return;
             final DumpFilter filter = DumpFilter.parseFromArguments(args);
-            if (filter != null && filter.stats) {
+            if (filter.stats) {
                 dumpJson(pw, filter);
-            } else if (filter != null && filter.proto) {
+            } else if (filter.proto) {
                 dumpProto(fd, filter);
             } else {
                 dumpImpl(pw, filter);
@@ -2818,19 +2811,25 @@ public class NotificationManagerService extends SystemService {
         @Override
         public void setNotificationPolicyAccessGranted(String pkg, boolean granted)
                 throws RemoteException {
+            setNotificationPolicyAccessGrantedForUser(
+                    pkg, getCallingUserHandle().getIdentifier(), granted);
+        }
+
+        @Override
+        public void setNotificationPolicyAccessGrantedForUser(
+                String pkg, int userId, boolean granted) {
             checkCallerIsSystemOrShell();
             final long identity = Binder.clearCallingIdentity();
             try {
-                if (!mActivityManager.isLowRamDevice()) {
+                if (canUseManagedServices()) {
                     mConditionProviders.setPackageOrComponentEnabled(
-                            pkg, getCallingUserHandle().getIdentifier(), true, granted);
+                            pkg, userId, true, granted);
 
                     getContext().sendBroadcastAsUser(new Intent(
                             NotificationManager.ACTION_NOTIFICATION_POLICY_ACCESS_GRANTED_CHANGED)
                                     .setPackage(pkg)
                                     .addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY),
-                            getCallingUserHandle(), null);
-
+                            UserHandle.of(userId), null);
                     savePolicyFile();
                 }
             } finally {
@@ -2840,7 +2839,6 @@ public class NotificationManagerService extends SystemService {
 
         @Override
         public Policy getNotificationPolicy(String pkg) {
-            enforcePolicyAccess(pkg, "getNotificationPolicy");
             final long identity = Binder.clearCallingIdentity();
             try {
                 return mZenModeHelper.getNotificationPolicy();
@@ -2918,18 +2916,17 @@ public class NotificationManagerService extends SystemService {
             checkCallerIsSystemOrShell();
             final long identity = Binder.clearCallingIdentity();
             try {
-                if (!mActivityManager.isLowRamDevice()) {
+                if (canUseManagedServices()) {
                     mConditionProviders.setPackageOrComponentEnabled(listener.flattenToString(),
                             userId, false, granted);
                     mListeners.setPackageOrComponentEnabled(listener.flattenToString(),
                             userId, true, granted);
 
                     getContext().sendBroadcastAsUser(new Intent(
-                                    NotificationManager.ACTION_NOTIFICATION_POLICY_ACCESS_GRANTED_CHANGED)
-
+                            NotificationManager.ACTION_NOTIFICATION_POLICY_ACCESS_GRANTED_CHANGED)
                                     .setPackage(listener.getPackageName())
                                     .addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY),
-                            getCallingUserHandle(), null);
+                            UserHandle.of(userId), null);
 
                     savePolicyFile();
                 }
@@ -2945,7 +2942,7 @@ public class NotificationManagerService extends SystemService {
             checkCallerIsSystemOrShell();
             final long identity = Binder.clearCallingIdentity();
             try {
-                if (!mActivityManager.isLowRamDevice()) {
+                if (canUseManagedServices()) {
                     mConditionProviders.setPackageOrComponentEnabled(assistant.flattenToString(),
                             userId, false, granted);
                     mAssistants.setPackageOrComponentEnabled(assistant.flattenToString(),
@@ -2955,7 +2952,7 @@ public class NotificationManagerService extends SystemService {
                             NotificationManager.ACTION_NOTIFICATION_POLICY_ACCESS_GRANTED_CHANGED)
                                     .setPackage(assistant.getPackageName())
                                     .addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY),
-                            getCallingUserHandle(), null);
+                            UserHandle.of(userId), null);
 
                     savePolicyFile();
                 }
@@ -3238,7 +3235,7 @@ public class NotificationManagerService extends SystemService {
         return null;
     };
 
-    private void dumpJson(PrintWriter pw, DumpFilter filter) {
+    private void dumpJson(PrintWriter pw, @NonNull DumpFilter filter) {
         JSONObject dump = new JSONObject();
         try {
             dump.put("service", "Notification Manager");
@@ -3252,7 +3249,7 @@ public class NotificationManagerService extends SystemService {
         pw.println(dump);
     }
 
-    private void dumpProto(FileDescriptor fd, DumpFilter filter) {
+    private void dumpProto(FileDescriptor fd, @NonNull DumpFilter filter) {
         final ProtoOutputStream proto = new ProtoOutputStream(fd);
         synchronized (mNotificationLock) {
             long records = proto.start(NotificationServiceDumpProto.RECORDS);
@@ -3334,7 +3331,7 @@ public class NotificationManagerService extends SystemService {
         proto.flush();
     }
 
-    void dumpImpl(PrintWriter pw, DumpFilter filter) {
+    void dumpImpl(PrintWriter pw, @NonNull DumpFilter filter) {
         pw.print("Current Notification Manager state");
         if (filter.filtered) {
             pw.print(" (filtered to "); pw.print(filter); pw.print(")");
@@ -5434,6 +5431,11 @@ public class NotificationManagerService extends SystemService {
         }
     }
 
+    private boolean canUseManagedServices() {
+        return !mActivityManager.isLowRamDevice()
+                || mPackageManagerClient.hasSystemFeature(PackageManager.FEATURE_WATCH);
+    }
+
     private class TrimCache {
         StatusBarNotification heavy;
         StatusBarNotification sbnClone;
@@ -5898,6 +5900,7 @@ public class NotificationManagerService extends SystemService {
         public boolean redact = true;
         public boolean proto = false;
 
+        @NonNull
         public static DumpFilter parseFromArguments(String[] args) {
             final DumpFilter filter = new DumpFilter();
             for (int ai = 0; ai < args.length; ai++) {

@@ -26,7 +26,7 @@ import android.view.IWindowManager;
 import android.view.WindowManagerGlobal;
 
 import com.android.internal.annotations.VisibleForTesting;
-import com.android.internal.app.NightDisplayController;
+import com.android.internal.app.ColorDisplayController;
 import com.android.internal.logging.MetricsLogger;
 import com.android.internal.util.Preconditions;
 import com.android.settingslib.bluetooth.LocalBluetoothManager;
@@ -205,8 +205,8 @@ public class Dependency extends SystemUI {
         mProviders.put(BatteryController.class, () ->
                 new BatteryControllerImpl(mContext));
 
-        mProviders.put(NightDisplayController.class, () ->
-                new NightDisplayController(mContext));
+        mProviders.put(ColorDisplayController.class, () ->
+                new ColorDisplayController(mContext));
 
         mProviders.put(ManagedProfileController.class, () ->
                 new ManagedProfileControllerImpl(mContext));
@@ -307,6 +307,8 @@ public class Dependency extends SystemUI {
         mProviders.put(LightBarController.class, () -> new LightBarController(mContext));
 
         mProviders.put(IWindowManager.class, () -> WindowManagerGlobal.getWindowManagerService());
+
+        mProviders.put(OverviewProxyService.class, () -> new OverviewProxyService(mContext));
 
         // Put all dependencies above here so the factory can override them if it wants.
         SystemUIFactory.getInstance().injectDependencies(mProviders, mContext);

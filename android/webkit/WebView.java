@@ -191,7 +191,7 @@ import java.util.Map;
  * {@link #getSettings() WebSettings}.{@link WebSettings#setBuiltInZoomControls(boolean)}
  * (introduced in API level {@link android.os.Build.VERSION_CODES#CUPCAKE}).
  *
- * <p>NOTE: Using zoom if either the height or width is set to
+ * <p class="note"><b>Note:</b> Using zoom if either the height or width is set to
  * {@link android.view.ViewGroup.LayoutParams#WRAP_CONTENT} may lead to undefined behavior
  * and should be avoided.
  *
@@ -308,10 +308,15 @@ import java.util.Map;
  * WebView may upload anonymous diagnostic data to Google when the user has consented. This data
  * helps Google improve WebView. Data is collected on a per-app basis for each app which has
  * instantiated a WebView. An individual app can opt out of this feature by putting the following
- * tag in its manifest:
+ * tag in its manifest's {@code <application>} element:
  * <pre>
- * &lt;meta-data android:name="android.webkit.WebView.MetricsOptOut"
- *            android:value="true" /&gt;
+ * &lt;manifest&gt;
+ *     &lt;application&gt;
+ *         ...
+ *         &lt;meta-data android:name=&quot;android.webkit.WebView.MetricsOptOut&quot;
+ *             android:value=&quot;true&quot; /&gt;
+ *     &lt;/application&gt;
+ * &lt;/manifest&gt;
  * </pre>
  * <p>
  * Data will only be uploaded for a given app if the user has consented AND the app has not opted
@@ -323,11 +328,17 @@ import java.util.Map;
  * If Safe Browsing is enabled, WebView will block malicious URLs and present a warning UI to the
  * user to allow them to navigate back safely or proceed to the malicious page.
  * <p>
- * The recommended way for apps to enable the feature is putting the following tag in the manifest:
+ * The recommended way for apps to enable the feature is putting the following tag in the manifest's
+ * {@code <application>} element:
  * <p>
  * <pre>
- * &lt;meta-data android:name="android.webkit.WebView.EnableSafeBrowsing"
- *            android:value="true" /&gt;
+ * &lt;manifest&gt;
+ *     &lt;application&gt;
+ *         ...
+ *         &lt;meta-data android:name=&quot;android.webkit.WebView.EnableSafeBrowsing&quot;
+ *             android:value=&quot;true&quot; /&gt;
+ *     &lt;/application&gt;
+ * &lt;/manifest&gt;
  * </pre>
  *
  */
@@ -536,9 +547,13 @@ public class WebView extends AbsoluteLayout
     }
 
     /**
-     * Constructs a new WebView with a Context object.
+     * Constructs a new WebView with an Activity Context object.
      *
-     * @param context a Context object used to access application assets
+     * <p class="note"><b>Note:</b> WebView should always be instantiated with an Activity Context.
+     * If instantiated with an Application Context, WebView will be unable to provide several
+     * features, such as JavaScript dialogs and autofill.
+     *
+     * @param context an Activity Context to access application assets
      */
     public WebView(Context context) {
         this(context, null);
@@ -547,7 +562,7 @@ public class WebView extends AbsoluteLayout
     /**
      * Constructs a new WebView with layout parameters.
      *
-     * @param context a Context object used to access application assets
+     * @param context an Activity Context to access application assets
      * @param attrs an AttributeSet passed to our parent
      */
     public WebView(Context context, AttributeSet attrs) {
@@ -557,7 +572,7 @@ public class WebView extends AbsoluteLayout
     /**
      * Constructs a new WebView with layout parameters and a default style.
      *
-     * @param context a Context object used to access application assets
+     * @param context an Activity Context to access application assets
      * @param attrs an AttributeSet passed to our parent
      * @param defStyleAttr an attribute in the current theme that contains a
      *        reference to a style resource that supplies default values for
@@ -570,7 +585,7 @@ public class WebView extends AbsoluteLayout
     /**
      * Constructs a new WebView with layout parameters and a default style.
      *
-     * @param context a Context object used to access application assets
+     * @param context an Activity Context to access application assets
      * @param attrs an AttributeSet passed to our parent
      * @param defStyleAttr an attribute in the current theme that contains a
      *        reference to a style resource that supplies default values for
@@ -587,7 +602,7 @@ public class WebView extends AbsoluteLayout
     /**
      * Constructs a new WebView with layout parameters and a default style.
      *
-     * @param context a Context object used to access application assets
+     * @param context an Activity Context to access application assets
      * @param attrs an AttributeSet passed to our parent
      * @param defStyleAttr an attribute in the current theme that contains a
      *        reference to a style resource that supplies default values for
@@ -612,7 +627,7 @@ public class WebView extends AbsoluteLayout
      * time. This guarantees that these interfaces will be available when the JS
      * context is initialized.
      *
-     * @param context a Context object used to access application assets
+     * @param context an Activity Context to access application assets
      * @param attrs an AttributeSet passed to our parent
      * @param defStyleAttr an attribute in the current theme that contains a
      *        reference to a style resource that supplies default values for

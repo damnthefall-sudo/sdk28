@@ -16,6 +16,8 @@
 
 package com.android.systemui.recents;
 
+import static com.android.systemui.statusbar.phone.StatusBar.SYSTEM_DIALOG_REASON_HOME_KEY;
+
 import android.app.Activity;
 import android.app.ActivityOptions;
 import android.app.TaskStackBuilder;
@@ -92,7 +94,7 @@ import com.android.systemui.shared.recents.model.Task;
 import com.android.systemui.shared.recents.model.TaskStack;
 import com.android.systemui.recents.views.RecentsView;
 import com.android.systemui.recents.views.SystemBarScrimViews;
-import com.android.systemui.statusbar.phone.StatusBar;
+import com.android.systemui.shared.system.ActivityManagerWrapper;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
@@ -280,8 +282,7 @@ public class RecentsActivity extends Activity implements ViewTreeObserver.OnPreD
                 new DismissRecentsToHomeAnimationStarted(animateTaskViews);
         dismissEvent.addPostAnimationCallback(new LaunchHomeRunnable(mHomeIntent,
                 overrideAnimation));
-        Recents.getSystemServices().sendCloseSystemWindows(
-                StatusBar.SYSTEM_DIALOG_REASON_HOME_KEY);
+        ActivityManagerWrapper.getInstance().closeSystemWindows(SYSTEM_DIALOG_REASON_HOME_KEY);
         EventBus.getDefault().send(dismissEvent);
     }
 
@@ -468,7 +469,7 @@ public class RecentsActivity extends Activity implements ViewTreeObserver.OnPreD
         if (launchState.launchedFromApp) {
             Task launchTarget = stack.getLaunchTarget();
             int launchTaskIndexInStack = launchTarget != null
-                    ? stack.indexOfStackTask(launchTarget)
+                    ? stack.indexOfTask(launchTarget)
                     : 0;
             MetricsLogger.count(this, "overview_source_app", 1);
             // If from an app, track the stack index of the app in the stack (for affiliated tasks)
@@ -514,7 +515,7 @@ public class RecentsActivity extends Activity implements ViewTreeObserver.OnPreD
 
         // Notify of the config change
         Configuration newDeviceConfiguration = Utilities.getAppConfiguration(this);
-        int numStackTasks = mRecentsView.getStack().getStackTaskCount();
+        int numStackTasks = mRecentsView.getStack().getTaskCount();
         EventBus.getDefault().send(new ConfigurationChangedEvent(false /* fromMultiWindow */,
                 mLastConfig.orientation != newDeviceConfiguration.orientation,
                 mLastConfig.densityDpi != newDeviceConfiguration.densityDpi, numStackTasks > 0));
@@ -706,9 +707,9 @@ public class RecentsActivity extends Activity implements ViewTreeObserver.OnPreD
         int launchToTaskId = launchState.launchedToTaskId;
         if (launchToTaskId != -1 &&
                 (event.launchTask == null || launchToTaskId != event.launchTask.key.id)) {
-            SystemServicesProxy ssp = Recents.getSystemServices();
-            ssp.cancelWindowTransition(launchState.launchedToTaskId);
-            ssp.cancelThumbnailTransition(getTaskId());
+            ActivityManagerWrapper am = ActivityManagerWrapper.getInstance();
+            am.cancelWindowTransition(launchState.launchedToTaskId);
+            am.cancelThumbnailTransition(getTaskId());
         }
     }
 
@@ -755,8 +756,7 @@ public class RecentsActivity extends Activity implements ViewTreeObserver.OnPreD
         loader.deleteTaskData(event.task, false);
 
         // Remove the task from activity manager
-        SystemServicesProxy ssp = Recents.getSystemServices();
-        ssp.removeTask(event.task.key.id);
+        ActivityManagerWrapper.getInstance().removeTask(event.task.key.id);
     }
 
     public final void onBusEvent(TaskViewDismissedEvent event) {
@@ -824,7 +824,7 @@ public class RecentsActivity extends Activity implements ViewTreeObserver.OnPreD
         loader.loadTasks(loadPlan, loadOpts);
 
         TaskStack stack = loadPlan.getTaskStack();
-        int numStackTasks = stack.getStackTaskCount();
+        int numStackTasks = stack.getTaskCount();
         boolean showDeferredAnimation = numStackTasks > 0;
 
         if (sendConfigChangedEvent) {

@@ -49,6 +49,7 @@ import android.graphics.NinePatch_Delegate;
 import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.graphics.Typeface_Accessor;
+import android.graphics.Typeface_Delegate;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
@@ -387,59 +388,8 @@ public final class ResourceHelper {
             return null;
         }
 
-        // Check if this is an asset that we've already loaded dynamically
-        Typeface typeface = Typeface.findFromCache(context.getAssets(), fontName);
-        if (typeface != null) {
-            return typeface;
-        }
 
-        String lowerCaseValue = fontName.toLowerCase();
-        if (lowerCaseValue.endsWith(".xml")) {
-            // create a block parser for the file
-            Boolean psiParserSupport = context.getLayoutlibCallback().getFlag(
-                    RenderParamsFlags.FLAG_KEY_XML_FILE_PARSER_SUPPORT);
-            XmlPullParser parser = null;
-            if (psiParserSupport != null && psiParserSupport) {
-                parser = context.getLayoutlibCallback().getXmlFileParser(fontName);
-            }
-            else {
-                File f = new File(fontName);
-                if (f.isFile()) {
-                    try {
-                        parser = ParserFactory.create(f);
-                    } catch (XmlPullParserException | FileNotFoundException e) {
-                        // this is an error and not warning since the file existence is checked before
-                        // attempting to parse it.
-                        Bridge.getLog().error(null, "Failed to parse file " + fontName,
-                                e, null /*data*/);
-                    }
-                }
-            }
-
-            if (parser != null) {
-                BridgeXmlBlockParser blockParser = new BridgeXmlBlockParser(
-                        parser, context, isFramework);
-                try {
-                    FontResourcesParser.FamilyResourceEntry entry =
-                            FontResourcesParser.parse(blockParser, context.getResources());
-                    typeface = Typeface.createFromResources(entry, context.getAssets(),
-                            fontName);
-                } catch (XmlPullParserException | IOException e) {
-                    Bridge.getLog().error(null, "Failed to parse file " + fontName,
-                            e, null /*data*/);
-                } finally {
-                    blockParser.ensurePopped();
-                }
-            } else {
-                Bridge.getLog().error(LayoutLog.TAG_BROKEN,
-                        String.format("File %s does not exist (or is not a file)", fontName),
-                        null /*data*/);
-            }
-        } else {
-            typeface = Typeface.createFromResources(context.getAssets(), fontName, 0);
-        }
-
-        return typeface;
+        return Typeface_Delegate.createFromDisk(context, fontName, isFramework);
     }
 
     /**

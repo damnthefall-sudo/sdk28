@@ -1406,8 +1406,11 @@ public class GsmCdmaPhone extends Phone {
 
         if (!isPhoneTypeGsm() && TextUtils.isEmpty(number)) {
             // Read platform settings for dynamic voicemail number
-            if (getContext().getResources().getBoolean(com.android.internal
-                    .R.bool.config_telephony_use_own_number_for_voicemail)) {
+            CarrierConfigManager configManager = (CarrierConfigManager)
+                    getContext().getSystemService(Context.CARRIER_CONFIG_SERVICE);
+            PersistableBundle b = configManager.getConfig();
+            if (b != null && b.getBoolean(
+                    CarrierConfigManager.KEY_CONFIG_TELEPHONY_USE_OWN_NUMBER_FOR_VOICEMAIL_BOOL)) {
                 number = getLine1Number();
             } else {
                 number = "*86";
@@ -2236,14 +2239,14 @@ public class GsmCdmaPhone extends Phone {
                     int current_cdma_roaming_mode =
                             Settings.Global.getInt(getContext().getContentResolver(),
                             Settings.Global.CDMA_ROAMING_MODE,
-                            CarrierConfigManager.CDMA_ROAMING_MODE_RADIO_DEFAULT);
+                            TelephonyManager.CDMA_ROAMING_MODE_RADIO_DEFAULT);
                     switch (config_cdma_roaming_mode) {
                         // Carrier's cdma_roaming_mode will overwrite the user's previous settings
                         // Keep the user's previous setting in global variable which will be used
                         // when carrier's setting is turn off.
-                        case CarrierConfigManager.CDMA_ROAMING_MODE_HOME:
-                        case CarrierConfigManager.CDMA_ROAMING_MODE_AFFILIATED:
-                        case CarrierConfigManager.CDMA_ROAMING_MODE_ANY:
+                        case TelephonyManager.CDMA_ROAMING_MODE_HOME:
+                        case TelephonyManager.CDMA_ROAMING_MODE_AFFILIATED:
+                        case TelephonyManager.CDMA_ROAMING_MODE_ANY:
                             logd("cdma_roaming_mode is going to changed to "
                                     + config_cdma_roaming_mode);
                             setCdmaRoamingPreference(config_cdma_roaming_mode,
@@ -2252,7 +2255,7 @@ public class GsmCdmaPhone extends Phone {
 
                         // When carrier's setting is turn off, change the cdma_roaming_mode to the
                         // previous user's setting
-                        case CarrierConfigManager.CDMA_ROAMING_MODE_RADIO_DEFAULT:
+                        case TelephonyManager.CDMA_ROAMING_MODE_RADIO_DEFAULT:
                             if (current_cdma_roaming_mode != config_cdma_roaming_mode) {
                                 logd("cdma_roaming_mode is going to changed to "
                                         + current_cdma_roaming_mode);

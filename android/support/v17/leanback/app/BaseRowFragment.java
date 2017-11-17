@@ -34,7 +34,9 @@ import android.view.ViewGroup;
 
 /**
  * An internal base class for a fragment containing a list of rows.
+ * @deprecated use {@link BaseRowSupportFragment}
  */
+@Deprecated
 abstract class BaseRowFragment extends Fragment {
     private static final String CURRENT_SELECTED_POSITION = "currentSelectedPosition";
     private ObjectAdapter mAdapter;
@@ -164,8 +166,10 @@ abstract class BaseRowFragment extends Fragment {
      * Set the presenter selector used to create and bind views.
      */
     public final void setPresenterSelector(PresenterSelector presenterSelector) {
-        mPresenterSelector = presenterSelector;
-        updateAdapter();
+        if (mPresenterSelector != presenterSelector) {
+            mPresenterSelector = presenterSelector;
+            updateAdapter();
+        }
     }
 
     /**
@@ -180,8 +184,10 @@ abstract class BaseRowFragment extends Fragment {
      * @param rowsAdapter Adapter that represents list of rows.
      */
     public final void setAdapter(ObjectAdapter rowsAdapter) {
-        mAdapter = rowsAdapter;
-        updateAdapter();
+        if (mAdapter != rowsAdapter) {
+            mAdapter = rowsAdapter;
+            updateAdapter();
+        }
     }
 
     /**

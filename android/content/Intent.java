@@ -1728,6 +1728,9 @@ public class Intent implements Parcelable, Cloneable {
      * <p>
      * Output: If {@link #EXTRA_RETURN_RESULT}, returns whether the install
      * succeeded.
+     * <p>
+     * Requires {@link android.Manifest.permission#REQUEST_DELETE_PACKAGES}
+     * since {@link Build.VERSION_CODES#P}.
      */
     @SdkConstant(SdkConstantType.ACTIVITY_INTENT_ACTION)
     public static final String ACTION_UNINSTALL_PACKAGE = "android.intent.action.UNINSTALL_PACKAGE";
@@ -3444,11 +3447,12 @@ public class Intent implements Parcelable, Cloneable {
     /**
      * A broadcast action to trigger a factory reset.
      *
-     * <p> The sender must hold the {@link android.Manifest.permission#MASTER_CLEAR} permission.
+     * <p>The sender must hold the {@link android.Manifest.permission#MASTER_CLEAR} permission. The
+     * reason for the factory reset should be specified as {@link #EXTRA_REASON}.
      *
      * <p>Not for use by third-party applications.
      *
-     * @see #EXTRA_FORCE_MASTER_CLEAR
+     * @see #EXTRA_FORCE_FACTORY_RESET
      *
      * {@hide}
      */
@@ -4827,7 +4831,13 @@ public class Intent implements Parcelable, Cloneable {
     /** @hide */
     public static final int EXTRA_TIME_PREF_VALUE_USE_LOCALE_DEFAULT = 2;
 
-    /** {@hide} */
+    /**
+     * Intent extra: the reason that the operation associated with this intent is being performed.
+     *
+     * <p>Type: String
+     * @hide
+     */
+    @SystemApi
     public static final String EXTRA_REASON = "android.intent.extra.REASON";
 
     /**

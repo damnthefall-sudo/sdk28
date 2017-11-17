@@ -20,8 +20,12 @@ import static com.android.server.wifi.util.ApConfigUtil.ERROR_GENERIC;
 import static com.android.server.wifi.util.ApConfigUtil.ERROR_NO_CHANNEL;
 import static com.android.server.wifi.util.ApConfigUtil.SUCCESS;
 
+import android.annotation.NonNull;
+import android.content.Context;
+import android.content.Intent;
 import android.net.InterfaceConfiguration;
 import android.net.wifi.IApInterface;
+import android.net.wifi.IApInterfaceEventCallback;
 import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiConfiguration.KeyMgmt;
 import android.net.wifi.WifiManager;
@@ -29,8 +33,11 @@ import android.os.INetworkManagementService;
 import android.os.Looper;
 import android.os.Message;
 import android.os.RemoteException;
+import android.os.UserHandle;
+import android.text.TextUtils;
 import android.util.Log;
 
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.State;
 import com.android.internal.util.StateMachine;
 import com.android.server.net.BaseNetworkObserver;
@@ -46,6 +53,8 @@ import java.util.Locale;
 public class SoftApManager implements ActiveModeManager {
     private static final String TAG = "SoftApManager";
 
+    private final Context mContext;
+
     private final WifiNative mWifiNative;
 
     private final String mCountryCode;
@@ -55,13 +64,28 @@ public class SoftApManager implements ActiveModeManager {
     private final Listener mListener;
 
     private final IApInterface mApInterface;
+    private final String mApInterfaceName;
 
     private final INetworkManagementService mNwService;
     private final WifiApConfigStore mWifiApConfigStore;
 
     private final WifiMetrics mWifiMetrics;
 
+    private final int mMode;
     private WifiConfiguration mApConfig;
+
+    private int mNumAssociatedStations = 0;
+
+    /**
+     * Listener for AP Interface events.
+     */
+    public class ApInterfaceListener extends IApInterfaceEventCallback.Stub {
+        @Override
+        public void onNumAssociatedStationsChanged(int numStations) {
+            mStateMachine.sendMessage(
+                    SoftApStateMachine.CMD_NUM_ASSOCIATED_STATIONS_CHANGED, numStations);
+        }
+    }
 
     /**
      * Listener for soft AP state changes.
@@ -75,23 +99,29 @@ public class SoftApManager implements ActiveModeManager {
         void onStateChanged(int state, int failureReason);
     }
 
-    public SoftApManager(Looper looper,
+    public SoftApManager(Context context,
+                         Looper looper,
                          WifiNative wifiNative,
                          String countryCode,
                          Listener listener,
-                         IApInterface apInterface,
+                         @NonNull IApInterface apInterface,
+                         @NonNull String ifaceName,
                          INetworkManagementService nms,
                          WifiApConfigStore wifiApConfigStore,
-                         WifiConfiguration config,
+                         @NonNull SoftApModeConfiguration apConfig,
                          WifiMetrics wifiMetrics) {
         mStateMachine = new SoftApStateMachine(looper);
 
+        mContext = context;
         mWifiNative = wifiNative;
         mCountryCode = countryCode;
         mListener = listener;
         mApInterface = apInterface;
+        mApInterfaceName = ifaceName;
         mNwService = nms;
         mWifiApConfigStore = wifiApConfigStore;
+        mMode = apConfig.getTargetMode();
+        WifiConfiguration config = apConfig.getWifiConfiguration();
         if (config == null) {
             mApConfig = mWifiApConfigStore.getApConfiguration();
         } else {
@@ -115,14 +145,52 @@ public class SoftApManager implements ActiveModeManager {
     }
 
     /**
+     * Get number of stations associated with this soft AP
+     */
+    @VisibleForTesting
+    public int getNumAssociatedStations() {
+        return mNumAssociatedStations;
+    }
+
+    /**
+     * Set number of stations associated with this soft AP
+     * @param numStations Number of connected stations
+     */
+    private void setNumAssociatedStations(int numStations) {
+        if (mNumAssociatedStations == numStations) {
+            return;
+        }
+        mNumAssociatedStations = numStations;
+        Log.d(TAG, "Number of associated stations changed: " + mNumAssociatedStations);
+
+        // TODO:(b/63906412) send it up to settings.
+        mWifiMetrics.addSoftApNumAssociatedStationsChangedEvent(mNumAssociatedStations, mMode);
+    }
+
+    /**
      * Update AP state.
-     * @param state new AP state
+     * @param newState new AP state
+     * @param currentState current AP state
      * @param reason Failure reason if the new AP state is in failure state
      */
-    private void updateApState(int state, int reason) {
+    private void updateApState(int newState, int currentState, int reason) {
         if (mListener != null) {
-            mListener.onStateChanged(state, reason);
+            mListener.onStateChanged(newState, reason);
         }
+
+        //send the AP state change broadcast
+        final Intent intent = new Intent(WifiManager.WIFI_AP_STATE_CHANGED_ACTION);
+        intent.addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT);
+        intent.putExtra(WifiManager.EXTRA_WIFI_AP_STATE, newState);
+        intent.putExtra(WifiManager.EXTRA_PREVIOUS_WIFI_AP_STATE, currentState);
+        if (newState == WifiManager.WIFI_AP_STATE_FAILED) {
+            //only set reason number when softAP start failed
+            intent.putExtra(WifiManager.EXTRA_WIFI_AP_FAILURE_REASON, reason);
+        }
+
+        intent.putExtra(WifiManager.EXTRA_WIFI_AP_INTERFACE_NAME, mApInterfaceName);
+        intent.putExtra(WifiManager.EXTRA_WIFI_AP_MODE, mMode);
+        mContext.sendStickyBroadcastAsUser(intent, UserHandle.ALL);
     }
 
     /**
@@ -142,6 +210,7 @@ public class SoftApManager implements ActiveModeManager {
         int result = ApConfigUtil.updateApChannelConfig(
                 mWifiNative, mCountryCode,
                 mWifiApConfigStore.getAllowed2GChannel(), localConfig);
+
         if (result != SUCCESS) {
             Log.e(TAG, "Failed to update AP band and channel");
             return result;
@@ -180,7 +249,7 @@ public class SoftApManager implements ActiveModeManager {
                 return ERROR_GENERIC;
             }
 
-            success = mApInterface.startHostapd();
+            success = mApInterface.startHostapd(new ApInterfaceListener());
             if (!success) {
                 Log.e(TAG, "Failed to start hostapd.");
                 return ERROR_GENERIC;
@@ -234,6 +303,7 @@ public class SoftApManager implements ActiveModeManager {
         public static final int CMD_STOP = 1;
         public static final int CMD_AP_INTERFACE_BINDER_DEATH = 2;
         public static final int CMD_INTERFACE_STATUS_CHANGED = 3;
+        public static final int CMD_NUM_ASSOCIATED_STATIONS_CHANGED = 4;
 
         private final State mIdleState = new IdleState();
         private final State mStartedState = new StartedState();
@@ -280,10 +350,24 @@ public class SoftApManager implements ActiveModeManager {
             public boolean processMessage(Message message) {
                 switch (message.what) {
                     case CMD_START:
-                        updateApState(WifiManager.WIFI_AP_STATE_ENABLING, 0);
+                        // first a sanity check on the interface name.  If we failed to retrieve it,
+                        // we are going to have a hard time setting up routing.
+                        if (TextUtils.isEmpty(mApInterfaceName)) {
+                            Log.e(TAG, "Not starting softap mode without an interface name.");
+                            updateApState(WifiManager.WIFI_AP_STATE_FAILED,
+                                          WifiManager.WIFI_AP_STATE_DISABLED,
+                                          WifiManager.SAP_START_FAILURE_GENERAL);
+                            mWifiMetrics.incrementSoftApStartResult(
+                                    false, WifiManager.SAP_START_FAILURE_GENERAL);
+                            break;
+                        }
+                        updateApState(WifiManager.WIFI_AP_STATE_ENABLING,
+                                WifiManager.WIFI_AP_STATE_DISABLED, 0);
+                        setNumAssociatedStations(0);
                         if (!mDeathRecipient.linkToDeath(mApInterface.asBinder())) {
                             mDeathRecipient.unlinkToDeath();
                             updateApState(WifiManager.WIFI_AP_STATE_FAILED,
+                                    WifiManager.WIFI_AP_STATE_ENABLING,
                                     WifiManager.SAP_START_FAILURE_GENERAL);
                             mWifiMetrics.incrementSoftApStartResult(
                                     false, WifiManager.SAP_START_FAILURE_GENERAL);
@@ -291,12 +375,13 @@ public class SoftApManager implements ActiveModeManager {
                         }
 
                         try {
-                            mNetworkObserver = new NetworkObserver(mApInterface.getInterfaceName());
+                            mNetworkObserver = new NetworkObserver(mApInterfaceName);
                             mNwService.registerObserver(mNetworkObserver);
                         } catch (RemoteException e) {
                             mDeathRecipient.unlinkToDeath();
                             unregisterObserver();
                             updateApState(WifiManager.WIFI_AP_STATE_FAILED,
+                                          WifiManager.WIFI_AP_STATE_ENABLING,
                                           WifiManager.SAP_START_FAILURE_GENERAL);
                             mWifiMetrics.incrementSoftApStartResult(
                                     false, WifiManager.SAP_START_FAILURE_GENERAL);
@@ -311,7 +396,9 @@ public class SoftApManager implements ActiveModeManager {
                             }
                             mDeathRecipient.unlinkToDeath();
                             unregisterObserver();
-                            updateApState(WifiManager.WIFI_AP_STATE_FAILED, failureReason);
+                            updateApState(WifiManager.WIFI_AP_STATE_FAILED,
+                                          WifiManager.WIFI_AP_STATE_ENABLING,
+                                          failureReason);
                             mWifiMetrics.incrementSoftApStartResult(false, failureReason);
                             break;
                         }
@@ -347,11 +434,15 @@ public class SoftApManager implements ActiveModeManager {
                 mIfaceIsUp = isUp;
                 if (isUp) {
                     Log.d(TAG, "SoftAp is ready for use");
-                    updateApState(WifiManager.WIFI_AP_STATE_ENABLED, 0);
+                    updateApState(WifiManager.WIFI_AP_STATE_ENABLED,
+                            WifiManager.WIFI_AP_STATE_ENABLING, 0);
                     mWifiMetrics.incrementSoftApStartResult(true, 0);
                 } else {
                     // TODO: handle the case where the interface was up, but goes down
                 }
+
+                mWifiMetrics.addSoftApUpChangedEvent(isUp, mMode);
+                setNumAssociatedStations(0);
             }
 
             @Override
@@ -359,7 +450,7 @@ public class SoftApManager implements ActiveModeManager {
                 mIfaceIsUp = false;
                 InterfaceConfiguration config = null;
                 try {
-                    config = mNwService.getInterfaceConfig(mApInterface.getInterfaceName());
+                    config = mNwService.getInterfaceConfig(mApInterfaceName);
                 } catch (RemoteException e) {
                 }
                 if (config != null) {
@@ -370,6 +461,13 @@ public class SoftApManager implements ActiveModeManager {
             @Override
             public boolean processMessage(Message message) {
                 switch (message.what) {
+                    case CMD_NUM_ASSOCIATED_STATIONS_CHANGED:
+                        if (message.arg1 < 0) {
+                            Log.e(TAG, "Invalid number of associated stations: " + message.arg1);
+                            break;
+                        }
+                        setNumAssociatedStations(message.arg1);
+                        break;
                     case CMD_INTERFACE_STATUS_CHANGED:
                         if (message.obj != mNetworkObserver) {
                             // This is from some time before the most recent configuration.
@@ -383,15 +481,23 @@ public class SoftApManager implements ActiveModeManager {
                         break;
                     case CMD_AP_INTERFACE_BINDER_DEATH:
                     case CMD_STOP:
-                        updateApState(WifiManager.WIFI_AP_STATE_DISABLING, 0);
+                        updateApState(WifiManager.WIFI_AP_STATE_DISABLING,
+                                WifiManager.WIFI_AP_STATE_ENABLED, 0);
+                        setNumAssociatedStations(0);
                         stopSoftAp();
                         if (message.what == CMD_AP_INTERFACE_BINDER_DEATH) {
                             updateApState(WifiManager.WIFI_AP_STATE_FAILED,
-                                    WifiManager.SAP_START_FAILURE_GENERAL);
+                                          WifiManager.WIFI_AP_STATE_DISABLING,
+                                          WifiManager.SAP_START_FAILURE_GENERAL);
                         } else {
-                            updateApState(WifiManager.WIFI_AP_STATE_DISABLED, 0);
+                            updateApState(WifiManager.WIFI_AP_STATE_DISABLED,
+                                    WifiManager.WIFI_AP_STATE_DISABLING, 0);
                         }
                         transitionTo(mIdleState);
+
+                        // Need this here since we are exiting |Started| state and won't handle any
+                        // future CMD_INTERFACE_STATUS_CHANGED events after this point
+                        mWifiMetrics.addSoftApUpChangedEvent(false, mMode);
                         break;
                     default:
                         return NOT_HANDLED;
@@ -399,6 +505,5 @@ public class SoftApManager implements ActiveModeManager {
                 return HANDLED;
             }
         }
-
     }
 }

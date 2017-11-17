@@ -513,6 +513,53 @@ public final class PowerManager {
      */
     public static final int SHUTDOWN_REASON_BATTERY_THERMAL = 6;
 
+    /**
+     * @hide
+     */
+    @Retention(RetentionPolicy.SOURCE)
+    @IntDef({ServiceType.GPS,
+            ServiceType.VIBRATION,
+            ServiceType.ANIMATION,
+            ServiceType.FULL_BACKUP,
+            ServiceType.KEYVALUE_BACKUP,
+            ServiceType.NETWORK_FIREWALL,
+            ServiceType.SCREEN_BRIGHTNESS,
+            ServiceType.SOUND,
+            ServiceType.BATTERY_STATS,
+            ServiceType.DATA_SAVER,
+            ServiceType.FORCE_ALL_APPS_STANDBY_JOBS,
+            ServiceType.FORCE_ALL_APPS_STANDBY_ALARMS,
+            ServiceType.OPTIONAL_SENSORS,
+    })
+    public @interface ServiceType {
+        int NULL = 0;
+        int GPS = 1;
+        int VIBRATION = 2;
+        int ANIMATION = 3;
+        int FULL_BACKUP = 4;
+        int KEYVALUE_BACKUP = 5;
+        int NETWORK_FIREWALL = 6;
+        int SCREEN_BRIGHTNESS = 7;
+        int SOUND = 8;
+        int BATTERY_STATS = 9;
+        int DATA_SAVER = 10;
+
+        /**
+         * Whether the job scheduler should force app standby on all apps on battery saver or not.
+         */
+        int FORCE_ALL_APPS_STANDBY_JOBS = 11;
+
+        /**
+         * Whether the alarm manager should force app standby on all apps on battery saver or not.
+         */
+        int FORCE_ALL_APPS_STANDBY_ALARMS = 12;
+
+        /**
+         * Whether to disable non-essential sensors. (e.g. edge sensors.)
+         */
+        int OPTIONAL_SENSORS = 13;
+    }
+
     final Context mContext;
     final IPowerManager mService;
     final Handler mHandler;
@@ -1055,15 +1102,14 @@ public final class PowerManager {
 
     /**
      * Get data about the battery saver mode for a specific service
-     * @param serviceType unique key for the service, one of
-     *             {@link com.android.server.power.BatterySaverPolicy.ServiceType}
+     * @param serviceType unique key for the service, one of {@link ServiceType}
      * @return Battery saver state data.
      *
      * @hide
      * @see com.android.server.power.BatterySaverPolicy
      * @see PowerSaveState
      */
-    public PowerSaveState getPowerSaveState(int serviceType) {
+    public PowerSaveState getPowerSaveState(@ServiceType int serviceType) {
         try {
             return mService.getPowerSaveState(serviceType);
         } catch (RemoteException e) {

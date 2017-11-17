@@ -352,6 +352,17 @@ public class CarrierConfigManager {
     public static final String KEY_DEFAULT_VM_NUMBER_STRING = "default_vm_number_string";
 
     /**
+     * Flag that specifies to use the user's own phone number as the voicemail number when there is
+     * no pre-loaded voicemail number on the SIM card.
+     * <p>
+     * {@link #KEY_DEFAULT_VM_NUMBER_STRING} takes precedence over this flag.
+     * <p>
+     * If false, the system default (*86) will be used instead.
+     */
+    public static final String KEY_CONFIG_TELEPHONY_USE_OWN_NUMBER_FOR_VOICEMAIL_BOOL =
+            "config_telephony_use_own_number_for_voicemail_bool";
+
+    /**
      * When {@code true}, changes to the mobile data enabled switch will not cause the VT
      * registration state to change.  That is, turning on or off mobile data will not cause VT to be
      * enabled or disabled.
@@ -844,6 +855,14 @@ public class CarrierConfigManager {
     public static final String KEY_HIDE_ENHANCED_4G_LTE_BOOL = "hide_enhanced_4g_lte_bool";
 
     /**
+     * Default Enhanced 4G LTE mode enabled. When this is {@code true}, Enhanced 4G LTE mode by
+     * default is on, otherwise if {@code false}, Enhanced 4G LTE mode by default is off.
+     * @hide
+     */
+    public static final String KEY_ENHANCED_4G_LTE_ON_BY_DEFAULT_BOOL =
+            "enhanced_4g_lte_on_by_default_bool";
+
+    /**
      * Determine whether IMS apn can be shown.
      */
     public static final String KEY_HIDE_IMS_APN_BOOL = "hide_ims_apn_bool";
@@ -1187,24 +1206,21 @@ public class CarrierConfigManager {
      */
     public static final String KEY_CDMA_3WAYCALL_FLASH_DELAY_INT = "cdma_3waycall_flash_delay_int";
 
-
     /**
-     * @hide
-     * The default value for preferred CDMA roaming mode (aka CDMA system select.)
-     *          CDMA_ROAMING_MODE_RADIO_DEFAULT = the default roaming mode from the radio
-     *          CDMA_ROAMING_MODE_HOME = Home Networks
-     *          CDMA_ROAMING_MODE_AFFILIATED = Roaming on Affiliated networks
-     *          CDMA_ROAMING_MODE_ANY = Roaming on any networks
+     * The CDMA roaming mode (aka CDMA system select).
+     *
+     * <p>The value should be one of the CDMA_ROAMING_MODE_ constants in {@link TelephonyManager}.
+     * Values other than {@link TelephonyManager#CDMA_ROAMING_MODE_RADIO_DEFAULT} (which is the
+     * default) will take precedence over user selection.
+     *
+     * @see TelephonyManager#CDMA_ROAMING_MODE_RADIO_DEFAULT
+     * @see TelephonyManager#CDMA_ROAMING_MODE_HOME
+     * @see TelephonyManager#CDMA_ROAMING_MODE_AFFILIATED
+     * @see TelephonyManager#CDMA_ROAMING_MODE_ANY
      */
     public static final String KEY_CDMA_ROAMING_MODE_INT = "cdma_roaming_mode_int";
-    /** @hide */
-    public static final int CDMA_ROAMING_MODE_RADIO_DEFAULT = -1;
-    /** @hide */
-    public static final int CDMA_ROAMING_MODE_HOME = 0;
-    /** @hide */
-    public static final int CDMA_ROAMING_MODE_AFFILIATED = 1;
-    /** @hide */
-    public static final int CDMA_ROAMING_MODE_ANY = 2;
+
+
     /**
      * Boolean indicating if support is provided for directly dialing FDN number from FDN list.
      * If false, this feature is not supported.
@@ -1535,6 +1551,13 @@ public class CarrierConfigManager {
             "boosted_lte_earfcns_string_array";
 
     /**
+     * Determine whether to use only RSRP for the number of LTE signal bars.
+     * @hide
+     */
+    public static final String KEY_USE_ONLY_RSRP_FOR_LTE_SIGNAL_BAR_BOOL =
+            "use_only_rsrp_for_lte_signal_bar_bool";
+
+    /**
      * Key identifying if voice call barring notification is required to be shown to the user.
      * @hide
      */
@@ -1628,6 +1651,33 @@ public class CarrierConfigManager {
     public static final String KEY_FEATURE_ACCESS_CODES_STRING_ARRAY =
             "feature_access_codes_string_array";
 
+    /**
+     * Determines if the carrier wants to identify high definition calls in the call log.
+     * @hide
+     */
+    public static final String KEY_IDENTIFY_HIGH_DEFINITION_CALLS_IN_CALL_LOG_BOOL =
+            "identify_high_definition_calls_in_call_log_bool";
+
+    /**
+     * Flag specifying whether to use the {@link ServiceState} roaming status, which can be
+     * affected by other carrier configs (e.g.
+     * {@link #KEY_GSM_NONROAMING_NETWORKS_STRING_ARRAY}), when setting the SPN display.
+     * <p>
+     * If {@code true}, the SPN display uses {@link ServiceState#getRoaming}.
+     * If {@code false} the SPN display checks if the current MCC/MNC is different from the
+     * SIM card's MCC/MNC.
+     *
+     * @see KEY_GSM_ROAMING_NETWORKS_STRING_ARRAY
+     * @see KEY_GSM_NONROAMING_NETWORKS_STRING_ARRAY
+     * @see KEY_NON_ROAMING_OPERATOR_STRING_ARRAY
+     * @see KEY_ROAMING_OPERATOR_STRING_ARRAY
+     * @see KEY_FORCE_HOME_NETWORK_BOOL
+     *
+     * @hide
+     */
+    public static final String KEY_SPN_DISPLAY_RULE_USE_ROAMING_FROM_SERVICE_STATE_BOOL =
+            "spn_display_rule_use_roaming_from_service_state_bool";
+
     /** The default value for every variable. */
     private final static PersistableBundle sDefaults;
 
@@ -1645,6 +1695,7 @@ public class CarrierConfigManager {
         sDefaults.putBoolean(KEY_NOTIFY_HANDOVER_VIDEO_FROM_WIFI_TO_LTE_BOOL, false);
         sDefaults.putBoolean(KEY_SUPPORT_DOWNGRADE_VT_TO_AUDIO_BOOL, true);
         sDefaults.putString(KEY_DEFAULT_VM_NUMBER_STRING, "");
+        sDefaults.putBoolean(KEY_CONFIG_TELEPHONY_USE_OWN_NUMBER_FOR_VOICEMAIL_BOOL, false);
         sDefaults.putBoolean(KEY_IGNORE_DATA_ENABLED_CHANGED_FOR_VIDEO_CALLS, true);
         sDefaults.putBoolean(KEY_VILTE_DATA_IS_METERED_BOOL, true);
         sDefaults.putBoolean(KEY_CARRIER_WFC_IMS_AVAILABLE_BOOL, false);
@@ -1769,6 +1820,7 @@ public class CarrierConfigManager {
         sDefaults.putBoolean(KEY_DISPLAY_HD_AUDIO_PROPERTY_BOOL, true);
         sDefaults.putBoolean(KEY_EDITABLE_ENHANCED_4G_LTE_BOOL, true);
         sDefaults.putBoolean(KEY_HIDE_ENHANCED_4G_LTE_BOOL, false);
+        sDefaults.putBoolean(KEY_ENHANCED_4G_LTE_ON_BY_DEFAULT_BOOL, true);
         sDefaults.putBoolean(KEY_HIDE_IMS_APN_BOOL, false);
         sDefaults.putBoolean(KEY_HIDE_PREFERRED_NETWORK_TYPE_BOOL, false);
         sDefaults.putBoolean(KEY_ALLOW_EMERGENCY_VIDEO_CALLS_BOOL, false);
@@ -1821,7 +1873,8 @@ public class CarrierConfigManager {
         sDefaults.putBoolean(KEY_ALLOW_NON_EMERGENCY_CALLS_IN_ECM_BOOL, true);
         sDefaults.putBoolean(KEY_USE_RCS_PRESENCE_BOOL, false);
         sDefaults.putBoolean(KEY_FORCE_IMEI_BOOL, false);
-        sDefaults.putInt(KEY_CDMA_ROAMING_MODE_INT, CDMA_ROAMING_MODE_RADIO_DEFAULT);
+        sDefaults.putInt(
+                KEY_CDMA_ROAMING_MODE_INT, TelephonyManager.CDMA_ROAMING_MODE_RADIO_DEFAULT);
         sDefaults.putString(KEY_RCS_CONFIG_SERVER_URL_STRING, "");
 
         // Carrier Signalling Receivers
@@ -1892,6 +1945,7 @@ public class CarrierConfigManager {
                 null);
         sDefaults.putInt(KEY_LTE_EARFCNS_RSRP_BOOST_INT, 0);
         sDefaults.putStringArray(KEY_BOOSTED_LTE_EARFCNS_STRING_ARRAY, null);
+        sDefaults.putBoolean(KEY_USE_ONLY_RSRP_FOR_LTE_SIGNAL_BAR_BOOL, false);
         sDefaults.putBoolean(KEY_DISABLE_VOICE_BARRING_NOTIFICATION_BOOL, false);
         sDefaults.putInt(IMSI_KEY_AVAILABILITY_INT, 0);
         sDefaults.putString(IMSI_KEY_DOWNLOAD_URL_STRING, null);
@@ -1902,6 +1956,8 @@ public class CarrierConfigManager {
         sDefaults.putBoolean(KEY_SHOW_IMS_REGISTRATION_STATUS_BOOL, false);
         sDefaults.putBoolean(KEY_DISABLE_CHARGE_INDICATION_BOOL, false);
         sDefaults.putStringArray(KEY_FEATURE_ACCESS_CODES_STRING_ARRAY, null);
+        sDefaults.putBoolean(KEY_IDENTIFY_HIGH_DEFINITION_CALLS_IN_CALL_LOG_BOOL, false);
+        sDefaults.putBoolean(KEY_SPN_DISPLAY_RULE_USE_ROAMING_FROM_SERVICE_STATE_BOOL, false);
     }
 
     /**

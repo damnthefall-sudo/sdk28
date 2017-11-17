@@ -66,6 +66,7 @@ public class UserRestrictionsUtils {
 
     public static final Set<String> USER_RESTRICTIONS = newSetWithUniqueCheck(new String[] {
             UserManager.DISALLOW_CONFIG_WIFI,
+            UserManager.DISALLOW_CONFIG_LOCALE,
             UserManager.DISALLOW_MODIFY_ACCOUNTS,
             UserManager.DISALLOW_INSTALL_APPS,
             UserManager.DISALLOW_UNINSTALL_APPS,
@@ -112,6 +113,7 @@ public class UserRestrictionsUtils {
             UserManager.DISALLOW_OEM_UNLOCK,
             UserManager.DISALLOW_UNMUTE_DEVICE,
             UserManager.DISALLOW_AUTOFILL,
+            UserManager.DISALLOW_USER_SWITCH
     });
 
     /**
@@ -140,6 +142,13 @@ public class UserRestrictionsUtils {
             UserManager.DISALLOW_SAFE_BOOT,
             UserManager.DISALLOW_CREATE_WINDOWS,
             UserManager.DISALLOW_DATA_ROAMING
+    );
+
+    /**
+     * User restrictions that cannot be set by profile owners. Applied to all users.
+     */
+    private static final Set<String> DEVICE_OWNER_ONLY_RESTRICTIONS = Sets.newArraySet(
+            UserManager.DISALLOW_USER_SWITCH
     );
 
     /**
@@ -311,6 +320,7 @@ public class UserRestrictionsUtils {
      */
     public static boolean canProfileOwnerChange(String restriction, int userId) {
         return !IMMUTABLE_BY_OWNERS.contains(restriction)
+                && !DEVICE_OWNER_ONLY_RESTRICTIONS.contains(restriction)
                 && !(userId != UserHandle.USER_SYSTEM
                     && PRIMARY_USER_ONLY_RESTRICTIONS.contains(restriction));
     }
@@ -363,8 +373,9 @@ public class UserRestrictionsUtils {
      */
     private static boolean isGlobal(boolean isDeviceOwner, String key) {
         return (isDeviceOwner &&
-                (PRIMARY_USER_ONLY_RESTRICTIONS.contains(key)|| GLOBAL_RESTRICTIONS.contains(key)))
-                || PROFILE_GLOBAL_RESTRICTIONS.contains(key);
+                (PRIMARY_USER_ONLY_RESTRICTIONS.contains(key) || GLOBAL_RESTRICTIONS.contains(key)))
+                || PROFILE_GLOBAL_RESTRICTIONS.contains(key)
+                || DEVICE_OWNER_ONLY_RESTRICTIONS.contains(key);
     }
 
     /**

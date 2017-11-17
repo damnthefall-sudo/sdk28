@@ -17,11 +17,19 @@
 package com.android.systemui.shared.system;
 
 import static android.app.ActivityManager.RECENT_IGNORE_UNAVAILABLE;
+import static android.app.WindowConfiguration.ACTIVITY_TYPE_RECENTS;
+import static android.app.WindowConfiguration.ACTIVITY_TYPE_UNDEFINED;
+import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED;
+import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_PRIMARY;
+import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_SECONDARY;
+import static android.app.WindowConfiguration.WINDOWING_MODE_UNDEFINED;
 
 import android.annotation.NonNull;
 import android.app.ActivityManager;
 import android.app.ActivityManager.RecentTaskInfo;
+import android.app.ActivityOptions;
 import android.app.AppGlobals;
+import android.app.IAssistDataReceiver;
 import android.content.Context;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
@@ -32,15 +40,21 @@ import android.content.res.Resources.NotFoundException;
 import android.graphics.Bitmap;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.RemoteException;
 import android.os.UserHandle;
 import android.util.IconDrawableFactory;
 import android.util.Log;
 
+import com.android.systemui.shared.recents.model.Task;
+import com.android.systemui.shared.recents.model.Task.TaskKey;
 import com.android.systemui.shared.recents.model.ThumbnailData;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 public class ActivityManagerWrapper {
 
@@ -50,11 +64,15 @@ public class ActivityManagerWrapper {
 
     private final PackageManager mPackageManager;
     private final IconDrawableFactory mDrawableFactory;
+    private final BackgroundExecutor mBackgroundExecutor;
+    private final TaskStackChangeListeners mTaskStackChangeListeners;
 
     private ActivityManagerWrapper() {
         final Context context = AppGlobals.getInitialApplication();
         mPackageManager = context.getPackageManager();
         mDrawableFactory = IconDrawableFactory.newInstance(context);
+        mBackgroundExecutor = BackgroundExecutor.get();
+        mTaskStackChangeListeners = new TaskStackChangeListeners(Looper.getMainLooper());
     }
 
     public static ActivityManagerWrapper getInstance() {
@@ -71,6 +89,25 @@ public class ActivityManagerWrapper {
             return ui != null ? ui.id : 0;
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * @return the top running task (can be {@code null}).
+     */
+    public ActivityManager.RunningTaskInfo getRunningTask() {
+        // Note: The set of running tasks from the system is ordered by recency
+        try {
+            List<ActivityManager.RunningTaskInfo> tasks =
+                    ActivityManager.getService().getFilteredTasks(1,
+                            ACTIVITY_TYPE_RECENTS /* ignoreActivityType */,
+                            WINDOWING_MODE_PINNED /* ignoreWindowingMode */);
+            if (tasks.isEmpty()) {
+                return null;
+            }
+            return tasks.get(0);
+        } catch (RemoteException e) {
+            return null;
         }
     }
 
@@ -197,5 +234,187 @@ public class ActivityManagerWrapper {
             label = mPackageManager.getUserBadgedLabel(label, new UserHandle(userId)).toString();
         }
         return label;
+    }
+
+    /**
+     * Starts the recents activity. The caller should manage the thread on which this is called.
+     */
+    public void startRecentsActivity(AssistDataReceiverCompat assistDataReceiver, Bundle options,
+            ActivityOptions opts, int userId, Consumer<Boolean> resultCallback,
+            Handler resultCallbackHandler) {
+        Bundle activityOptions = opts != null ? opts.toBundle() : null;
+        try {
+            IAssistDataReceiver receiver = null;
+            if (assistDataReceiver != null) {
+                receiver = new IAssistDataReceiver.Stub() {
+                    public void onHandleAssistData(Bundle resultData) {
+                        assistDataReceiver.onHandleAssistData(resultData);
+                    }
+                    public void onHandleAssistScreenshot(Bitmap screenshot) {
+                        assistDataReceiver.onHandleAssistScreenshot(screenshot);
+                    }
+                };
+            }
+            ActivityManager.getService().startRecentsActivity(receiver, options, activityOptions,
+                    userId);
+            if (resultCallback != null) {
+                resultCallbackHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        resultCallback.accept(true);
+                    }
+                });
+            }
+        } catch (Exception e) {
+            if (resultCallback != null) {
+                resultCallbackHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        resultCallback.accept(false);
+                    }
+                });
+            }
+        }
+    }
+
+    /**
+     * Starts a task from Recents.
+     *
+     * @see {@link #startActivityFromRecentsAsync(TaskKey, ActivityOptions, int, int, Consumer, Handler)}
+     */
+    public void startActivityFromRecentsAsync(Task.TaskKey taskKey, ActivityOptions options,
+            Consumer<Boolean> resultCallback, Handler resultCallbackHandler) {
+        startActivityFromRecentsAsync(taskKey, options, WINDOWING_MODE_UNDEFINED,
+                ACTIVITY_TYPE_UNDEFINED, resultCallback, resultCallbackHandler);
+    }
+
+    /**
+     * Starts a task from Recents.
+     *
+     * @param resultCallback The result success callback
+     * @param resultCallbackHandler The handler to receive the result callback
+     */
+    public void startActivityFromRecentsAsync(Task.TaskKey taskKey, ActivityOptions options,
+            int windowingMode, int activityType, Consumer<Boolean> resultCallback,
+            Handler resultCallbackHandler) {
+        if (taskKey.windowingMode == WINDOWING_MODE_SPLIT_SCREEN_PRIMARY) {
+            // We show non-visible docked tasks in Recents, but we always want to launch
+            // them in the fullscreen stack.
+            if (options == null) {
+                options = ActivityOptions.makeBasic();
+            }
+            options.setLaunchWindowingMode(WINDOWING_MODE_SPLIT_SCREEN_SECONDARY);
+        } else if (windowingMode != WINDOWING_MODE_UNDEFINED
+                || activityType != ACTIVITY_TYPE_UNDEFINED) {
+            if (options == null) {
+                options = ActivityOptions.makeBasic();
+            }
+            options.setLaunchWindowingMode(windowingMode);
+            options.setLaunchActivityType(activityType);
+        }
+        final ActivityOptions finalOptions = options;
+
+        // Execute this from another thread such that we can do other things (like caching the
+        // bitmap for the thumbnail) while AM is busy starting our activity.
+        mBackgroundExecutor.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    ActivityManager.getService().startActivityFromRecents(taskKey.id,
+                            finalOptions == null ? null : finalOptions.toBundle());
+                    if (resultCallback != null) {
+                        resultCallbackHandler.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                resultCallback.accept(true);
+                            }
+                        });
+                    }
+                } catch (Exception e) {
+                    if (resultCallback != null) {
+                        resultCallbackHandler.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                resultCallback.accept(false);
+                            }
+                        });
+                    }
+                }
+            }
+        });
+    }
+
+    /**
+     * Registers a task stack listener with the system.
+     * This should be called on the main thread.
+     */
+    public void registerTaskStackListener(TaskStackChangeListener listener) {
+        synchronized (mTaskStackChangeListeners) {
+            mTaskStackChangeListeners.addListener(ActivityManager.getService(), listener);
+        }
+    }
+
+    /**
+     * Unregisters a task stack listener with the system.
+     * This should be called on the main thread.
+     */
+    public void unregisterTaskStackListener(TaskStackChangeListener listener) {
+        synchronized (mTaskStackChangeListeners) {
+            mTaskStackChangeListeners.removeListener(listener);
+        }
+    }
+
+    /**
+     * Requests that the system close any open system windows (including other SystemUI).
+     */
+    public void closeSystemWindows(String reason) {
+        mBackgroundExecutor.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    ActivityManager.getService().closeSystemDialogs(reason);
+                } catch (RemoteException e) {
+                    Log.w(TAG, "Failed to close system windows", e);
+                }
+            }
+        });
+    }
+
+    /**
+     * Removes a task by id.
+     */
+    public void removeTask(int taskId) {
+        mBackgroundExecutor.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    ActivityManager.getService().removeTask(taskId);
+                } catch (RemoteException e) {
+                    Log.w(TAG, "Failed to remove task=" + taskId, e);
+                }
+            }
+        });
+    }
+
+    /**
+     * Cancels the current window transtion to/from Recents for the given task id.
+     */
+    public void cancelWindowTransition(int taskId) {
+        try {
+            ActivityManager.getService().cancelTaskWindowTransition(taskId);
+        } catch (RemoteException e) {
+            Log.w(TAG, "Failed to cancel window transition for task=" + taskId, e);
+        }
+    }
+
+    /**
+     * Cancels the current thumbnail transtion to/from Recents for the given task id.
+     */
+    public void cancelThumbnailTransition(int taskId) {
+        try {
+            ActivityManager.getService().cancelTaskThumbnailTransition(taskId);
+        } catch (RemoteException e) {
+            Log.w(TAG, "Failed to cancel window transition for task=" + taskId, e);
+        }
     }
 }

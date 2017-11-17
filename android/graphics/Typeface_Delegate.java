@@ -16,19 +16,32 @@
 
 package android.graphics;
 
+import com.android.SdkConstants;
 import com.android.ide.common.rendering.api.LayoutLog;
 import com.android.layoutlib.bridge.Bridge;
+import com.android.layoutlib.bridge.android.BridgeContext;
+import com.android.layoutlib.bridge.android.BridgeXmlBlockParser;
+import com.android.layoutlib.bridge.android.RenderParamsFlags;
 import com.android.layoutlib.bridge.impl.DelegateManager;
+import com.android.layoutlib.bridge.impl.ParserFactory;
+import com.android.layoutlib.bridge.impl.RenderAction;
 import com.android.tools.layoutlib.annotations.LayoutlibDelegate;
+
+import org.xmlpull.v1.XmlPullParser;
+import org.xmlpull.v1.XmlPullParserException;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.content.res.FontResourcesParser;
 import android.graphics.FontFamily_Delegate.FontVariant;
 import android.graphics.fonts.FontVariationAxis;
 import android.text.FontConfig;
 import android.util.ArrayMap;
 
 import java.awt.Font;
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.IOException;
 import java.lang.ref.SoftReference;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
@@ -231,12 +244,72 @@ public final class Typeface_Delegate {
         return fontFamily;
     }
 
+    /**
+     * Loads a single font or font family from disk
+     */
+    @Nullable
+    public static Typeface createFromDisk(@NonNull BridgeContext context, @NonNull String path,
+            boolean isFramework) {
+        // Check if this is an asset that we've already loaded dynamically
+        Typeface typeface = Typeface.findFromCache(context.getAssets(), path);
+        if (typeface != null) {
+            return typeface;
+        }
+
+        String lowerCaseValue = path.toLowerCase();
+        if (lowerCaseValue.endsWith(SdkConstants.DOT_XML)) {
+            // create a block parser for the file
+            Boolean psiParserSupport = context.getLayoutlibCallback().getFlag(
+                    RenderParamsFlags.FLAG_KEY_XML_FILE_PARSER_SUPPORT);
+            XmlPullParser parser = null;
+            if (psiParserSupport != null && psiParserSupport) {
+                parser = context.getLayoutlibCallback().getXmlFileParser(path);
+            } else {
+                File f = new File(path);
+                if (f.isFile()) {
+                    try {
+                        parser = ParserFactory.create(f);
+                    } catch (XmlPullParserException | FileNotFoundException e) {
+                        // this is an error and not warning since the file existence is checked
+                        // before
+                        // attempting to parse it.
+                        Bridge.getLog().error(null, "Failed to parse file " + path, e,
+                                null /*data*/);
+                    }
+                }
+            }
+
+            if (parser != null) {
+                BridgeXmlBlockParser blockParser =
+                        new BridgeXmlBlockParser(parser, context, isFramework);
+                try {
+                    FontResourcesParser.FamilyResourceEntry entry =
+                            FontResourcesParser.parse(blockParser, context.getResources());
+                    typeface = Typeface.createFromResources(entry, context.getAssets(), path);
+                } catch (XmlPullParserException | IOException e) {
+                    Bridge.getLog().error(null, "Failed to parse file " + path, e, null /*data*/);
+                } finally {
+                    blockParser.ensurePopped();
+                }
+            } else {
+                Bridge.getLog().error(LayoutLog.TAG_BROKEN,
+                        String.format("File %s does not exist (or is not a file)", path),
+                        null /*data*/);
+            }
+        } else {
+            typeface = Typeface.createFromResources(context.getAssets(), path, 0);
+        }
+
+        return typeface;
+    }
+
     @LayoutlibDelegate
     /*package*/ static Typeface create(String familyName, int style) {
         if (familyName != null && Files.exists(Paths.get(familyName))) {
             // Workaround for b/64137851
             // Support lib will call this method after failing to create the TypefaceCompat.
-            return Typeface.createFromFile(familyName);
+            return Typeface_Delegate.createFromDisk(RenderAction.getCurrentContext(), familyName,
+                    false);
         }
         return Typeface.create_Original(familyName, style);
     }

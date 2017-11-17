@@ -3842,14 +3842,10 @@ public class Editor {
                 mProcessTextIntentActionsHandler.onInitializeMenu(menu);
             }
 
-            if (menu.hasVisibleItems() || mode.getCustomView() != null) {
-                if (mHasSelection && !mTextView.hasTransientState()) {
-                    mTextView.setHasTransientState(true);
-                }
-                return true;
-            } else {
-                return false;
+            if (mHasSelection && !mTextView.hasTransientState()) {
+                mTextView.setHasTransientState(true);
             }
+            return true;
         }
 
         private Callback getCustomCallback() {
@@ -6557,12 +6553,12 @@ public class Editor {
          * Adds "PROCESS_TEXT" menu items to the specified menu.
          */
         public void onInitializeMenu(Menu menu) {
-            final int size = mSupportedActivities.size();
             loadSupportedActivities();
+            final int size = mSupportedActivities.size();
             for (int i = 0; i < size; i++) {
                 final ResolveInfo resolveInfo = mSupportedActivities.get(i);
                 menu.add(Menu.NONE, Menu.NONE,
-                        Editor.MENU_ITEM_ORDER_PROCESS_TEXT_INTENT_ACTIONS_START + i++,
+                        Editor.MENU_ITEM_ORDER_PROCESS_TEXT_INTENT_ACTIONS_START + i,
                         getLabel(resolveInfo))
                         .setIntent(createProcessTextIntentForResolveInfo(resolveInfo))
                         .setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM);

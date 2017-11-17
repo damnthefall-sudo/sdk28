@@ -2234,7 +2234,7 @@ public class ShortcutService extends IShortcutService.Stub {
     // We override this method in unit tests to do a simpler check.
     boolean hasShortcutHostPermission(@NonNull String callingPackage, int userId,
             int callingPid, int callingUid) {
-        if (injectCheckAccessShortcutsPermission(callingPid, callingUid)) {
+        if (canSeeAnyPinnedShortcut(callingPackage, userId, callingPid, callingUid)) {
             return true;
         }
         final long start = injectElapsedRealtime();
@@ -2245,10 +2245,21 @@ public class ShortcutService extends IShortcutService.Stub {
         }
     }
 
+    boolean canSeeAnyPinnedShortcut(@NonNull String callingPackage, int userId,
+            int callingPid, int callingUid) {
+        if (injectHasAccessShortcutsPermission(callingPid, callingUid)) {
+            return true;
+        }
+        synchronized (mLock) {
+            return getUserShortcutsLocked(userId).hasHostPackage(callingPackage);
+        }
+    }
+
     /**
      * Returns true if the caller has the "ACCESS_SHORTCUTS" permission.
      */
-    boolean injectCheckAccessShortcutsPermission(int callingPid, int callingUid) {
+    @VisibleForTesting
+    boolean injectHasAccessShortcutsPermission(int callingPid, int callingUid) {
         return mContext.checkPermission(android.Manifest.permission.ACCESS_SHORTCUTS,
                 callingPid, callingUid) == PackageManager.PERMISSION_GRANTED;
     }
@@ -2358,6 +2369,16 @@ public class ShortcutService extends IShortcutService.Stub {
         } finally {
             injectRestoreCallingIdentity(token);
             logDurationStat(Stats.GET_DEFAULT_LAUNCHER, start);
+        }
+    }
+
+    public void setShortcutHostPackage(@NonNull String type, @Nullable String packageName,
+            int userId) {
+        synchronized (mLock) {
+            throwIfUserLockedL(userId);
+
+            final ShortcutUser user = getUserShortcutsLocked(userId);
+            user.setShortcutHostPackage(type, packageName);
         }
     }
 
@@ -2477,8 +2498,8 @@ public class ShortcutService extends IShortcutService.Stub {
             final ArraySet<String> ids = shortcutIds == null ? null
                     : new ArraySet<>(shortcutIds);
 
-            final ShortcutPackage p = getUserShortcutsLocked(userId)
-                    .getPackageShortcutsIfExists(packageName);
+            final ShortcutUser user = getUserShortcutsLocked(userId);
+            final ShortcutPackage p = user.getPackageShortcutsIfExists(packageName);
             if (p == null) {
                 return; // No need to instantiate ShortcutPackage.
             }
@@ -2486,9 +2507,12 @@ public class ShortcutService extends IShortcutService.Stub {
             final boolean matchPinned = (queryFlags & ShortcutQuery.FLAG_MATCH_PINNED) != 0;
             final boolean matchManifest = (queryFlags & ShortcutQuery.FLAG_MATCH_MANIFEST) != 0;
 
+            final boolean canAccessAllShortcuts =
+                    canSeeAnyPinnedShortcut(callingPackage, launcherUserId, callingPid, callingUid);
+
             final boolean getPinnedByAnyLauncher =
-                    ((queryFlags & ShortcutQuery.FLAG_MATCH_ALL_PINNED) != 0)
-                    && injectCheckAccessShortcutsPermission(callingPid, callingUid);
+                    canAccessAllShortcuts &&
+                    ((queryFlags & ShortcutQuery.FLAG_MATCH_PINNED_BY_ANY_LAUNCHER) != 0);
 
             p.findAll(ret,
                     (ShortcutInfo si) -> {
@@ -2507,7 +2531,7 @@ public class ShortcutService extends IShortcutService.Stub {
                         if (matchDynamic && si.isDynamic()) {
                             return true;
                         }
-                        if ((matchPinned && si.isPinned()) || getPinnedByAnyLauncher) {
+                        if ((matchPinned || getPinnedByAnyLauncher) && si.isPinned()) {
                             return true;
                         }
                         if (matchManifest && si.isDeclaredInManifest()) {
@@ -2600,14 +2624,15 @@ public class ShortcutService extends IShortcutService.Stub {
                         .attemptToRestoreIfNeededAndSave();
 
                 final boolean getPinnedByAnyLauncher =
-                        injectCheckAccessShortcutsPermission(callingPid, callingUid);
+                        canSeeAnyPinnedShortcut(callingPackage, launcherUserId,
+                                callingPid, callingUid);
 
                 // Make sure the shortcut is actually visible to the launcher.
                 final ShortcutInfo si = getShortcutInfoLocked(
                         launcherUserId, callingPackage, packageName, shortcutId, userId,
                         getPinnedByAnyLauncher);
                 // "si == null" should suffice here, but check the flags too just to make sure.
-                if (si == null || !si.isEnabled() || !si.isAlive()) {
+                if (si == null || !si.isEnabled() || !(si.isAlive() || getPinnedByAnyLauncher)) {
                     Log.e(TAG, "Shortcut " + shortcutId + " does not exist or disabled");
                     return null;
                 }
@@ -2694,6 +2719,12 @@ public class ShortcutService extends IShortcutService.Stub {
                 @NonNull String callingPackage, int callingPid, int callingUid) {
             return ShortcutService.this.hasShortcutHostPermission(callingPackage, launcherUserId,
                     callingPid, callingUid);
+        }
+
+        @Override
+        public void setShortcutHostPackage(@NonNull String type, @Nullable String packageName,
+                int userId) {
+            ShortcutService.this.setShortcutHostPackage(type, packageName, userId);
         }
 
         @Override

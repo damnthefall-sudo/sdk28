@@ -447,7 +447,6 @@ public final class AutofillManagerService extends SystemService {
         android.view.autofill.Helper.sDebug = debug;
     }
 
-
     private void setVerboseLocked(boolean verbose) {
         com.android.server.autofill.Helper.sVerbose = verbose;
         android.view.autofill.Helper.sVerbose = verbose;
@@ -509,6 +508,16 @@ public final class AutofillManagerService extends SystemService {
                     flags |= AutofillManager.FLAG_ADD_CLIENT_VERBOSE;
                 }
                 return flags;
+            }
+        }
+
+        @Override
+        public void removeClient(IAutoFillManagerClient client, int userId) {
+            synchronized (mLock) {
+                final AutofillManagerServiceImpl service = peekServiceForUserLocked(userId);
+                if (service != null) {
+                    service.removeClientLocked(client);
+                }
             }
         }
 

@@ -26,6 +26,7 @@ import com.android.resources.ResourceType;
 import com.android.util.Pair;
 
 import java.io.Serializable;
+import java.nio.file.Path;
 import java.rmi.Remote;
 import java.rmi.RemoteException;
 
@@ -58,14 +59,11 @@ public interface RemoteLayoutlibCallback extends Remote {
 
     RemoteActionBarCallback getActionBarCallback() throws RemoteException;
 
-    Object loadClass(String name, Class[] constructorSignature, Object[] constructorArgs)
-            throws ClassNotFoundException, RemoteException;
-
     <T> T getFlag(Key<T> key) throws RemoteException;
 
     RemoteParserFactory getParserFactory() throws RemoteException;
 
-    Class<?> findClass(String name) throws ClassNotFoundException, RemoteException;
+    Path findClassPath(String name) throws RemoteException;
 
     RemoteXmlPullParser getXmlFileParser(String fileName) throws RemoteException;
 

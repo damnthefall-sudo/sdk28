@@ -66,12 +66,14 @@ import android.os.ResultReceiver;
 import android.os.ServiceManager;
 import android.os.UserHandle;
 import android.speech.tts.TextToSpeech;
+import android.telephony.SubscriptionManager;
 import android.text.TextUtils;
 import android.util.AndroidException;
 import android.util.ArrayMap;
 import android.util.ArraySet;
 import android.util.Log;
 import android.util.MemoryIntArray;
+import android.util.StatsLog;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.util.ArrayUtils;
@@ -210,8 +212,13 @@ public final class Settings {
 
     /** @hide */
     public static final String EXTRA_NETWORK_TEMPLATE = "network_template";
-    /** @hide */
-    public static final String EXTRA_SUB_ID = "sub_id";
+
+    /**
+     * An int extra specifying a subscription ID.
+     *
+     * @see android.telephony.SubscriptionInfo#getSubscriptionId
+     */
+    public static final String EXTRA_SUB_ID = "android.provider.extra.SUB_ID";
 
     /**
      * Activity Action: Modify Airplane mode settings using a voice command.
@@ -914,6 +921,9 @@ public final class Settings {
      * <p>
      * In some cases, a matching Activity may not exist, so ensure you
      * safeguard against this.
+     * <p>
+     * The subscription ID of the subscription for which available network operators should be
+     * displayed may be optionally specified with {@link #EXTRA_SUB_ID}.
      * <p>
      * Input: Nothing.
      * <p>
@@ -1886,7 +1896,11 @@ public final class Settings {
                     arg.putBoolean(CALL_METHOD_MAKE_DEFAULT_KEY, true);
                 }
                 IContentProvider cp = mProviderHolder.getProvider(cr);
+                String prevValue = getStringForUser(cr, name, userHandle);
                 cp.call(cr.getPackageName(), mCallSetCommand, name, arg);
+                String newValue = getStringForUser(cr, name, userHandle);
+                StatsLog.write(StatsLog.SETTING_CHANGED, name, value, newValue, prevValue, tag,
+                        makeDefault ? 1 : 0, userHandle);
             } catch (RemoteException e) {
                 Log.w(TAG, "Can't set key " + name + " in " + mUri, e);
                 return false;
@@ -2100,6 +2114,9 @@ public final class Settings {
      * functions for accessing individual settings entries.
      */
     public static final class System extends NameValueTable {
+        // NOTE: If you add new settings here, be sure to add them to
+        // com.android.providers.settings.SettingsProtoDumpUtil#dumpProtoSystemSettingsLocked.
+
         private static final float DEFAULT_FONT_SCALE = 1.0f;
 
         /** @hide */
@@ -4549,6 +4566,9 @@ public final class Settings {
      * APIs for those values, not modified directly by applications.
      */
     public static final class Secure extends NameValueTable {
+        // NOTE: If you add new settings here, be sure to add them to
+        // com.android.providers.settings.SettingsProtoDumpUtil#dumpProtoSecureSettingsLocked.
+
         /**
          * The content:// style URL for this table
          */
@@ -5302,6 +5322,15 @@ public final class Settings {
          */
         @TestApi
         public static final String AUTOFILL_SERVICE = "autofill_service";
+
+        /**
+         * Experimental autofill feature.
+         *
+         * <p>TODO(b/67867469): remove once feature is finished
+         * @hide
+         */
+        @TestApi
+        public static final String AUTOFILL_FEATURE_FIELD_DETECTION = "autofill_field_detection";
 
         /**
          * @deprecated Use {@link android.provider.Settings.Global#DEVICE_PROVISIONED} instead
@@ -7542,6 +7571,9 @@ public final class Settings {
      * explicitly modify through the system UI or specialized APIs for those values.
      */
     public static final class Global extends NameValueTable {
+        // NOTE: If you add new settings here, be sure to add them to
+        // com.android.providers.settings.SettingsProtoDumpUtil#dumpProtoGlobalSettingsLocked.
+
         /**
          * The content:// style URL for global secure settings items.  Not public.
          */
@@ -8007,28 +8039,40 @@ public final class Settings {
         public static final String HDMI_SYSTEM_AUDIO_CONTROL_ENABLED =
                 "hdmi_system_audio_control_enabled";
 
-       /**
-        * Whether TV will automatically turn on upon reception of the CEC command
-        * &lt;Text View On&gt; or &lt;Image View On&gt;. (0 = false, 1 = true)
-        * @hide
-        */
-       public static final String HDMI_CONTROL_AUTO_WAKEUP_ENABLED =
-               "hdmi_control_auto_wakeup_enabled";
+        /**
+         * Whether TV will automatically turn on upon reception of the CEC command
+         * &lt;Text View On&gt; or &lt;Image View On&gt;. (0 = false, 1 = true)
+         *
+         * @hide
+         */
+        public static final String HDMI_CONTROL_AUTO_WAKEUP_ENABLED =
+                "hdmi_control_auto_wakeup_enabled";
 
-       /**
-        * Whether TV will also turn off other CEC devices when it goes to standby mode.
-        * (0 = false, 1 = true)
-        * @hide
-        */
-       public static final String HDMI_CONTROL_AUTO_DEVICE_OFF_ENABLED =
-               "hdmi_control_auto_device_off_enabled";
+        /**
+         * Whether TV will also turn off other CEC devices when it goes to standby mode.
+         * (0 = false, 1 = true)
+         *
+         * @hide
+         */
+        public static final String HDMI_CONTROL_AUTO_DEVICE_OFF_ENABLED =
+                "hdmi_control_auto_device_off_enabled";
 
-       /**
-        * The interval in milliseconds at which location requests will be throttled when they are
-        * coming from the background.
-        * @hide
-        */
-       public static final String LOCATION_BACKGROUND_THROTTLE_INTERVAL_MS =
+        /**
+         * If <b>true</b>, enables out-of-the-box execution for priv apps.
+         * Default: false
+         * Values: 0 = false, 1 = true
+         *
+         * @hide
+         */
+        public static final String PRIV_APP_OOB_ENABLED = "priv_app_oob_enabled";
+
+        /**
+         * The interval in milliseconds at which location requests will be throttled when they are
+         * coming from the background.
+         *
+         * @hide
+         */
+        public static final String LOCATION_BACKGROUND_THROTTLE_INTERVAL_MS =
                 "location_background_throttle_interval_ms";
 
         /**
@@ -8487,6 +8531,13 @@ public final class Settings {
         */
        public static final String NETWORK_METERED_MULTIPATH_PREFERENCE =
                "network_metered_multipath_preference";
+
+        /**
+         * Network watchlist last report time.
+         * @hide
+         */
+        public static final String NETWORK_WATCHLIST_LAST_REPORT_TIME =
+                "network_watchlist_last_report_time";
 
        /**
         * The thresholds of the wifi throughput badging (SD, HD etc.) as a comma-delimited list of
@@ -9280,11 +9331,20 @@ public final class Settings {
         public static final String DEFAULT_DNS_SERVER = "default_dns_server";
 
         /**
-         * Whether to disable DNS over TLS (boolean)
+         * The requested Private DNS mode (string), and an accompanying specifier (string).
+         *
+         * Currently, the specifier holds the chosen provider name when the mode requests
+         * a specific provider. It may be used to store the provider name even when the
+         * mode changes so that temporarily disabling and re-enabling the specific
+         * provider mode does not necessitate retyping the provider hostname.
          *
          * @hide
          */
-        public static final String DNS_TLS_DISABLED = "dns_tls_disabled";
+        public static final String PRIVATE_DNS_MODE = "private_dns_mode";
+        /**
+         * @hide
+         */
+        public static final String PRIVATE_DNS_SPECIFIER = "private_dns_specifier";
 
         /** {@hide} */
         public static final String
@@ -9416,6 +9476,16 @@ public final class Settings {
          * @see com.android.server.power.BatterySaverPolicy
          */
         public static final String BATTERY_SAVER_CONSTANTS = "battery_saver_constants";
+
+        /**
+         * Battery Saver device specific settings
+         * This is encoded as a key=value list, separated by commas.
+         * See {@link com.android.server.power.BatterySaverPolicy} for the details.
+         *
+         * @hide
+         */
+        public static final String BATTERY_SAVER_DEVICE_SPECIFIC_CONSTANTS =
+                "battery_saver_device_specific_constants";
 
         /**
          * Battery anomaly detection specific settings
@@ -10094,12 +10164,17 @@ public final class Settings {
         public static final String REQUIRE_PASSWORD_TO_DECRYPT = "require_password_to_decrypt";
 
         /**
-         * Whether the Volte is enabled
+         * Whether the Volte is enabled. If this setting is not set then we use the Carrier Config
+         * value {@link CarrierConfigManager#KEY_ENHANCED_4G_LTE_ON_BY_DEFAULT_BOOL}.
          * <p>
          * Type: int (0 for false, 1 for true)
          * @hide
+         * @deprecated Use {@link android.telephony.SubscriptionManager#ENHANCED_4G_MODE_ENABLED}
+         * instead.
          */
-        public static final String ENHANCED_4G_MODE_ENABLED = "volte_vt_enabled";
+        @Deprecated
+        public static final String ENHANCED_4G_MODE_ENABLED =
+                SubscriptionManager.ENHANCED_4G_MODE_ENABLED;
 
         /**
          * Whether VT (Video Telephony over IMS) is enabled
@@ -10107,8 +10182,10 @@ public final class Settings {
          * Type: int (0 for false, 1 for true)
          *
          * @hide
+         * @deprecated Use {@link android.telephony.SubscriptionManager#VT_IMS_ENABLED} instead.
          */
-        public static final String VT_IMS_ENABLED = "vt_ims_enabled";
+        @Deprecated
+        public static final String VT_IMS_ENABLED = SubscriptionManager.VT_IMS_ENABLED;
 
         /**
          * Whether WFC is enabled
@@ -10116,8 +10193,10 @@ public final class Settings {
          * Type: int (0 for false, 1 for true)
          *
          * @hide
+         * @deprecated Use {@link android.telephony.SubscriptionManager#WFC_IMS_ENABLED} instead.
          */
-        public static final String WFC_IMS_ENABLED = "wfc_ims_enabled";
+        @Deprecated
+        public static final String WFC_IMS_ENABLED = SubscriptionManager.WFC_IMS_ENABLED;
 
         /**
          * WFC mode on home/non-roaming network.
@@ -10125,8 +10204,10 @@ public final class Settings {
          * Type: int - 2=Wi-Fi preferred, 1=Cellular preferred, 0=Wi-Fi only
          *
          * @hide
+         * @deprecated Use {@link android.telephony.SubscriptionManager#WFC_IMS_MODE} instead.
          */
-        public static final String WFC_IMS_MODE = "wfc_ims_mode";
+        @Deprecated
+        public static final String WFC_IMS_MODE = SubscriptionManager.WFC_IMS_MODE;
 
         /**
          * WFC mode on roaming network.
@@ -10134,8 +10215,11 @@ public final class Settings {
          * Type: int - see {@link #WFC_IMS_MODE} for values
          *
          * @hide
+         * @deprecated Use {@link android.telephony.SubscriptionManager#WFC_IMS_ROAMING_MODE}
+         * instead.
          */
-        public static final String WFC_IMS_ROAMING_MODE = "wfc_ims_roaming_mode";
+        @Deprecated
+        public static final String WFC_IMS_ROAMING_MODE = SubscriptionManager.WFC_IMS_ROAMING_MODE;
 
         /**
          * Whether WFC roaming is enabled
@@ -10143,8 +10227,12 @@ public final class Settings {
          * Type: int (0 for false, 1 for true)
          *
          * @hide
+         * @deprecated Use {@link android.telephony.SubscriptionManager#WFC_IMS_ROAMING_ENABLED}
+         * instead
          */
-        public static final String WFC_IMS_ROAMING_ENABLED = "wfc_ims_roaming_enabled";
+        @Deprecated
+        public static final String WFC_IMS_ROAMING_ENABLED =
+                SubscriptionManager.WFC_IMS_ROAMING_ENABLED;
 
         /**
          * Whether user can enable/disable LTE as a preferred network. A carrier might control
@@ -10370,7 +10458,9 @@ public final class Settings {
             DOCK_AUDIO_MEDIA_ENABLED,
             ENCODED_SURROUND_OUTPUT,
             LOW_POWER_MODE_TRIGGER_LEVEL,
-            BLUETOOTH_ON
+            BLUETOOTH_ON,
+            PRIVATE_DNS_MODE,
+            PRIVATE_DNS_SPECIFIER
         };
 
         /** @hide */
@@ -10823,7 +10913,7 @@ public final class Settings {
 
         /** User preferred subscriptions setting.
           * This holds the details of the user selected subscription from the card and
-          * the activation status. Each settings string have the coma separated values
+          * the activation status. Each settings string have the comma separated values
           * iccId,appType,appId,activationStatus,3gppIndex,3gpp2Index
           * @hide
          */

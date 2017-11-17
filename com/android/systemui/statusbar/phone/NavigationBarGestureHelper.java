@@ -19,20 +19,24 @@ package com.android.systemui.statusbar.phone;
 import android.app.ActivityManager;
 import android.content.Context;
 import android.content.res.Resources;
+import android.graphics.Matrix;
 import android.graphics.Rect;
+import android.os.RemoteException;
+import android.util.Log;
 import android.view.GestureDetector;
 import android.view.MotionEvent;
 import android.view.VelocityTracker;
 import android.view.View;
 import android.view.ViewConfiguration;
 
-import com.android.internal.logging.MetricsLogger;
 import com.android.internal.logging.nano.MetricsProto.MetricsEvent;
 import com.android.internal.policy.DividerSnapAlgorithm.SnapTarget;
 import com.android.systemui.Dependency;
+import com.android.systemui.OverviewProxyService;
 import com.android.systemui.R;
 import com.android.systemui.RecentsComponent;
 import com.android.systemui.plugins.statusbar.phone.NavGesture.GestureHelper;
+import com.android.systemui.shared.recents.IOverviewProxy;
 import com.android.systemui.stackdivider.Divider;
 import com.android.systemui.tuner.TunerService;
 
@@ -46,6 +50,7 @@ import static android.view.WindowManager.DOCKED_TOP;
 public class NavigationBarGestureHelper extends GestureDetector.SimpleOnGestureListener
         implements TunerService.Tunable, GestureHelper {
 
+    private static final String TAG = "NavBarGestureHelper";
     private static final String KEY_DOCK_WINDOW_GESTURE = "overview_nav_bar_gesture";
     /**
      * When dragging from the navigation bar, we drag in recents.
@@ -72,10 +77,13 @@ public class NavigationBarGestureHelper extends GestureDetector.SimpleOnGestureL
     private final GestureDetector mTaskSwitcherDetector;
     private final int mScrollTouchSlop;
     private final int mMinFlingVelocity;
+    private final Matrix mTransformGlobalMatrix = new Matrix();
+    private final Matrix mTransformLocalMatrix = new Matrix();
     private int mTouchDownX;
     private int mTouchDownY;
     private boolean mDownOnRecents;
     private VelocityTracker mVelocityTracker;
+    private OverviewProxyService mOverviewEventSender = Dependency.get(OverviewProxyService.class);
 
     private boolean mDockWindowEnabled;
     private boolean mDockWindowTouchSlopExceeded;
@@ -107,15 +115,34 @@ public class NavigationBarGestureHelper extends GestureDetector.SimpleOnGestureL
         mIsRTL = isRTL;
     }
 
+    private boolean proxyMotionEvents(MotionEvent event) {
+        final IOverviewProxy overviewProxy = mOverviewEventSender.getProxy();
+        if (overviewProxy != null) {
+            mNavigationBarView.requestUnbufferedDispatch(event);
+            event.transform(mTransformGlobalMatrix);
+            try {
+                overviewProxy.onMotionEvent(event);
+                return true;
+            } catch (RemoteException e) {
+                Log.e(TAG, "Callback failed", e);
+            } finally {
+                event.transform(mTransformLocalMatrix);
+            }
+        }
+        return false;
+    }
+
     public boolean onInterceptTouchEvent(MotionEvent event) {
-        // If we move more than a fixed amount, then start capturing for the
-        // task switcher detector
-        mTaskSwitcherDetector.onTouchEvent(event);
         int action = event.getAction();
+        boolean result = false;
         switch (action & MotionEvent.ACTION_MASK) {
             case MotionEvent.ACTION_DOWN: {
                 mTouchDownX = (int) event.getX();
                 mTouchDownY = (int) event.getY();
+                mTransformGlobalMatrix.set(Matrix.IDENTITY_MATRIX);
+                mTransformLocalMatrix.set(Matrix.IDENTITY_MATRIX);
+                mNavigationBarView.transformMatrixToGlobal(mTransformGlobalMatrix);
+                mNavigationBarView.transformMatrixToLocal(mTransformLocalMatrix);
                 break;
             }
             case MotionEvent.ACTION_MOVE: {
@@ -123,11 +150,10 @@ public class NavigationBarGestureHelper extends GestureDetector.SimpleOnGestureL
                 int y = (int) event.getY();
                 int xDiff = Math.abs(x - mTouchDownX);
                 int yDiff = Math.abs(y - mTouchDownY);
-                boolean exceededTouchSlop = !mIsVertical
-                        ? xDiff > mScrollTouchSlop && xDiff > yDiff
-                        : yDiff > mScrollTouchSlop && yDiff > xDiff;
+                boolean exceededTouchSlop = xDiff > mScrollTouchSlop && xDiff > yDiff
+                        || yDiff > mScrollTouchSlop && yDiff > xDiff;
                 if (exceededTouchSlop) {
-                    return true;
+                    result = true;
                 }
                 break;
             }
@@ -135,7 +161,12 @@ public class NavigationBarGestureHelper extends GestureDetector.SimpleOnGestureL
             case MotionEvent.ACTION_UP:
                 break;
         }
-        return mDockWindowEnabled && interceptDockWindowEvent(event);
+        if (!proxyMotionEvents(event)) {
+            // If we move more than a fixed amount, then start capturing for the
+            // task switcher detector, disabled when proxying motion events to launcher service
+            mTaskSwitcherDetector.onTouchEvent(event);
+        }
+        return result || (mDockWindowEnabled && interceptDockWindowEvent(event));
     }
 
     private boolean interceptDockWindowEvent(MotionEvent event) {
@@ -206,7 +237,7 @@ public class NavigationBarGestureHelper extends GestureDetector.SimpleOnGestureL
                     && mDivider.getView().getWindowManagerProxy().getDockSide() == DOCKED_INVALID) {
                 Rect initialBounds = null;
                 int dragMode = calculateDragMode();
-                int createMode = ActivityManager.DOCKED_STACK_CREATE_MODE_TOP_OR_LEFT;
+                int createMode = ActivityManager.SPLIT_SCREEN_CREATE_MODE_TOP_OR_LEFT;
                 if (dragMode == DRAG_MODE_DIVIDER) {
                     initialBounds = new Rect();
                     mDivider.getView().calculateBoundsForPosition(mIsVertical
@@ -218,10 +249,10 @@ public class NavigationBarGestureHelper extends GestureDetector.SimpleOnGestureL
                             initialBounds);
                 } else if (dragMode == DRAG_MODE_RECENTS && mTouchDownX
                         < mContext.getResources().getDisplayMetrics().widthPixels / 2) {
-                    createMode = ActivityManager.DOCKED_STACK_CREATE_MODE_BOTTOM_OR_RIGHT;
+                    createMode = ActivityManager.SPLIT_SCREEN_CREATE_MODE_BOTTOM_OR_RIGHT;
                 }
-                boolean docked = mRecentsComponent.dockTopTask(dragMode, createMode, initialBounds,
-                        MetricsEvent.ACTION_WINDOW_DOCK_SWIPE);
+                boolean docked = mRecentsComponent.splitPrimaryTask(dragMode, createMode,
+                        initialBounds, MetricsEvent.ACTION_WINDOW_DOCK_SWIPE);
                 if (docked) {
                     mDragMode = dragMode;
                     if (mDragMode == DRAG_MODE_DIVIDER) {
@@ -275,7 +306,7 @@ public class NavigationBarGestureHelper extends GestureDetector.SimpleOnGestureL
     }
 
     public boolean onTouchEvent(MotionEvent event) {
-        boolean result = mTaskSwitcherDetector.onTouchEvent(event);
+        boolean result = proxyMotionEvents(event) || mTaskSwitcherDetector.onTouchEvent(event);
         if (mDockWindowEnabled) {
             result |= handleDockWindowEvent(event);
         }

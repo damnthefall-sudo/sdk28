@@ -16,10 +16,14 @@
 
 package com.android.server.am;
 
+import static android.app.ITaskStackListener.FORCED_RESIZEABLE_REASON_SECONDARY_DISPLAY;
+import static android.app.ITaskStackListener.FORCED_RESIZEABLE_REASON_SPLIT_SCREEN;
+import static android.app.WindowConfiguration.ACTIVITY_TYPE_RECENTS;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_STANDARD;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_UNDEFINED;
 import static android.app.WindowConfiguration.WINDOWING_MODE_FREEFORM;
 import static android.app.WindowConfiguration.WINDOWING_MODE_FULLSCREEN;
+import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED;
 import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_PRIMARY;
 import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_SECONDARY;
 import static android.app.WindowConfiguration.WINDOWING_MODE_UNDEFINED;
@@ -94,7 +98,6 @@ import static java.lang.Integer.MAX_VALUE;
 
 import android.app.Activity;
 import android.app.ActivityManager;
-import android.app.ActivityManager.RunningTaskInfo;
 import android.app.ActivityOptions;
 import android.app.AppGlobals;
 import android.app.IActivityController;
@@ -344,6 +347,7 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
     private final SparseArray<Rect> mTmpBounds = new SparseArray<>();
     private final SparseArray<Rect> mTmpInsetBounds = new SparseArray<>();
     private final Rect mTmpRect2 = new Rect();
+    private final ActivityOptions mTmpOptions = ActivityOptions.makeBasic();
 
     /** Run all ActivityStacks through this */
     protected final ActivityStackSupervisor mStackSupervisor;
@@ -451,8 +455,8 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
         mStackId = stackId;
         mCurrentUser = mService.mUserController.getCurrentUserId();
         mTmpRect2.setEmpty();
-        setWindowingMode(windowingMode);
         setActivityType(activityType);
+        setWindowingMode(windowingMode);
         mWindowContainerController = createStackWindowController(display.mDisplayId, onTop,
                 mTmpRect2);
         postAddToDisplay(display, mTmpRect2.isEmpty() ? null : mTmpRect2, onTop);
@@ -475,6 +479,125 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
         if (display != null && prevWindowingMode != getWindowingMode()) {
             display.onStackWindowingModeChanged(this);
         }
+    }
+
+    @Override
+    public void setWindowingMode(int windowingMode) {
+        setWindowingMode(windowingMode, false /* animate */);
+    }
+
+    void setWindowingMode(int preferredWindowingMode, boolean animate) {
+        final int currentMode = getWindowingMode();
+        final ActivityDisplay display = getDisplay();
+        final TaskRecord topTask = topTask();
+        final ActivityStack splitScreenStack = display.getSplitScreenPrimaryStack();
+        mTmpOptions.setLaunchWindowingMode(preferredWindowingMode);
+
+        // Need to make sure windowing mode is supported.
+        int windowingMode = display.resolveWindowingMode(
+                null /* ActivityRecord */, mTmpOptions, topTask, getActivityType());;
+        if (splitScreenStack == this && windowingMode == WINDOWING_MODE_SPLIT_SCREEN_SECONDARY) {
+            // Resolution to split-screen secondary for the primary split-screen stack means we want
+            // to go fullscreen.
+            windowingMode = WINDOWING_MODE_FULLSCREEN;
+        }
+
+        // Take any required action due to us not supporting the preferred windowing mode.
+        if (windowingMode != preferredWindowingMode && isActivityTypeStandardOrUndefined()) {
+            if (display.hasSplitScreenPrimaryStack()
+                    && (preferredWindowingMode == WINDOWING_MODE_SPLIT_SCREEN_PRIMARY
+                    || preferredWindowingMode == WINDOWING_MODE_SPLIT_SCREEN_SECONDARY)) {
+                // Looks like we can't launch in split screen mode, go ahead an dismiss split-screen
+                // and display a warning toast about it.
+                mService.mTaskChangeNotificationController.notifyActivityDismissingDockedStack();
+                display.getSplitScreenPrimaryStack().setWindowingMode(WINDOWING_MODE_FULLSCREEN);
+            }
+        }
+
+        if (currentMode == windowingMode) {
+            // You are already in the window mode silly...
+            return;
+        }
+
+        final WindowManagerService wm = mService.mWindowManager;
+        final ActivityRecord topActivity = getTopActivity();
+
+        if (windowingMode != WINDOWING_MODE_FULLSCREEN && topActivity != null
+                && topActivity.isNonResizableOrForcedResizable() && !topActivity.noDisplay) {
+            // Inform the user that they are starting an app that may not work correctly in
+            // multi-window mode.
+            final String packageName = topActivity.appInfo.packageName;
+            mService.mTaskChangeNotificationController.notifyActivityForcedResizable(
+                    topTask.taskId, FORCED_RESIZEABLE_REASON_SPLIT_SCREEN, packageName);
+        }
+
+        wm.deferSurfaceLayout();
+        try {
+            if (!animate && topActivity != null) {
+                mNoAnimActivities.add(topActivity);
+            }
+            super.setWindowingMode(windowingMode);
+
+            if (mWindowContainerController == null) {
+                // Nothing else to do if we don't have a window container yet. E.g. call from ctor.
+                return;
+            }
+
+            if (windowingMode == WINDOWING_MODE_PINNED || currentMode == WINDOWING_MODE_PINNED) {
+                // TODO: Need to remove use of PinnedActivityStack for this to be supported.
+                // NOTE: Need to ASS.scheduleUpdatePictureInPictureModeIfNeeded() in
+                // setWindowModeUnchecked() when this support is added. See TaskRecord.reparent()
+                throw new IllegalArgumentException(
+                        "Changing pinned windowing mode not currently supported");
+            }
+
+            if (windowingMode == WINDOWING_MODE_SPLIT_SCREEN_PRIMARY && splitScreenStack != null) {
+                // We already have a split-screen stack in this display, so just move the tasks over.
+                // TODO: Figure-out how to do all the stuff in
+                // AMS.setTaskWindowingModeSplitScreenPrimary
+                throw new IllegalArgumentException("Setting primary split-screen windowing mode"
+                        + " while there is already one isn't currently supported");
+                //return;
+            }
+
+            mTmpRect2.setEmpty();
+            if (windowingMode != WINDOWING_MODE_FULLSCREEN) {
+                mWindowContainerController.getRawBounds(mTmpRect2);
+                if (windowingMode == WINDOWING_MODE_FREEFORM) {
+                    if (topTask != null) {
+                        // TODO: Can we consolidate this and other sites that call this methods?
+                        Rect bounds = topTask().getLaunchBounds();
+                        if (bounds != null) {
+                            mTmpRect2.set(bounds);
+                        }
+                    }
+                }
+            }
+
+            if (!Objects.equals(mBounds, mTmpRect2)) {
+                resize(mTmpRect2, null /* tempTaskBounds */, null /* tempTaskInsetBounds */);
+            }
+        } finally {
+            if (mDisplayId == DEFAULT_DISPLAY
+                    && windowingMode == WINDOWING_MODE_SPLIT_SCREEN_PRIMARY) {
+                // Make sure recents stack exist when creating a dock stack as it normally needs to
+                // be on the other side of the docked stack and we make visibility decisions based
+                // on that.
+                // TODO: This is only here to help out with the case where recents stack doesn't
+                // exist yet. For that case the initial size of the split-screen stack will be the
+                // the one where the home stack is visible since recents isn't visible yet, but the
+                // divider will be off. I think we should just make the initial bounds that of home
+                // so that the divider matches and remove this logic.
+                display.getOrCreateStack(WINDOWING_MODE_SPLIT_SCREEN_SECONDARY,
+                        ACTIVITY_TYPE_RECENTS, true /* onTop */);
+                // If task moved to docked stack - show recents if needed.
+                mService.mWindowManager.showRecentApps(false /* fromHome */);
+            }
+            wm.continueSurfaceLayout();
+        }
+
+        mStackSupervisor.ensureActivitiesVisibleLocked(null, 0, PRESERVE_WINDOWS);
+        mStackSupervisor.resumeFocusedStackTopActivityLocked();
     }
 
     @Override
@@ -537,12 +660,6 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
      * either destroyed completely or re-parented.
      */
     private void removeFromDisplay() {
-        if (getWindowingMode() == WINDOWING_MODE_SPLIT_SCREEN_PRIMARY) {
-            // If we removed a docked stack we want to resize it so it resizes all other stacks
-            // in the system to fullscreen.
-            mStackSupervisor.resizeDockedStackLocked(
-                    null, null, null, null, null, PRESERVE_WINDOWS);
-        }
         final ActivityDisplay display = getDisplay();
         if (display != null) {
             display.removeChild(this);
@@ -729,14 +846,11 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
         return null;
     }
 
-    final ActivityRecord topActivity() {
+    ActivityRecord getTopActivity() {
         for (int taskNdx = mTaskHistory.size() - 1; taskNdx >= 0; --taskNdx) {
-            ArrayList<ActivityRecord> activities = mTaskHistory.get(taskNdx).mActivities;
-            for (int activityNdx = activities.size() - 1; activityNdx >= 0; --activityNdx) {
-                final ActivityRecord r = activities.get(activityNdx);
-                if (!r.finishing) {
-                    return r;
-                }
+            final ActivityRecord r = mTaskHistory.get(taskNdx).getTopActivity();
+            if (r != null) {
+                return r;
             }
         }
         return null;
@@ -750,7 +864,7 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
         return null;
     }
 
-    final TaskRecord bottomTask() {
+    private TaskRecord bottomTask() {
         if (mTaskHistory.isEmpty()) {
             return null;
         }
@@ -867,6 +981,29 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
         if (task != null) {
             mWindowContainerController.positionChildAtTop(task.getWindowContainerController(),
                     true /* includingParents */);
+        }
+    }
+
+    /**
+     * @param reason The reason for moving the stack to the back.
+     * @param task If non-null, the task will be moved to the bottom of the stack.
+     **/
+    void moveToBack(String reason, TaskRecord task) {
+        if (!isAttached()) {
+            return;
+        }
+
+        getDisplay().positionChildAtBottom(this);
+        mStackSupervisor.setFocusStackUnchecked(reason, getDisplay().getTopStack());
+        if (task != null) {
+            insertTaskAtBottom(task);
+            return;
+        } else {
+            task = bottomTask();
+            if (task != null) {
+                mWindowContainerController.positionChildAtBottom(
+                        task.getWindowContainerController(), true /* includingParents */);
+            }
         }
     }
 
@@ -1583,8 +1720,6 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
             }
 
             final int otherWindowingMode = other.getWindowingMode();
-            // TODO: Can be removed once we are no longer using returnToType for back functionality
-            final ActivityStack stackBehind = i > 0 ? display.getChildAt(i - 1) : null;
 
             if (otherWindowingMode == WINDOWING_MODE_FULLSCREEN) {
                 if (other.isStackTranslucent(starting)) {
@@ -1645,7 +1780,7 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
             boolean preserveWindows) {
         mTopActivityOccludesKeyguard = false;
         mTopDismissingKeyguardActivity = null;
-        mStackSupervisor.mKeyguardController.beginActivityVisibilityUpdate();
+        mStackSupervisor.getKeyguardController().beginActivityVisibilityUpdate();
         try {
             ActivityRecord top = topRunningActivityLocked();
             if (DEBUG_VISIBILITY) Slog.v(TAG_VISIBILITY, "ensureActivitiesVisible behind " + top
@@ -1753,7 +1888,7 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
                 notifyActivityDrawnLocked(null);
             }
         } finally {
-            mStackSupervisor.mKeyguardController.endActivityVisibilityUpdate();
+            mStackSupervisor.getKeyguardController().endActivityVisibilityUpdate();
         }
     }
 
@@ -1778,6 +1913,22 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
         return inPinnedWindowingMode();
     }
 
+    @Override
+    public boolean supportsSplitScreenWindowingMode() {
+        final TaskRecord topTask = topTask();
+        return super.supportsSplitScreenWindowingMode()
+                && (topTask == null || topTask.supportsSplitScreenWindowingMode());
+    }
+
+    /** @return True if the resizing of the primary-split-screen stack affects this stack size. */
+    boolean affectedBySplitScreenResize() {
+        if (!supportsSplitScreenWindowingMode()) {
+            return false;
+        }
+        final int windowingMode = getWindowingMode();
+        return windowingMode != WINDOWING_MODE_FREEFORM && windowingMode != WINDOWING_MODE_PINNED;
+    }
+
     /**
      * @return the top most visible activity that wants to dismiss Keyguard
      */
@@ -1795,9 +1946,9 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
     boolean checkKeyguardVisibility(ActivityRecord r, boolean shouldBeVisible,
             boolean isTop) {
         final boolean isInPinnedStack = r.inPinnedWindowingMode();
-        final boolean keyguardShowing = mStackSupervisor.mKeyguardController.isKeyguardShowing(
+        final boolean keyguardShowing = mStackSupervisor.getKeyguardController().isKeyguardShowing(
                 mDisplayId != INVALID_DISPLAY ? mDisplayId : DEFAULT_DISPLAY);
-        final boolean keyguardLocked = mStackSupervisor.mKeyguardController.isKeyguardLocked();
+        final boolean keyguardLocked = mStackSupervisor.getKeyguardController().isKeyguardLocked();
         final boolean showWhenLocked = r.canShowWhenLocked() && !isInPinnedStack;
         final boolean dismissKeyguard = r.hasDismissKeyguardWindows();
         if (shouldBeVisible) {
@@ -1812,7 +1963,7 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
             }
 
             final boolean canShowWithKeyguard = canShowWithInsecureKeyguard()
-                    && mStackSupervisor.mKeyguardController.canDismissKeyguard();
+                    && mStackSupervisor.getKeyguardController().canDismissKeyguard();
             if (canShowWithKeyguard) {
                 return true;
             }
@@ -1821,10 +1972,10 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
 
             // If keyguard is showing, nothing is visible, except if we are able to dismiss Keyguard
             // right away.
-            return shouldBeVisible && mStackSupervisor.mKeyguardController
+            return shouldBeVisible && mStackSupervisor.getKeyguardController()
                     .canShowActivityWhileKeyguardShowing(r, dismissKeyguard);
         } else if (keyguardLocked) {
-            return shouldBeVisible && mStackSupervisor.mKeyguardController.canShowWhileOccluded(
+            return shouldBeVisible && mStackSupervisor.getKeyguardController().canShowWhileOccluded(
                     dismissKeyguard, showWhenLocked);
         } else {
             return shouldBeVisible;
@@ -2388,7 +2539,7 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
                     // if needed to get the correct rotation behavior.
                     // TODO: Remove this once visibilities are set correctly immediately when
                     // starting an activity.
-                    if (mStackSupervisor.mKeyguardController.isKeyguardLocked()) {
+                    if (mStackSupervisor.getKeyguardController().isKeyguardLocked()) {
                         mStackSupervisor.ensureActivitiesVisibleLocked(null /* starting */,
                                 0 /* configChanges */, false /* preserveWindows */);
                     }
@@ -2581,6 +2732,9 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
         if (position >= mTaskHistory.size()) {
             insertTaskAtTop(task, null);
             return;
+        } else if (position <= 0) {
+            insertTaskAtBottom(task);
+            return;
         }
         position = getAdjustedPositionForTask(task, position, null /* starting */);
         mTaskHistory.remove(task);
@@ -2598,6 +2752,16 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
         mTaskHistory.add(position, task);
         updateTaskMovement(task, true);
         mWindowContainerController.positionChildAtTop(task.getWindowContainerController(),
+                true /* includingParents */);
+    }
+
+    private void insertTaskAtBottom(TaskRecord task) {
+        // Unlike insertTaskAtPosition, this will also position parents of the windowcontroller.
+        mTaskHistory.remove(task);
+        final int position = getAdjustedPositionForTask(task, 0, null);
+        mTaskHistory.add(position, task);
+        updateTaskMovement(task, true);
+        mWindowContainerController.positionChildAtBottom(task.getWindowContainerController(),
                 true /* includingParents */);
     }
 
@@ -3474,7 +3638,7 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
                 }
 
                 if (endTask) {
-                    mService.mLockTaskController.removeLockedTask(task);
+                    mService.mLockTaskController.clearLockedTask(task);
                 }
             } else if (r.state != ActivityState.PAUSING) {
                 // If the activity is PAUSING, we will complete the finish once
@@ -4253,7 +4417,7 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
         if (DEBUG_SWITCH) Slog.v(TAG_SWITCH, "moveTaskToFront: " + tr);
 
         final ActivityStack topStack = getDisplay().getTopStack();
-        final ActivityRecord topActivity = topStack != null ? topStack.topActivity() : null;
+        final ActivityRecord topActivity = topStack != null ? topStack.getTopActivity() : null;
         final int numTasks = mTaskHistory.size();
         final int index = mTaskHistory.indexOf(tr);
         if (numTasks == 0 || index < 0)  {
@@ -4334,8 +4498,9 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
         }
         Slog.i(TAG, "moveTaskToBack: " + tr);
 
-        // If the task is locked, then show the lock task toast
-        if (mService.mLockTaskController.checkLockedTask(tr)) {
+        // In LockTask mode, moving a locked task to the back of the stack may expose unlocked
+        // ones. Therefore we need to check if this operation is allowed.
+        if (!mService.mLockTaskController.canMoveTaskToBack(tr)) {
             return false;
         }
 
@@ -4369,8 +4534,7 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
         updateTaskMovement(tr, false);
 
         mWindowManager.prepareAppTransition(TRANSIT_TASK_TO_BACK, false);
-        mWindowContainerController.positionChildAtBottom(tr.getWindowContainerController(),
-                true /* includingParents */);
+        moveToBack("moveTaskToBackLocked", tr);
 
         if (inPinnedWindowingMode()) {
             mStackSupervisor.removeStack(this);
@@ -4456,6 +4620,7 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
             final TaskRecord task = mTaskHistory.get(i);
             if (task.isResizeable()) {
                 if (inFreeformWindowingMode()) {
+                    // TODO: Can be removed now since each freeform task is in its own stack.
                     // For freeform stack we don't adjust the size of the tasks to match that
                     // of the stack, but we do try to make sure the tasks are still contained
                     // with the bounds of the stack.
@@ -4843,7 +5008,7 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
                 voiceInteractor);
         // add the task to stack first, mTaskPositioner might need the stack association
         addTask(task, toTop, "createTaskRecord");
-        final boolean isLockscreenShown = mService.mStackSupervisor.mKeyguardController
+        final boolean isLockscreenShown = mService.mStackSupervisor.getKeyguardController()
                 .isKeyguardShowing(mDisplayId != INVALID_DISPLAY ? mDisplayId : DEFAULT_DISPLAY);
         if (!mStackSupervisor.getLaunchingBoundsController().layoutTask(task, info.windowLayout)
                 && mBounds != null && task.isResizeable() && !isLockscreenShown) {

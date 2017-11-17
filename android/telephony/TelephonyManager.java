@@ -953,6 +953,27 @@ public class TelephonyManager {
      */
     public static final int USSD_ERROR_SERVICE_UNAVAIL = -2;
 
+    /**
+     * Value for {@link CarrierConfigManager#KEY_CDMA_ROAMING_MODE_INT} which leaves the roaming
+     * mode set to the radio default or to the user's preference if they've indicated one.
+     */
+    public static final int CDMA_ROAMING_MODE_RADIO_DEFAULT = -1;
+    /**
+     * Value for {@link CarrierConfigManager#KEY_CDMA_ROAMING_MODE_INT} which only permits
+     * connections on home networks.
+     */
+    public static final int CDMA_ROAMING_MODE_HOME = 0;
+    /**
+     * Value for {@link CarrierConfigManager#KEY_CDMA_ROAMING_MODE_INT} which permits roaming on
+     * affiliated networks.
+     */
+    public static final int CDMA_ROAMING_MODE_AFFILIATED = 1;
+    /**
+     * Value for {@link CarrierConfigManager#KEY_CDMA_ROAMING_MODE_INT} which permits roaming on
+     * any network.
+     */
+    public static final int CDMA_ROAMING_MODE_ANY = 2;
+
     //
     //
     // Device Info
@@ -2145,13 +2166,16 @@ public class TelephonyManager {
      * @hide
      */
     public String getSimOperatorNumeric() {
-        int subId = SubscriptionManager.getDefaultDataSubscriptionId();
+        int subId = mSubId;
         if (!SubscriptionManager.isUsableSubIdValue(subId)) {
-            subId = SubscriptionManager.getDefaultSmsSubscriptionId();
+            subId = SubscriptionManager.getDefaultDataSubscriptionId();
             if (!SubscriptionManager.isUsableSubIdValue(subId)) {
-                subId = SubscriptionManager.getDefaultVoiceSubscriptionId();
+                subId = SubscriptionManager.getDefaultSmsSubscriptionId();
                 if (!SubscriptionManager.isUsableSubIdValue(subId)) {
-                    subId = SubscriptionManager.getDefaultSubscriptionId();
+                    subId = SubscriptionManager.getDefaultVoiceSubscriptionId();
+                    if (!SubscriptionManager.isUsableSubIdValue(subId)) {
+                        subId = SubscriptionManager.getDefaultSubscriptionId();
+                    }
                 }
             }
         }
@@ -5683,29 +5707,6 @@ public class TelephonyManager {
         } catch (NullPointerException e) {
         }
         return retVal;
-    }
-
-    /**
-     * Returns the result and response from RIL for oem request
-     *
-     * @param oemReq the data is sent to ril.
-     * @param oemResp the respose data from RIL.
-     * @return negative value request was not handled or get error
-     *         0 request was handled succesfully, but no response data
-     *         positive value success, data length of response
-     * @hide
-     * @deprecated OEM needs a vendor-extension hal and their apps should use that instead
-     */
-    @Deprecated
-    public int invokeOemRilRequestRaw(byte[] oemReq, byte[] oemResp) {
-        try {
-            ITelephony telephony = getITelephony();
-            if (telephony != null)
-                return telephony.invokeOemRilRequestRaw(oemReq, oemResp);
-        } catch (RemoteException ex) {
-        } catch (NullPointerException ex) {
-        }
-        return -1;
     }
 
     /** @hide */

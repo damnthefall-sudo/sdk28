@@ -3413,6 +3413,8 @@ public abstract class Context {
     public static final String NETWORK_STATS_SERVICE = "netstats";
     /** {@hide} */
     public static final String NETWORK_POLICY_SERVICE = "netpolicy";
+    /** {@hide} */
+    public static final String NETWORK_WATCHLIST_SERVICE = "network_watchlist";
 
     /**
      * Use with {@link #getSystemService} to retrieve a {@link
@@ -4042,6 +4044,13 @@ public abstract class Context {
     public static final String STATS_COMPANION_SERVICE = "statscompanion";
 
     /**
+     * Use with {@link #getSystemService} to retrieve an {@link android.stats.StatsManager}.
+     * @hide
+     */
+    @SystemApi
+    public static final String STATS_MANAGER = "stats";
+
+    /**
      * Use with {@link #getSystemService} to retrieve a {@link
      * android.content.om.OverlayManager} for managing overlay packages.
      *
@@ -4069,6 +4078,14 @@ public abstract class Context {
      * @see #getSystemService
      */
     public static final String TIME_ZONE_RULES_MANAGER_SERVICE = "timezone";
+
+    /**
+     * Use with {@link #getSystemService} to retrieve a
+     * {@link android.content.pm.crossprofile.CrossProfileApps} for cross profile operations.
+     *
+     * @see #getSystemService
+     */
+    public static final String CROSS_PROFILE_APPS_SERVICE = "crossprofileapps";
 
     /**
      * Determine whether the given permission is allowed for a particular

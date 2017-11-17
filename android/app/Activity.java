@@ -16,8 +16,6 @@
 
 package android.app;
 
-import static android.os.Build.VERSION_CODES.O_MR1;
-
 import static java.lang.Character.MIN_VALUE;
 
 import android.annotation.CallSuper;
@@ -136,6 +134,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 
+
 /**
  * An activity is a single, focused thing that the user can do.  Almost all
  * activities interact with the user, so the Activity class takes care of
@@ -194,10 +193,13 @@ import java.util.List;
  * <a name="Fragments"></a>
  * <h3>Fragments</h3>
  *
- * <p>Starting with {@link android.os.Build.VERSION_CODES#HONEYCOMB}, Activity
- * implementations can make use of the {@link Fragment} class to better
+ * <p>The {@link android.support.v4.app.FragmentActivity} subclass
+ * can make use of the {@link android.support.v4.app.Fragment} class to better
  * modularize their code, build more sophisticated user interfaces for larger
- * screens, and help scale their application between small and large screens.
+ * screens, and help scale their application between small and large screens.</p>
+ *
+ * <p>For more information about using fragments, read the
+ * <a href="{@docRoot}guide/components/fragments.html">Fragments</a> developer guide.</p>
  *
  * <a name="ActivityLifecycle"></a>
  * <h3>Activity Lifecycle</h3>
@@ -916,7 +918,10 @@ public class Activity extends ContextThemeWrapper
 
     /**
      * Return the LoaderManager for this activity, creating it if needed.
+     *
+     * @deprecated Use {@link android.support.v4.app.FragmentActivity#getSupportLoaderManager()}
      */
+    @Deprecated
     public LoaderManager getLoaderManager() {
         return mFragments.getLoaderManager();
     }
@@ -990,17 +995,6 @@ public class Activity extends ContextThemeWrapper
     @CallSuper
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         if (DEBUG_LIFECYCLE) Slog.v(TAG, "onCreate " + this + ": " + savedInstanceState);
-
-        if (getApplicationInfo().targetSdkVersion >= O_MR1 && mActivityInfo.isFixedOrientation()) {
-            final TypedArray ta = obtainStyledAttributes(com.android.internal.R.styleable.Window);
-            final boolean isTranslucentOrFloating = ActivityInfo.isTranslucentOrFloating(ta);
-            ta.recycle();
-
-            if (isTranslucentOrFloating) {
-                throw new IllegalStateException(
-                        "Only fullscreen opaque activities can request orientation");
-            }
-        }
 
         if (mLastNonConfigurationInstances != null) {
             mFragments.restoreLoaderNonConfig(mLastNonConfigurationInstances.loaders);
@@ -2407,7 +2401,10 @@ public class Activity extends ContextThemeWrapper
     /**
      * Return the FragmentManager for interacting with fragments associated
      * with this activity.
+     *
+     * @deprecated Use {@link android.support.v4.app.FragmentActivity#getSupportFragmentManager()}
      */
+    @Deprecated
     public FragmentManager getFragmentManager() {
         return mFragments.getFragmentManager();
     }
@@ -2416,7 +2413,11 @@ public class Activity extends ContextThemeWrapper
      * Called when a Fragment is being attached to this activity, immediately
      * after the call to its {@link Fragment#onAttach Fragment.onAttach()}
      * method and before {@link Fragment#onCreate Fragment.onCreate()}.
+     *
+     * @deprecated Use {@link
+     * android.support.v4.app.FragmentActivity#onAttachFragment(android.support.v4.app.Fragment)}
      */
+    @Deprecated
     public void onAttachFragment(Fragment fragment) {
     }
 
@@ -5118,7 +5119,11 @@ public class Activity extends ContextThemeWrapper
      *
      * @see Fragment#startActivity
      * @see Fragment#startActivityForResult
+     *
+     * @deprecated Use {@link android.support.v4.app.FragmentActivity#startActivityFromFragment(
+     * android.support.v4.app.Fragment,Intent,int)}
      */
+    @Deprecated
     public void startActivityFromFragment(@NonNull Fragment fragment,
             @RequiresPermission Intent intent, int requestCode) {
         startActivityFromFragment(fragment, intent, requestCode, null);
@@ -5143,7 +5148,11 @@ public class Activity extends ContextThemeWrapper
      *
      * @see Fragment#startActivity
      * @see Fragment#startActivityForResult
+     *
+     * @deprecated Use {@link android.support.v4.app.FragmentActivity#startActivityFromFragment(
+     * android.support.v4.app.Fragment,Intent,int,Bundle)}
      */
+    @Deprecated
     public void startActivityFromFragment(@NonNull Fragment fragment,
             @RequiresPermission Intent intent, int requestCode, @Nullable Bundle options) {
         startActivityForResult(fragment.mWho, intent, requestCode, options);
@@ -7304,24 +7313,25 @@ public class Activity extends ContextThemeWrapper
     }
 
     /**
-     * Request to put this Activity in a mode where the user is locked to the
-     * current task.
+     * Request to put this activity in a mode where the user is locked to a restricted set of
+     * applications.
      *
-     * This will prevent the user from launching other apps, going to settings, or reaching the
-     * home screen. This does not include those apps whose {@link android.R.attr#lockTaskMode}
-     * values permit launching while locked.
+     * <p>If {@link DevicePolicyManager#isLockTaskPermitted(String)} returns {@code true}
+     * for this component, the current task will be launched directly into LockTask mode. Only apps
+     * whitelisted by {@link DevicePolicyManager#setLockTaskPackages(ComponentName, String[])} can
+     * be launched while LockTask mode is active. The user will not be able to leave this mode
+     * until this activity calls {@link #stopLockTask()}. Calling this method while the device is
+     * already in LockTask mode has no effect.
      *
-     * If {@link DevicePolicyManager#isLockTaskPermitted(String)} returns true or
-     * lockTaskMode=lockTaskModeAlways for this component then the app will go directly into
-     * Lock Task mode. The user will not be able to exit this mode until
-     * {@link Activity#stopLockTask()} is called.
+     * <p>Otherwise, the current task will be launched into screen pinning mode. In this case, the
+     * system will prompt the user with a dialog requesting permission to use this mode.
+     * The user can exit at any time through instructions shown on the request dialog. Calling
+     * {@link #stopLockTask()} will also terminate this mode.
      *
-     * If {@link DevicePolicyManager#isLockTaskPermitted(String)} returns false
-     * then the system will prompt the user with a dialog requesting permission to enter
-     * this mode.  When entered through this method the user can exit at any time through
-     * an action described by the request dialog.  Calling stopLockTask will also exit the
-     * mode.
+     * <p><strong>Note:</strong> this method can only be called when the activity is foreground.
+     * That is, between {@link #onResume()} and {@link #onPause()}.
      *
+     * @see #stopLockTask()
      * @see android.R.attr#lockTaskMode
      */
     public void startLockTask() {
@@ -7332,25 +7342,24 @@ public class Activity extends ContextThemeWrapper
     }
 
     /**
-     * Allow the user to switch away from the current task.
+     * Stop the current task from being locked.
      *
-     * Called to end the mode started by {@link Activity#startLockTask}. This
-     * can only be called by activities that have successfully called
-     * startLockTask previously.
+     * <p>Called to end the LockTask or screen pinning mode started by {@link #startLockTask()}.
+     * This can only be called by activities that have called {@link #startLockTask()} previously.
      *
-     * This will allow the user to exit this app and move onto other activities.
-     * <p>Note: This method should only be called when the activity is user-facing. That is,
-     * between onResume() and onPause().
-     * <p>Note: If there are other tasks below this one that are also locked then calling this
-     * method will immediately finish this task and resume the previous locked one, remaining in
-     * lockTask mode.
+     * <p><strong>Note:</strong> If the device is in LockTask mode that is not initially started
+     * by this activity, then calling this method will not terminate the LockTask mode, but only
+     * finish its own task. The device will remain in LockTask mode, until the activity which
+     * started the LockTask mode calls this method, or until its whitelist authorization is revoked
+     * by {@link DevicePolicyManager#setLockTaskPackages(ComponentName, String[])}.
      *
+     * @see #startLockTask()
      * @see android.R.attr#lockTaskMode
      * @see ActivityManager#getLockTaskModeState()
      */
     public void stopLockTask() {
         try {
-            ActivityManager.getService().stopLockTaskMode();
+            ActivityManager.getService().stopLockTaskModeByToken(mToken);
         } catch (RemoteException e) {
         }
     }

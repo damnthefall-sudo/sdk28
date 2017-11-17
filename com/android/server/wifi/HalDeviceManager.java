@@ -35,9 +35,9 @@ import android.hidl.manager.V1_0.IServiceNotification;
 import android.os.Handler;
 import android.os.HwRemoteBinder;
 import android.os.Looper;
-import android.os.Message;
 import android.os.RemoteException;
 import android.util.Log;
+import android.util.LongSparseArray;
 import android.util.MutableBoolean;
 import android.util.MutableInt;
 import android.util.SparseArray;
@@ -70,8 +70,12 @@ public class HalDeviceManager {
     @VisibleForTesting
     public static final String HAL_INSTANCE_NAME = "default";
 
+    private final Clock mClock;
+
     // public API
-    public HalDeviceManager() {
+    public HalDeviceManager(Clock clock) {
+        mClock = clock;
+
         mInterfaceAvailableForRequestListeners.put(IfaceType.STA, new HashSet<>());
         mInterfaceAvailableForRequestListeners.put(IfaceType.AP, new HashSet<>());
         mInterfaceAvailableForRequestListeners.put(IfaceType.P2P, new HashSet<>());
@@ -98,12 +102,13 @@ public class HalDeviceManager {
      * single copy kept.
      *
      * @param listener ManagerStatusListener listener object.
-     * @param looper Looper on which to dispatch listener. Null implies current looper.
+     * @param handler Handler on which to dispatch listener. Null implies a new Handler based on
+     *                the current looper.
      */
-    public void registerStatusListener(ManagerStatusListener listener, Looper looper) {
+    public void registerStatusListener(ManagerStatusListener listener, Handler handler) {
         synchronized (mLock) {
             if (!mManagerStatusListeners.add(new ManagerStatusListenerProxy(listener,
-                    looper == null ? Looper.myLooper() : looper))) {
+                    handler == null ? new Handler(Looper.myLooper()) : handler))) {
                 Log.w(TAG, "registerStatusListener: duplicate registration ignored");
             }
         }
@@ -192,37 +197,37 @@ public class HalDeviceManager {
      * @param destroyedListener Optional (nullable) listener to call when the allocated interface
      *                          is removed. Will only be registered and used if an interface is
      *                          created successfully.
-     * @param looper The looper on which to dispatch the listener. A null value indicates the
-     *               current thread.
+     * @param handler The Handler on which to dispatch the listener. A null implies a new Handler
+     *                based on the current looper.
      * @return A newly created interface - or null if the interface could not be created.
      */
     public IWifiStaIface createStaIface(InterfaceDestroyedListener destroyedListener,
-            Looper looper) {
-        return (IWifiStaIface) createIface(IfaceType.STA, destroyedListener, looper);
+            Handler handler) {
+        return (IWifiStaIface) createIface(IfaceType.STA, destroyedListener, handler);
     }
 
     /**
      * Create AP interface if possible (see createStaIface doc).
      */
     public IWifiApIface createApIface(InterfaceDestroyedListener destroyedListener,
-            Looper looper) {
-        return (IWifiApIface) createIface(IfaceType.AP, destroyedListener, looper);
+            Handler handler) {
+        return (IWifiApIface) createIface(IfaceType.AP, destroyedListener, handler);
     }
 
     /**
      * Create P2P interface if possible (see createStaIface doc).
      */
     public IWifiP2pIface createP2pIface(InterfaceDestroyedListener destroyedListener,
-            Looper looper) {
-        return (IWifiP2pIface) createIface(IfaceType.P2P, destroyedListener, looper);
+            Handler handler) {
+        return (IWifiP2pIface) createIface(IfaceType.P2P, destroyedListener, handler);
     }
 
     /**
      * Create NAN interface if possible (see createStaIface doc).
      */
     public IWifiNanIface createNanIface(InterfaceDestroyedListener destroyedListener,
-            Looper looper) {
-        return (IWifiNanIface) createIface(IfaceType.NAN, destroyedListener, looper);
+            Handler handler) {
+        return (IWifiNanIface) createIface(IfaceType.NAN, destroyedListener, handler);
     }
 
     /**
@@ -263,11 +268,11 @@ public class HalDeviceManager {
      * and false on failure. This listener is in addition to the one registered when the interface
      * was created - allowing non-creators to monitor interface status.
      *
-     * Listener called-back on the specified looper - or on the current looper if a null is passed.
+     * Listener called-back on the specified handler - or on the current looper if a null is passed.
      */
     public boolean registerDestroyedListener(IWifiIface iface,
             InterfaceDestroyedListener destroyedListener,
-            Looper looper) {
+            Handler handler) {
         String name = getName(iface);
         if (DBG) Log.d(TAG, "registerDestroyedListener: iface(name)=" + name);
 
@@ -279,8 +284,7 @@ public class HalDeviceManager {
             }
 
             return cacheEntry.destroyedListeners.add(
-                    new InterfaceDestroyedListenerProxy(destroyedListener,
-                            looper == null ? Looper.myLooper() : looper));
+                    new InterfaceDestroyedListenerProxy(destroyedListener, handler));
         }
     }
 
@@ -299,17 +303,16 @@ public class HalDeviceManager {
      * @param ifaceType The interface type (IfaceType) to be monitored.
      * @param listener Listener to call when an interface of the requested
      *                 type could be created
-     * @param looper The looper on which to dispatch the listener. A null value indicates the
-     *               current thread.
+     * @param handler The Handler on which to dispatch the listener. A null implies a new Handler
+     *                on the current looper.
      */
     public void registerInterfaceAvailableForRequestListener(int ifaceType,
-            InterfaceAvailableForRequestListener listener, Looper looper) {
+            InterfaceAvailableForRequestListener listener, Handler handler) {
         if (DBG) Log.d(TAG, "registerInterfaceAvailableForRequestListener: ifaceType=" + ifaceType);
 
         synchronized (mLock) {
             mInterfaceAvailableForRequestListeners.get(ifaceType).add(
-                    new InterfaceAvailableForRequestListenerProxy(listener,
-                            looper == null ? Looper.myLooper() : looper));
+                    new InterfaceAvailableForRequestListenerProxy(listener, handler));
         }
 
         WifiChipInfo[] chipInfos = getAllChipInfo();
@@ -474,12 +477,14 @@ public class HalDeviceManager {
         public String name;
         public int type;
         public Set<InterfaceDestroyedListenerProxy> destroyedListeners = new HashSet<>();
+        public long creationTime;
 
         @Override
         public String toString() {
             StringBuilder sb = new StringBuilder();
             sb.append("{name=").append(name).append(", type=").append(type)
                     .append(", destroyedListeners.size()=").append(destroyedListeners.size())
+                    .append(", creationTime=").append(creationTime)
                     .append("}");
             return sb.toString();
         }
@@ -1208,8 +1213,8 @@ public class HalDeviceManager {
     private class ManagerStatusListenerProxy  extends
             ListenerProxy<ManagerStatusListener> {
         ManagerStatusListenerProxy(ManagerStatusListener statusListener,
-                Looper looper) {
-            super(statusListener, looper, "ManagerStatusListenerProxy");
+                Handler handler) {
+            super(statusListener, handler, true, "ManagerStatusListenerProxy");
         }
 
         @Override
@@ -1270,7 +1275,7 @@ public class HalDeviceManager {
     }
 
     private IWifiIface createIface(int ifaceType, InterfaceDestroyedListener destroyedListener,
-            Looper looper) {
+            Handler handler) {
         if (DBG) Log.d(TAG, "createIface: ifaceType=" + ifaceType);
 
         synchronized (mLock) {
@@ -1288,7 +1293,7 @@ public class HalDeviceManager {
             }
 
             IWifiIface iface = createIfaceIfPossible(chipInfos, ifaceType, destroyedListener,
-                    looper);
+                    handler);
             if (iface != null) { // means that some configuration has changed
                 if (!dispatchAvailableForRequestListeners()) {
                     return null; // catastrophic failure - shut down
@@ -1300,7 +1305,7 @@ public class HalDeviceManager {
     }
 
     private IWifiIface createIfaceIfPossible(WifiChipInfo[] chipInfos, int ifaceType,
-            InterfaceDestroyedListener destroyedListener, Looper looper) {
+            InterfaceDestroyedListener destroyedListener, Handler handler) {
         if (DBG) {
             Log.d(TAG, "createIfaceIfPossible: chipInfos=" + Arrays.deepToString(chipInfos)
                     + ", ifaceType=" + ifaceType);
@@ -1341,9 +1346,9 @@ public class HalDeviceManager {
                     cacheEntry.type = ifaceType;
                     if (destroyedListener != null) {
                         cacheEntry.destroyedListeners.add(
-                                new InterfaceDestroyedListenerProxy(destroyedListener,
-                                        looper == null ? Looper.myLooper() : looper));
+                                new InterfaceDestroyedListenerProxy(destroyedListener, handler));
                     }
+                    cacheEntry.creationTime = mClock.getUptimeSinceBootMillis();
 
                     if (DBG) Log.d(TAG, "createIfaceIfPossible: added cacheEntry=" + cacheEntry);
                     mInterfaceInfoCache.put(cacheEntry.name, cacheEntry);
@@ -1468,7 +1473,8 @@ public class HalDeviceManager {
         if (isChipModeChangeProposed) {
             for (int type: IFACE_TYPES_BY_PRIORITY) {
                 if (chipInfo.ifaces[type].length != 0) {
-                    if (!allowedToDeleteIfaceTypeForRequestedType(type, ifaceType)) {
+                    if (!allowedToDeleteIfaceTypeForRequestedType(type, ifaceType,
+                            chipInfo.ifaces[ifaceType].length != 0)) {
                         if (DBG) {
                             Log.d(TAG, "Couldn't delete existing type " + type
                                     + " interfaces for requested type");
@@ -1498,17 +1504,17 @@ public class HalDeviceManager {
             }
 
             if (tooManyInterfaces > 0) { // may need to delete some
-                if (!allowedToDeleteIfaceTypeForRequestedType(type, ifaceType)) {
+                if (!allowedToDeleteIfaceTypeForRequestedType(type, ifaceType,
+                        chipInfo.ifaces[ifaceType].length != 0)) {
                     if (DBG) {
                         Log.d(TAG, "Would need to delete some higher priority interfaces");
                     }
                     return null;
                 }
 
-                // arbitrarily pick the first interfaces to delete
-                for (int i = 0; i < tooManyInterfaces; ++i) {
-                    interfacesToBeRemovedFirst.add(chipInfo.ifaces[type][i]);
-                }
+                // delete the most recently created interfaces
+                interfacesToBeRemovedFirst = selectInterfacesToDelete(tooManyInterfaces,
+                        chipInfo.ifaces[type]);
             }
         }
 
@@ -1576,14 +1582,20 @@ public class HalDeviceManager {
      * interface type.
      *
      * Rules:
-     * 1. Request for AP or STA will destroy any other interface (except see #4)
+     * 1. Request for AP or STA will destroy any other interface (except see #4 and #5)
      * 2. Request for P2P will destroy NAN-only
      * 3. Request for NAN will not destroy any interface
      * --
      * 4. No interface will be destroyed for a requested interface of the same type
+     * 5. No interface will be destroyed if one of the requested interfaces already exists
      */
     private boolean allowedToDeleteIfaceTypeForRequestedType(int existingIfaceType,
-            int requestedIfaceType) {
+            int requestedIfaceType, boolean requestedIfaceTypeAlreadyExists) {
+        // rule 5
+        if (requestedIfaceTypeAlreadyExists) {
+            return false;
+        }
+
         // rule 4
         if (existingIfaceType == requestedIfaceType) {
             return false;
@@ -1601,6 +1613,46 @@ public class HalDeviceManager {
 
         // rule 1, the requestIfaceType is either AP or STA
         return true;
+    }
+
+    /**
+     * Selects the interfaces to delete.
+     *
+     * Rule: select the most recently created interfaces in order.
+     *
+     * @param excessInterfaces Number of interfaces which need to be selected.
+     * @param interfaces Array of interfaces.
+     */
+    private List<WifiIfaceInfo> selectInterfacesToDelete(int excessInterfaces,
+            WifiIfaceInfo[] interfaces) {
+        if (DBG) {
+            Log.d(TAG, "selectInterfacesToDelete: excessInterfaces=" + excessInterfaces
+                    + ", interfaces=" + Arrays.toString(interfaces));
+        }
+
+        boolean lookupError = false;
+        LongSparseArray<WifiIfaceInfo> orderedList = new LongSparseArray(interfaces.length);
+        for (WifiIfaceInfo info : interfaces) {
+            InterfaceCacheEntry cacheEntry = mInterfaceInfoCache.get(info.name);
+            if (cacheEntry == null) {
+                Log.e(TAG,
+                        "selectInterfacesToDelete: can't find cache entry with name=" + info.name);
+                lookupError = true;
+                break;
+            }
+            orderedList.append(cacheEntry.creationTime, info);
+        }
+
+        if (lookupError) {
+            Log.e(TAG, "selectInterfacesToDelete: falling back to arbitary selection");
+            return Arrays.asList(Arrays.copyOf(interfaces, excessInterfaces));
+        } else {
+            List<WifiIfaceInfo> result = new ArrayList<>(excessInterfaces);
+            for (int i = 0; i < excessInterfaces; ++i) {
+                result.add(orderedList.valueAt(orderedList.size() - i - 1));
+            }
+            return result;
+        }
     }
 
     /**
@@ -1850,6 +1902,7 @@ public class HalDeviceManager {
 
         protected LISTENER mListener;
         private Handler mHandler;
+        private boolean mFrontOfQueue;
 
         // override equals & hash to make sure that the container HashSet is unique with respect to
         // the contained listener
@@ -1864,37 +1917,32 @@ public class HalDeviceManager {
         }
 
         void trigger() {
-            mHandler.sendMessage(mHandler.obtainMessage(LISTENER_TRIGGERED));
+            if (mFrontOfQueue) {
+                mHandler.postAtFrontOfQueue(() -> {
+                    action();
+                });
+            } else {
+                mHandler.post(() -> {
+                    action();
+                });
+            }
         }
 
         protected abstract void action();
 
-        ListenerProxy(LISTENER listener, Looper looper, String tag) {
+        ListenerProxy(LISTENER listener, Handler handler, boolean frontOfQueue, String tag) {
             mListener = listener;
-            mHandler = new Handler(looper) {
-                @Override
-                public void handleMessage(Message msg) {
-                    if (DBG) {
-                        Log.d(tag, "ListenerProxy.handleMessage: what=" + msg.what);
-                    }
-                    switch (msg.what) {
-                        case LISTENER_TRIGGERED:
-                            action();
-                            break;
-                        default:
-                            Log.e(tag, "ListenerProxy.handleMessage: unknown message what="
-                                    + msg.what);
-                    }
-                }
-            };
+            mHandler = handler;
+            mFrontOfQueue = frontOfQueue;
         }
     }
 
     private class InterfaceDestroyedListenerProxy extends
             ListenerProxy<InterfaceDestroyedListener> {
         InterfaceDestroyedListenerProxy(InterfaceDestroyedListener destroyedListener,
-                Looper looper) {
-            super(destroyedListener, looper, "InterfaceDestroyedListenerProxy");
+                Handler handler) {
+            super(destroyedListener, handler == null ? new Handler(Looper.myLooper()) : handler,
+                    true, "InterfaceDestroyedListenerProxy");
         }
 
         @Override
@@ -1906,8 +1954,9 @@ public class HalDeviceManager {
     private class InterfaceAvailableForRequestListenerProxy extends
             ListenerProxy<InterfaceAvailableForRequestListener> {
         InterfaceAvailableForRequestListenerProxy(
-                InterfaceAvailableForRequestListener destroyedListener, Looper looper) {
-            super(destroyedListener, looper, "InterfaceAvailableForRequestListenerProxy");
+                InterfaceAvailableForRequestListener destroyedListener, Handler handler) {
+            super(destroyedListener, handler == null ? new Handler(Looper.myLooper()) : handler,
+                    false, "InterfaceAvailableForRequestListenerProxy");
         }
 
         @Override

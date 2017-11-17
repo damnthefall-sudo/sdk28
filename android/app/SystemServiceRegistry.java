@@ -41,6 +41,8 @@ import android.content.pm.IShortcutService;
 import android.content.pm.LauncherApps;
 import android.content.pm.PackageManager;
 import android.content.pm.ShortcutManager;
+import android.content.pm.crossprofile.CrossProfileApps;
+import android.content.pm.crossprofile.ICrossProfileApps;
 import android.content.res.Resources;
 import android.hardware.ConsumerIrManager;
 import android.hardware.ISerialManager;
@@ -81,6 +83,7 @@ import android.net.INetworkPolicyManager;
 import android.net.IpSecManager;
 import android.net.NetworkPolicyManager;
 import android.net.NetworkScoreManager;
+import android.net.NetworkWatchlistManager;
 import android.net.lowpan.ILowpanManager;
 import android.net.lowpan.LowpanManager;
 import android.net.nsd.INsdManager;
@@ -134,6 +137,7 @@ import android.telephony.SubscriptionManager;
 import android.telephony.TelephonyManager;
 import android.telephony.euicc.EuiccManager;
 import android.util.Log;
+import android.util.StatsManager;
 import android.view.ContextThemeWrapper;
 import android.view.LayoutInflater;
 import android.view.WindowManager;
@@ -150,6 +154,7 @@ import com.android.internal.app.IAppOpsService;
 import com.android.internal.app.IBatteryStats;
 import com.android.internal.app.ISoundTriggerService;
 import com.android.internal.appwidget.IAppWidgetService;
+import com.android.internal.net.INetworkWatchlistManager;
 import com.android.internal.os.IDropBoxManagerService;
 import com.android.internal.policy.PhoneLayoutInflater;
 
@@ -304,14 +309,14 @@ final class SystemServiceRegistry {
             }});
 
         registerService(Context.BATTERY_SERVICE, BatteryManager.class,
-                new StaticServiceFetcher<BatteryManager>() {
+                new CachedServiceFetcher<BatteryManager>() {
             @Override
-            public BatteryManager createService() throws ServiceNotFoundException {
+            public BatteryManager createService(ContextImpl ctx) throws ServiceNotFoundException {
                 IBatteryStats stats = IBatteryStats.Stub.asInterface(
                         ServiceManager.getServiceOrThrow(BatteryStats.SERVICE_NAME));
                 IBatteryPropertiesRegistrar registrar = IBatteryPropertiesRegistrar.Stub
                         .asInterface(ServiceManager.getServiceOrThrow("batteryproperties"));
-                return new BatteryManager(stats, registrar);
+                return new BatteryManager(ctx, stats, registrar);
             }});
 
         registerService(Context.NFC_SERVICE, NfcManager.class,
@@ -447,6 +452,13 @@ final class SystemServiceRegistry {
                 return new SystemSensorManager(ctx.getOuterContext(),
                   ctx.mMainThread.getHandler().getLooper());
             }});
+
+        registerService(Context.STATS_MANAGER, StatsManager.class,
+                new StaticServiceFetcher<StatsManager>() {
+                    @Override
+                    public StatsManager createService() throws ServiceNotFoundException {
+                        return new StatsManager();
+                    }});
 
         registerService(Context.STATUS_BAR_SERVICE, StatusBarManager.class,
                 new CachedServiceFetcher<StatusBarManager>() {
@@ -862,6 +874,17 @@ final class SystemServiceRegistry {
                 return new ShortcutManager(ctx, IShortcutService.Stub.asInterface(b));
             }});
 
+        registerService(Context.NETWORK_WATCHLIST_SERVICE, NetworkWatchlistManager.class,
+                new CachedServiceFetcher<NetworkWatchlistManager>() {
+                    @Override
+                    public NetworkWatchlistManager createService(ContextImpl ctx)
+                            throws ServiceNotFoundException {
+                        IBinder b =
+                                ServiceManager.getServiceOrThrow(Context.NETWORK_WATCHLIST_SERVICE);
+                        return new NetworkWatchlistManager(ctx,
+                                INetworkWatchlistManager.Stub.asInterface(b));
+                    }});
+
         registerService(Context.SYSTEM_HEALTH_SERVICE, SystemHealthManager.class,
                 new CachedServiceFetcher<SystemHealthManager>() {
             @Override
@@ -909,6 +932,18 @@ final class SystemServiceRegistry {
             public RulesManager createService(ContextImpl ctx) {
                 return new RulesManager(ctx.getOuterContext());
             }});
+
+        registerService(Context.CROSS_PROFILE_APPS_SERVICE, CrossProfileApps.class,
+                new CachedServiceFetcher<CrossProfileApps>() {
+                    @Override
+                    public CrossProfileApps createService(ContextImpl ctx)
+                            throws ServiceNotFoundException {
+                        IBinder b = ServiceManager.getServiceOrThrow(
+                                Context.CROSS_PROFILE_APPS_SERVICE);
+                        return new CrossProfileApps(ctx.getOuterContext(),
+                                ICrossProfileApps.Stub.asInterface(b));
+                    }
+                });
     }
 
     /**

@@ -63,6 +63,7 @@ import com.android.systemui.recents.events.component.ShowUserToastEvent;
 import com.android.systemui.recents.events.ui.RecentsDrawnEvent;
 import com.android.systemui.recents.misc.SystemServicesProxy;
 import com.android.systemui.shared.recents.model.RecentsTaskLoader;
+import com.android.systemui.shared.system.ActivityManagerWrapper;
 import com.android.systemui.stackdivider.Divider;
 import com.android.systemui.statusbar.CommandQueue;
 
@@ -246,7 +247,7 @@ public class Recents extends SystemUI
             return;
         }
 
-        sSystemServicesProxy.sendCloseSystemWindows(SYSTEM_DIALOG_REASON_RECENT_APPS);
+        ActivityManagerWrapper.getInstance().closeSystemWindows(SYSTEM_DIALOG_REASON_RECENT_APPS);
         int recentsGrowTarget = getComponent(Divider.class).getView().growsRecents();
         int currentUser = sSystemServicesProxy.getCurrentUser();
         if (sSystemServicesProxy.isSystemUser(currentUser)) {
@@ -394,7 +395,7 @@ public class Recents extends SystemUI
     }
 
     @Override
-    public boolean dockTopTask(int dragMode, int stackCreateMode, Rect initialBounds,
+    public boolean splitPrimaryTask(int dragMode, int stackCreateMode, Rect initialBounds,
             int metricsDockAction) {
         // Ensure the device has been provisioned before allowing the user to interact with
         // recents
@@ -410,12 +411,12 @@ public class Recents extends SystemUI
         }
 
         int currentUser = sSystemServicesProxy.getCurrentUser();
-        SystemServicesProxy ssp = Recents.getSystemServices();
-        ActivityManager.RunningTaskInfo runningTask = ssp.getRunningTask();
+        ActivityManager.RunningTaskInfo runningTask =
+                ActivityManagerWrapper.getInstance().getRunningTask();
         final int activityType = runningTask != null
                 ? runningTask.configuration.windowConfiguration.getActivityType()
                 : ACTIVITY_TYPE_UNDEFINED;
-        boolean screenPinningActive = ssp.isScreenPinningActive();
+        boolean screenPinningActive = sSystemServicesProxy.isScreenPinningActive();
         boolean isRunningTaskInHomeOrRecentsStack =
                 activityType == ACTIVITY_TYPE_HOME || activityType == ACTIVITY_TYPE_RECENTS;
         if (runningTask != null && !isRunningTaskInHomeOrRecentsStack && !screenPinningActive) {
@@ -426,15 +427,16 @@ public class Recents extends SystemUI
                             runningTask.topActivity.flattenToShortString());
                 }
                 if (sSystemServicesProxy.isSystemUser(currentUser)) {
-                    mImpl.dockTopTask(runningTask.id, dragMode, stackCreateMode, initialBounds);
+                    mImpl.splitPrimaryTask(runningTask.id, dragMode, stackCreateMode,
+                            initialBounds);
                 } else {
                     if (mSystemToUserCallbacks != null) {
                         IRecentsNonSystemUserCallbacks callbacks =
                                 mSystemToUserCallbacks.getNonSystemUserRecentsForUser(currentUser);
                         if (callbacks != null) {
                             try {
-                                callbacks.dockTopTask(runningTask.id, dragMode, stackCreateMode,
-                                        initialBounds);
+                                callbacks.splitPrimaryTask(runningTask.id, dragMode,
+                                        stackCreateMode, initialBounds);
                             } catch (RemoteException e) {
                                 Log.e(TAG, "Callback failed", e);
                             }

@@ -419,7 +419,7 @@ class Task extends WindowContainer<AppWindowToken> implements DimLayer.DimLayerU
         return mFillsParent
                 || !inSplitScreenSecondaryWindowingMode()
                 || displayContent == null
-                || displayContent.getSplitScreenPrimaryStackStackIgnoringVisibility() != null;
+                || displayContent.getSplitScreenPrimaryStackIgnoringVisibility() != null;
     }
 
     /** Original bounds of the task if applicable, otherwise fullscreen rect. */
@@ -678,7 +678,7 @@ class Task extends WindowContainer<AppWindowToken> implements DimLayer.DimLayerU
                 mChildren.get(i).forceWindowsScaleableInTransaction(force);
             }
         } finally {
-            mService.closeSurfaceTransaction();
+            mService.closeSurfaceTransaction("forceWindowsScaleable");
         }
     }
 

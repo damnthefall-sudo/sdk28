@@ -38,13 +38,13 @@ import java.io.PrintWriter;
  * It should be called with an {@link Activity} as an argument and that {@link Activity} will then
  * be able to receive ambient lifecycle events through an {@link AmbientCallback}. The
  * {@link Activity} will also receive a {@link AmbientController} object from the attachment which
- * can be used to query the current status of the ambient mode, or toggle simple settings.
+ * can be used to query the current status of the ambient mode.
  * An example of how to attach {@link AmbientMode} to your {@link Activity} and use
  * the {@link AmbientController} can be found below:
  * <p>
  * <pre class="prettyprint">{@code
  *     AmbientMode.AmbientController controller = AmbientMode.attachAmbientSupport(this);
- *     controller.setAutoResumeEnabled(true);
+ *     boolean isAmbient =  controller.isAmbient();
  * }</pre>
  */
 public final class AmbientMode extends Fragment {
@@ -117,7 +117,7 @@ public final class AmbientMode extends Fragment {
          * Called when the system is updating the display for ambient mode. Activities may use this
          * opportunity to update or invalidate views.
          */
-        public void onUpdateAmbient() {};
+        public void onUpdateAmbient() {}
 
         /**
          * Called when an activity should exit ambient mode. This event is sent while an activity is
@@ -126,7 +126,7 @@ public final class AmbientMode extends Fragment {
          * <p><em>Derived classes must call through to the super class's implementation of this
          * method. If they do not, an exception will be thrown.</em>
          */
-        public void onExitAmbient() {};
+        public void onExitAmbient() {}
     }
 
     private final AmbientDelegate.AmbientCallback mCallback =
@@ -220,7 +220,7 @@ public final class AmbientMode extends Fragment {
      * @param activity the activity to attach ambient support to. This activity has to also
      *                implement {@link AmbientCallbackProvider}
      * @return the associated {@link AmbientController} which can be used to query the state of
-     * ambient mode and toggle simple settings related to it.
+     * ambient mode.
      */
     public static <T extends Activity & AmbientCallbackProvider> AmbientController
             attachAmbientSupport(T activity) {
@@ -251,9 +251,8 @@ public final class AmbientMode extends Fragment {
 
     /**
      * A class for interacting with the ambient mode on a wearable device. This class can be used to
-     * query the current state of ambient mode and to enable or disable certain settings.
-     * An instance of this class is returned to the user when they attach their {@link Activity}
-     * to {@link AmbientMode}.
+     * query the current state of ambient mode. An instance of this class is returned to the user
+     * when they attach their {@link Activity} to {@link AmbientMode}.
      */
     public final class AmbientController {
         private static final String TAG = "AmbientController";

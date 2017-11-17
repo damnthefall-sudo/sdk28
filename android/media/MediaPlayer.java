@@ -43,6 +43,7 @@ import android.system.Os;
 import android.system.OsConstants;
 import android.util.Log;
 import android.util.Pair;
+import android.util.ArrayMap;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.widget.VideoView;
@@ -58,6 +59,7 @@ import android.media.SubtitleData;
 import android.media.SubtitleTrack.RenderingWidget;
 import android.media.SyncParams;
 
+import com.android.internal.annotations.GuardedBy;
 import com.android.internal.util.Preconditions;
 
 import libcore.io.IoBridge;
@@ -577,6 +579,7 @@ import java.util.Vector;
 public class MediaPlayer extends PlayerBase
                          implements SubtitleController.Listener
                                   , VolumeAutomation
+                                  , AudioRouting
 {
     /**
        Constant to retrieve only the new metadata since the last
@@ -1417,6 +1420,155 @@ public class MediaPlayer extends PlayerBase
 
     private native @Nullable VolumeShaper.State native_getVolumeShaperState(int id);
 
+    //--------------------------------------------------------------------------
+    // Explicit Routing
+    //--------------------
+    private AudioDeviceInfo mPreferredDevice = null;
+
+    /**
+     * Specifies an audio device (via an {@link AudioDeviceInfo} object) to route
+     * the output from this MediaPlayer.
+     * @param deviceInfo The {@link AudioDeviceInfo} specifying the audio sink or source.
+     *  If deviceInfo is null, default routing is restored.
+     * @return true if succesful, false if the specified {@link AudioDeviceInfo} is non-null and
+     * does not correspond to a valid audio device.
+     */
+    @Override
+    public boolean setPreferredDevice(AudioDeviceInfo deviceInfo) {
+        if (deviceInfo != null && !deviceInfo.isSink()) {
+            return false;
+        }
+        int preferredDeviceId = deviceInfo != null ? deviceInfo.getId() : 0;
+        boolean status = native_setOutputDevice(preferredDeviceId);
+        if (status == true) {
+            synchronized (this) {
+                mPreferredDevice = deviceInfo;
+            }
+        }
+        return status;
+    }
+
+    /**
+     * Returns the selected output specified by {@link #setPreferredDevice}. Note that this
+     * is not guaranteed to correspond to the actual device being used for playback.
+     */
+    @Override
+    public AudioDeviceInfo getPreferredDevice() {
+        synchronized (this) {
+            return mPreferredDevice;
+        }
+    }
+
+    /**
+     * Returns an {@link AudioDeviceInfo} identifying the current routing of this MediaPlayer
+     * Note: The query is only valid if the MediaPlayer is currently playing.
+     * If the player is not playing, the returned device can be null or correspond to previously
+     * selected device when the player was last active.
+     */
+    @Override
+    public AudioDeviceInfo getRoutedDevice() {
+        int deviceId = native_getRoutedDeviceId();
+        if (deviceId == 0) {
+            return null;
+        }
+        AudioDeviceInfo[] devices =
+                AudioManager.getDevicesStatic(AudioManager.GET_DEVICES_OUTPUTS);
+        for (int i = 0; i < devices.length; i++) {
+            if (devices[i].getId() == deviceId) {
+                return devices[i];
+            }
+        }
+        return null;
+    }
+
+    /*
+     * Call BEFORE adding a routing callback handler or AFTER removing a routing callback handler.
+     */
+    private void enableNativeRoutingCallbacksLocked(boolean enabled) {
+        if (mRoutingChangeListeners.size() == 0) {
+            native_enableDeviceCallback(enabled);
+        }
+    }
+
+    /**
+     * The list of AudioRouting.OnRoutingChangedListener interfaces added (with
+     * {@link #addOnRoutingChangedListener(android.media.AudioRouting.OnRoutingChangedListener, Handler)}
+     * by an app to receive (re)routing notifications.
+     */
+    @GuardedBy("mRoutingChangeListeners")
+    private ArrayMap<AudioRouting.OnRoutingChangedListener,
+            NativeRoutingEventHandlerDelegate> mRoutingChangeListeners = new ArrayMap<>();
+
+    /**
+     * Adds an {@link AudioRouting.OnRoutingChangedListener} to receive notifications of routing
+     * changes on this MediaPlayer.
+     * @param listener The {@link AudioRouting.OnRoutingChangedListener} interface to receive
+     * notifications of rerouting events.
+     * @param handler  Specifies the {@link Handler} object for the thread on which to execute
+     * the callback. If <code>null</code>, the handler on the main looper will be used.
+     */
+    @Override
+    public void addOnRoutingChangedListener(AudioRouting.OnRoutingChangedListener listener,
+            Handler handler) {
+        synchronized (mRoutingChangeListeners) {
+            if (listener != null && !mRoutingChangeListeners.containsKey(listener)) {
+                enableNativeRoutingCallbacksLocked(true);
+                mRoutingChangeListeners.put(
+                        listener, new NativeRoutingEventHandlerDelegate(this, listener, handler));
+            }
+        }
+    }
+
+    /**
+     * Removes an {@link AudioRouting.OnRoutingChangedListener} which has been previously added
+     * to receive rerouting notifications.
+     * @param listener The previously added {@link AudioRouting.OnRoutingChangedListener} interface
+     * to remove.
+     */
+    @Override
+    public void removeOnRoutingChangedListener(AudioRouting.OnRoutingChangedListener listener) {
+        synchronized (mRoutingChangeListeners) {
+            if (mRoutingChangeListeners.containsKey(listener)) {
+                mRoutingChangeListeners.remove(listener);
+                enableNativeRoutingCallbacksLocked(false);
+            }
+        }
+    }
+
+    /**
+     * Helper class to handle the forwarding of native events to the appropriate listener
+     * (potentially) handled in a different thread
+     */
+    private class NativeRoutingEventHandlerDelegate {
+        private MediaPlayer mMediaPlayer;
+        private AudioRouting.OnRoutingChangedListener mOnRoutingChangedListener;
+        private Handler mHandler;
+
+        NativeRoutingEventHandlerDelegate(final MediaPlayer mediaPlayer,
+                final AudioRouting.OnRoutingChangedListener listener, Handler handler) {
+            mMediaPlayer = mediaPlayer;
+            mOnRoutingChangedListener = listener;
+            mHandler = handler != null ? handler : mEventHandler;
+        }
+
+        void notifyClient() {
+            if (mHandler != null) {
+                mHandler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (mOnRoutingChangedListener != null) {
+                            mOnRoutingChangedListener.onRoutingChanged(mMediaPlayer);
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    private native final boolean native_setOutputDevice(int deviceId);
+    private native final int native_getRoutedDeviceId();
+    private native final void native_enableDeviceCallback(boolean enabled);
+
     /**
      * Set the low-level power management behavior for this MediaPlayer.  This
      * can be used when the MediaPlayer is not playing through a SurfaceHolder
@@ -1546,21 +1698,9 @@ public class MediaPlayer extends PlayerBase
     public native boolean isPlaying();
 
     /**
-     * Gets the default buffering management params.
-     * Calling it only after {@code setDataSource} has been called.
-     * Each type of data source might have different set of default params.
-     *
-     * @return the default buffering management params supported by the source component.
-     * @throws IllegalStateException if the internal player engine has not been
-     * initialized, or {@code setDataSource} has not been called.
-     * @hide
-     */
-    @NonNull
-    public native BufferingParams getDefaultBufferingParams();
-
-    /**
      * Gets the current buffering management params used by the source component.
      * Calling it only after {@code setDataSource} has been called.
+     * Each type of data source might have different set of default params.
      *
      * @return the current buffering management params used by the source component.
      * @throws IllegalStateException if the internal player engine has not been
@@ -1575,8 +1715,7 @@ public class MediaPlayer extends PlayerBase
      * The object sets its internal BufferingParams to the input, except that the input is
      * invalid or not supported.
      * Call it only after {@code setDataSource} has been called.
-     * Users should only use supported mode returned by {@link #getDefaultBufferingParams()}
-     * or its downsized version as described in {@link BufferingParams}.
+     * The input is a hint to MediaPlayer.
      *
      * @param params the buffering management params.
      *
@@ -3176,6 +3315,7 @@ public class MediaPlayer extends PlayerBase
     private static final int MEDIA_SUBTITLE_DATA = 201;
     private static final int MEDIA_META_DATA = 202;
     private static final int MEDIA_DRM_INFO = 210;
+    private static final int MEDIA_AUDIO_ROUTING_CHANGED = 10000;
 
     private TimeProvider mTimeProvider;
 
@@ -3413,6 +3553,16 @@ public class MediaPlayer extends PlayerBase
 
             case MEDIA_NOP: // interface test message - ignore
                 break;
+
+            case MEDIA_AUDIO_ROUTING_CHANGED:
+                AudioManager.resetAudioPortGeneration();
+                synchronized (mRoutingChangeListeners) {
+                    for (NativeRoutingEventHandlerDelegate delegate
+                            : mRoutingChangeListeners.values()) {
+                        delegate.notifyClient();
+                    }
+                }
+                return;
 
             default:
                 Log.e(TAG, "Unknown message type " + msg.what);

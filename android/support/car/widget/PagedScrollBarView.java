@@ -18,6 +18,7 @@ package android.support.car.widget;
 
 import android.content.Context;
 import android.graphics.PorterDuff;
+import android.graphics.drawable.Drawable;
 import android.support.car.R;
 import android.support.v4.content.ContextCompat;
 import android.util.AttributeSet;
@@ -98,6 +99,16 @@ public class PagedScrollBarView extends FrameLayout
         return true;
     }
 
+    /** Sets the icon to be used for the up button. */
+    public void setUpButtonIcon(Drawable icon) {
+        mUpButton.setImageDrawable(icon);
+    }
+
+    /** Sets the icon to be used for the down button. */
+    public void setDownButtonIcon(Drawable icon) {
+        mDownButton.setImageDrawable(icon);
+    }
+
     /**
      * Sets the listener that will be notified when the up and down buttons have been pressed.
      *
@@ -119,7 +130,7 @@ public class PagedScrollBarView extends FrameLayout
 
     /** Sets the range, offset and extent of the scroll bar. See {@link View}. */
     public void setParameters(int range, int offset, int extent, boolean animate) {
-        // This method is where we take the computed parameters from the CarLayoutManager and
+        // This method is where we take the computed parameters from the PagedLayoutManager and
         // render it within the specified constraints ({@link #mMaxThumbLength} and
         // {@link #mMinThumbLength}).
         final int size = mFiller.getHeight() - mFiller.getPaddingTop() - mFiller.getPaddingBottom();

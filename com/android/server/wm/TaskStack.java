@@ -16,8 +16,8 @@
 
 package com.android.server.wm;
 
-import static android.app.ActivityManager.DOCKED_STACK_CREATE_MODE_TOP_OR_LEFT;
-import static android.app.ActivityManager.DOCKED_STACK_CREATE_MODE_BOTTOM_OR_RIGHT;
+import static android.app.ActivityManager.SPLIT_SCREEN_CREATE_MODE_TOP_OR_LEFT;
+import static android.app.ActivityManager.SPLIT_SCREEN_CREATE_MODE_BOTTOM_OR_RIGHT;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_ASSISTANT;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_HOME;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_RECENTS;
@@ -294,7 +294,7 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
         if (mFillsParent
                 || !inSplitScreenSecondaryWindowingMode()
                 || mDisplayContent == null
-                || mDisplayContent.getSplitScreenPrimaryStackStack() != null) {
+                || mDisplayContent.getSplitScreenPrimaryStack() != null) {
             return true;
         }
         return false;
@@ -442,7 +442,7 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
         mTmpRect2.set(mBounds);
         mDisplayContent.rotateBounds(mRotation, newRotation, mTmpRect2);
         if (inSplitScreenPrimaryWindowingMode()) {
-            repositionDockedStackAfterRotation(mTmpRect2);
+            repositionPrimarySplitScreenStackAfterRotation(mTmpRect2);
             snapDockedStackAfterRotation(mTmpRect2);
             final int newDockSide = getDockSide(mTmpRect2);
 
@@ -450,8 +450,8 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
             // might change after a rotation and the original values will be invalid.
             mService.setDockedStackCreateStateLocked(
                     (newDockSide == DOCKED_LEFT || newDockSide == DOCKED_TOP)
-                            ? DOCKED_STACK_CREATE_MODE_TOP_OR_LEFT
-                            : DOCKED_STACK_CREATE_MODE_BOTTOM_OR_RIGHT,
+                            ? SPLIT_SCREEN_CREATE_MODE_TOP_OR_LEFT
+                            : SPLIT_SCREEN_CREATE_MODE_BOTTOM_OR_RIGHT,
                     null);
             mDisplayContent.getDockedDividerController().notifyDockSideChanged(newDockSide);
         }
@@ -466,14 +466,14 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
     }
 
     /**
-     * Some dock sides are not allowed by the policy. This method queries the policy and moves
-     * the docked stack around if needed.
+     * Some primary split screen sides are not allowed by the policy. This method queries the policy
+     * and moves the primary stack around if needed.
      *
-     * @param inOutBounds the bounds of the docked stack to adjust
+     * @param inOutBounds the bounds of the primary stack to adjust
      */
-    private void repositionDockedStackAfterRotation(Rect inOutBounds) {
+    private void repositionPrimarySplitScreenStackAfterRotation(Rect inOutBounds) {
         int dockSide = getDockSide(inOutBounds);
-        if (mService.mPolicy.isDockSideAllowed(dockSide)) {
+        if (mDisplayContent.getDockedDividerController().canPrimaryStackDockTo(dockSide)) {
             return;
         }
         mDisplayContent.getLogicalDisplayRect(mTmpRect);
@@ -523,7 +523,7 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
         final DividerSnapAlgorithm algorithm = new DividerSnapAlgorithm(
                 mService.mContext.getResources(), displayWidth, displayHeight,
                 dividerSize, orientation == Configuration.ORIENTATION_PORTRAIT, outBounds,
-                isMinimizedDockAndHomeStackResizable());
+                getDockSide(), isMinimizedDockAndHomeStackResizable());
         final SnapTarget target = algorithm.calculateNonDismissingSnapTarget(dividerPosition);
 
         // Recalculate the bounds based on the position of the target.
@@ -603,6 +603,14 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
         } else {
             maxPosition = computeMaxPosition(maxPosition);
         }
+
+        // preserve POSITION_BOTTOM/POSITION_TOP positions if they are still valid.
+        if (targetPosition == POSITION_BOTTOM && minPosition == 0) {
+            return POSITION_BOTTOM;
+        } else if (targetPosition == POSITION_TOP
+                && maxPosition == (addingNew ? stackSize : stackSize - 1)) {
+            return POSITION_TOP;
+        }
         // Reset position based on minimum/maximum possible positions.
         return Math.min(Math.max(targetPosition, minPosition), maxPosition);
     }
@@ -677,9 +685,12 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
     public void onConfigurationChanged(Configuration newParentConfig) {
         final int prevWindowingMode = getWindowingMode();
         super.onConfigurationChanged(newParentConfig);
-        if (mDisplayContent != null && prevWindowingMode != getWindowingMode()) {
-            mDisplayContent.onStackWindowingModeChanged(this);
+        final int windowingMode = getWindowingMode();
+        if (mDisplayContent == null || prevWindowingMode == windowingMode) {
+            return;
         }
+        mDisplayContent.onStackWindowingModeChanged(this);
+        updateBoundsForWindowModeChange();
     }
 
     @Override
@@ -691,39 +702,41 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
         mDisplayContent = dc;
         mAnimationBackgroundSurface = new DimLayer(mService, this, mDisplayContent.getDisplayId(),
                 "animation background stackId=" + mStackId);
+        updateBoundsForWindowModeChange();
+        super.onDisplayChanged(dc);
+    }
 
+    private void updateBoundsForWindowModeChange() {
         Rect bounds = null;
-        final TaskStack dockedStack = dc.getSplitScreenPrimaryStackStackIgnoringVisibility();
-        if (inSplitScreenPrimaryWindowingMode()
-                || (dockedStack != null && inSplitScreenSecondaryWindowingMode()
-                        && !dockedStack.fillsParent())) {
+        final boolean inSplitScreenPrimary = inSplitScreenPrimaryWindowingMode();
+        final TaskStack splitScreenStack =
+                mDisplayContent.getSplitScreenPrimaryStackIgnoringVisibility();
+        if (inSplitScreenPrimary || (splitScreenStack != null
+                && inSplitScreenSecondaryWindowingMode() && !splitScreenStack.fillsParent())) {
             // The existence of a docked stack affects the size of other static stack created since
             // the docked stack occupies a dedicated region on screen, but only if the dock stack is
             // not fullscreen. If it's fullscreen, it means that we are in the transition of
             // dismissing it, so we must not resize this stack.
             bounds = new Rect();
-            dc.getLogicalDisplayRect(mTmpRect);
+            mDisplayContent.getLogicalDisplayRect(mTmpRect);
             mTmpRect2.setEmpty();
-            if (dockedStack != null) {
-                dockedStack.getRawBounds(mTmpRect2);
+            if (splitScreenStack != null) {
+                splitScreenStack.getRawBounds(mTmpRect2);
             }
             final boolean dockedOnTopOrLeft = mService.mDockedStackCreateMode
-                    == DOCKED_STACK_CREATE_MODE_TOP_OR_LEFT;
+                    == SPLIT_SCREEN_CREATE_MODE_TOP_OR_LEFT;
             getStackDockedModeBounds(mTmpRect, bounds, mTmpRect2,
-                    mDisplayContent.mDividerControllerLocked.getContentWidth(),
-                    dockedOnTopOrLeft);
+                    mDisplayContent.mDividerControllerLocked.getContentWidth(), dockedOnTopOrLeft);
         } else if (inPinnedWindowingMode()) {
             // Update the bounds based on any changes to the display info
             getAnimationOrCurrentBounds(mTmpRect2);
-            boolean updated = mDisplayContent.mPinnedStackControllerLocked.onTaskStackBoundsChanged(
-                    mTmpRect2, mTmpRect3);
-            if (updated) {
+            if (mDisplayContent.mPinnedStackControllerLocked.onTaskStackBoundsChanged(
+                    mTmpRect2, mTmpRect3)) {
                 bounds = new Rect(mTmpRect3);
             }
         }
 
         updateDisplayInfo(bounds);
-        super.onDisplayChanged(dc);
     }
 
     /**
@@ -773,7 +786,7 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
         }
 
         final TaskStack dockedStack =
-                mDisplayContent.getSplitScreenPrimaryStackStackIgnoringVisibility();
+                mDisplayContent.getSplitScreenPrimaryStackIgnoringVisibility();
         if (dockedStack == null) {
             // Not sure why you are calling this method when there is no docked stack...
             throw new IllegalStateException(
@@ -912,10 +925,6 @@ public class TaskStack extends WindowContainer<Task> implements DimLayer.DimLaye
         if (mAnimationBackgroundSurface != null) {
             mAnimationBackgroundSurface.destroySurface();
             mAnimationBackgroundSurface = null;
-        }
-
-        if (inSplitScreenPrimaryWindowingMode()) {
-            mDisplayContent.mDividerControllerLocked.notifyDockedStackExistsChanged(false);
         }
 
         mDisplayContent = null;

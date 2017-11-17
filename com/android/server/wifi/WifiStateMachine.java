@@ -982,6 +982,7 @@ public class WifiStateMachine extends StateMachine implements WifiNative.WifiRss
         mNetworkCapabilitiesFilter.addTransportType(NetworkCapabilities.TRANSPORT_WIFI);
         mNetworkCapabilitiesFilter.addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
         mNetworkCapabilitiesFilter.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
+        mNetworkCapabilitiesFilter.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_ROAMING);
         mNetworkCapabilitiesFilter.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED);
         mNetworkCapabilitiesFilter.setLinkUpstreamBandwidthKbps(1024 * 1024);
         mNetworkCapabilitiesFilter.setLinkDownstreamBandwidthKbps(1024 * 1024);
@@ -1339,7 +1340,7 @@ public class WifiStateMachine extends StateMachine implements WifiNative.WifiRss
             return false;
         }
         if (!mWifiConfigManager.enableNetwork(netId, true, uid)
-                || !mWifiConfigManager.checkAndUpdateLastConnectUid(netId, uid)) {
+                || !mWifiConfigManager.updateLastConnectUid(netId, uid)) {
             logi("connectToUserSelectNetwork Allowing uid " + uid
                     + " with insufficient permissions to connect=" + netId);
         } else {
@@ -2925,23 +2926,6 @@ public class WifiStateMachine extends StateMachine implements WifiNative.WifiRss
         mWifiApState.set(wifiApState);
 
         if (mVerboseLoggingEnabled) log("setWifiApState: " + syncGetWifiApStateByName());
-
-        final Intent intent = new Intent(WifiManager.WIFI_AP_STATE_CHANGED_ACTION);
-        intent.addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT);
-        intent.putExtra(WifiManager.EXTRA_WIFI_AP_STATE, wifiApState);
-        intent.putExtra(WifiManager.EXTRA_PREVIOUS_WIFI_AP_STATE, previousWifiApState);
-        if (wifiApState == WifiManager.WIFI_AP_STATE_FAILED) {
-            //only set reason number when softAP start failed
-            intent.putExtra(WifiManager.EXTRA_WIFI_AP_FAILURE_REASON, reason);
-        }
-
-        if (ifaceName == null) {
-            loge("Updating wifiApState with a null iface name");
-        }
-        intent.putExtra(WifiManager.EXTRA_WIFI_AP_INTERFACE_NAME, ifaceName);
-        intent.putExtra(WifiManager.EXTRA_WIFI_AP_MODE, mode);
-
-        mContext.sendStickyBroadcastAsUser(intent, UserHandle.ALL);
     }
 
     private void setScanResults() {
@@ -5342,8 +5326,10 @@ public class WifiStateMachine extends StateMachine implements WifiNative.WifiRss
                     }
                     break;
                 case WifiManager.START_WPS:
+                    mWifiMetrics.incrementWpsAttemptCount();
                     WpsInfo wpsInfo = (WpsInfo) message.obj;
                     if (wpsInfo == null) {
+                        mWifiMetrics.incrementWpsStartFailureCount();
                         loge("Cannot start WPS with null WpsInfo object");
                         replyToMessage(message, WifiManager.WPS_FAILED, WifiManager.ERROR);
                         break;
@@ -5389,6 +5375,7 @@ public class WifiStateMachine extends StateMachine implements WifiNative.WifiRss
                         replyToMessage(message, WifiManager.START_WPS_SUCCEEDED, wpsResult);
                         transitionTo(mWpsRunningState);
                     } else {
+                        mWifiMetrics.incrementWpsStartFailureCount();
                         loge("Failed to start WPS with config " + wpsInfo.toString());
                         replyToMessage(message, WifiManager.WPS_FAILED, WifiManager.ERROR);
                     }
@@ -6814,8 +6801,10 @@ public class WifiStateMachine extends StateMachine implements WifiNative.WifiRss
                     int netId = loadResult.second;
                     if (success) {
                         message.arg1 = netId;
+                        mWifiMetrics.incrementWpsSuccessCount();
                         replyToMessage(mSourceMessage, WifiManager.WPS_COMPLETED);
                     } else {
+                        mWifiMetrics.incrementWpsSupplicantFailureCount();
                         replyToMessage(mSourceMessage, WifiManager.WPS_FAILED,
                                 WifiManager.ERROR);
                     }
@@ -6825,6 +6814,7 @@ public class WifiStateMachine extends StateMachine implements WifiNative.WifiRss
                     transitionTo(mDisconnectedState);
                     break;
                 case WifiMonitor.WPS_OVERLAP_EVENT:
+                    mWifiMetrics.incrementWpsOverlapFailureCount();
                     replyToMessage(mSourceMessage, WifiManager.WPS_FAILED,
                             WifiManager.WPS_OVERLAP_ERROR);
                     mSourceMessage.recycle();
@@ -6834,6 +6824,7 @@ public class WifiStateMachine extends StateMachine implements WifiNative.WifiRss
                 case WifiMonitor.WPS_FAIL_EVENT:
                     // Arg1 has the reason for the failure
                     if ((message.arg1 != WifiManager.ERROR) || (message.arg2 != 0)) {
+                        mWifiMetrics.incrementWpsOtherConnectionFailureCount();
                         replyToMessage(mSourceMessage, WifiManager.WPS_FAILED, message.arg1);
                         mSourceMessage.recycle();
                         mSourceMessage = null;
@@ -6845,6 +6836,7 @@ public class WifiStateMachine extends StateMachine implements WifiNative.WifiRss
                     }
                     break;
                 case WifiMonitor.WPS_TIMEOUT_EVENT:
+                    mWifiMetrics.incrementWpsTimeoutFailureCount();
                     replyToMessage(mSourceMessage, WifiManager.WPS_FAILED,
                             WifiManager.WPS_TIMED_OUT);
                     mSourceMessage.recycle();
@@ -6855,6 +6847,7 @@ public class WifiStateMachine extends StateMachine implements WifiNative.WifiRss
                     replyToMessage(message, WifiManager.WPS_FAILED, WifiManager.IN_PROGRESS);
                     break;
                 case WifiManager.CANCEL_WPS:
+                    mWifiMetrics.incrementWpsCancellationCount();
                     if (mWifiNative.cancelWps()) {
                         replyToMessage(message, WifiManager.CANCEL_WPS_SUCCEDED);
                     } else {
@@ -6984,10 +6977,7 @@ public class WifiStateMachine extends StateMachine implements WifiNative.WifiRss
             if (apInterface == null) {
                 setWifiApState(WIFI_AP_STATE_FAILED,
                         WifiManager.SAP_START_FAILURE_GENERAL, null, mMode);
-                /**
-                 * Transition to InitialState to reset the
-                 * driver/HAL back to the initial state.
-                 */
+                // Transition to InitialState to reset the driver/HAL back to the initial state.
                 transitionTo(mInitialState);
                 return;
             }
@@ -6995,16 +6985,20 @@ public class WifiStateMachine extends StateMachine implements WifiNative.WifiRss
             try {
                 mIfaceName = apInterface.getInterfaceName();
             } catch (RemoteException e) {
-                // Failed to get the interface name. The name will not be available for
-                // the enabled broadcast, but since we had an error getting the name, we most likely
-                // won't be able to fully start softap mode.
+                // Failed to get the interface name. This is not a good sign and we should report
+                // a failure and switch back to the initial state to reset the driver and HAL.
+                setWifiApState(WIFI_AP_STATE_FAILED,
+                        WifiManager.SAP_START_FAILURE_GENERAL, null, mMode);
+                transitionTo(mInitialState);
+                return;
             }
 
             checkAndSetConnectivityInstance();
             mSoftApManager = mWifiInjector.makeSoftApManager(mNwService,
                                                              new SoftApListener(),
                                                              apInterface,
-                                                             config.getWifiConfiguration());
+                                                             mIfaceName,
+                                                             config);
             mSoftApManager.start();
             mWifiStateTracker.updateState(WifiStateTracker.SOFT_AP);
         }

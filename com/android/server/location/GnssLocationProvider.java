@@ -48,6 +48,7 @@ import android.net.NetworkInfo;
 import android.net.NetworkRequest;
 import android.net.Uri;
 import android.os.AsyncTask;
+import android.os.PowerManager.ServiceType;
 import android.os.PowerSaveState;
 import android.os.BatteryStats;
 import android.os.Binder;
@@ -84,7 +85,6 @@ import com.android.internal.location.ProviderProperties;
 import com.android.internal.location.ProviderRequest;
 
 import com.android.server.power.BatterySaverPolicy;
-import com.android.server.power.BatterySaverPolicy.ServiceType;
 
 import libcore.io.IoUtils;
 
@@ -803,18 +803,6 @@ public class GnssLocationProvider implements LocationProviderInterface {
             }
         };
         mGnssMetrics = new GnssMetrics();
-
-        /*
-        * A cycle of native_init() and native_cleanup() is needed so that callbacks are registered
-        * after bootup even when location is disabled. This will allow Emergency SUPL to work even
-        * when location is disabled before device restart.
-        * */
-        boolean isInitialized = native_init();
-        if(!isInitialized) {
-            Log.d(TAG, "Failed to initialize at bootup");
-        } else {
-            native_cleanup();
-        }
     }
 
     /**
@@ -1373,24 +1361,26 @@ public class GnssLocationProvider implements LocationProviderInterface {
     public boolean sendExtraCommand(String command, Bundle extras) {
 
         long identity = Binder.clearCallingIdentity();
-        boolean result = false;
+        try {
+            boolean result = false;
 
-        if ("delete_aiding_data".equals(command)) {
-            result = deleteAidingData(extras);
-        } else if ("force_time_injection".equals(command)) {
-            requestUtcTime();
-            result = true;
-        } else if ("force_xtra_injection".equals(command)) {
-            if (mSupportsXtra) {
-                xtraDownloadRequest();
+            if ("delete_aiding_data".equals(command)) {
+                result = deleteAidingData(extras);
+            } else if ("force_time_injection".equals(command)) {
+                requestUtcTime();
                 result = true;
+            } else if ("force_xtra_injection".equals(command)) {
+                if (mSupportsXtra) {
+                    xtraDownloadRequest();
+                    result = true;
+                }
+            } else {
+                Log.w(TAG, "sendExtraCommand: unknown command " + command);
             }
-        } else {
-            Log.w(TAG, "sendExtraCommand: unknown command " + command);
+            return result;
+        } finally {
+            Binder.restoreCallingIdentity(identity);
         }
-
-        Binder.restoreCallingIdentity(identity);
-        return result;
     }
 
     private IGpsGeofenceHardware mGpsGeofenceBinder = new IGpsGeofenceHardware.Stub() {
@@ -2272,6 +2262,19 @@ public class GnssLocationProvider implements LocationProviderInterface {
          * this handler.
          */
         private void handleInitialize() {
+            /*
+             * A cycle of native_init() and native_cleanup() is needed so that callbacks are
+             * registered after bootup even when location is disabled.
+             * This will allow Emergency SUPL to work even when location is disabled before device
+             * restart.
+             */
+            boolean isInitialized = native_init();
+            if(!isInitialized) {
+                Log.w(TAG, "Native initialization failed at bootup");
+            } else {
+                native_cleanup();
+            }
+
             // load default GPS configuration
             // (this configuration might change in the future based on SIM changes)
             reloadGpsProperties(mContext, mProperties);

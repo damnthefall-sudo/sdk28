@@ -373,7 +373,7 @@ final class ActivityManagerShellCommand extends ShellCommand {
             if (mProfileFile != null || mAgent != null) {
                 ParcelFileDescriptor fd = null;
                 if (mProfileFile != null) {
-                    fd = openOutputFileForSystem(mProfileFile);
+                    fd = openFileForSystem(mProfileFile, "w");
                     if (fd == null) {
                         return 1;
                     }
@@ -668,7 +668,7 @@ final class ActivityManagerShellCommand extends ShellCommand {
 
         File file = new File(filename);
         file.delete();
-        ParcelFileDescriptor fd = openOutputFileForSystem(filename);
+        ParcelFileDescriptor fd = openFileForSystem(filename, "w");
         if (fd == null) {
             return -1;
         }
@@ -756,7 +756,7 @@ final class ActivityManagerShellCommand extends ShellCommand {
 
         if (start) {
             profileFile = getNextArgRequired();
-            fd = openOutputFileForSystem(profileFile);
+            fd = openFileForSystem(profileFile, "w");
             if (fd == null) {
                 return -1;
             }
@@ -820,7 +820,7 @@ final class ActivityManagerShellCommand extends ShellCommand {
 
         File file = new File(heapFile);
         file.delete();
-        ParcelFileDescriptor fd = openOutputFileForSystem(heapFile);
+        ParcelFileDescriptor fd = openFileForSystem(heapFile, "w");
         if (fd == null) {
             return -1;
         }
@@ -2476,7 +2476,10 @@ final class ActivityManagerShellCommand extends ShellCommand {
             pw.println("      -e <NAME> <VALUE>: set argument <NAME> to <VALUE>.  For test runners a");
             pw.println("          common form is [-e <testrunner_flag> <value>[,<value>...]].");
             pw.println("      -p <FILE>: write profiling data to <FILE>");
-            pw.println("      -m: Write output as protobuf (machine readable)");
+            pw.println("      -m: Write output as protobuf to stdout (machine readable)");
+            pw.println("      -f <Optional PATH/TO/FILE>: Write output as protobuf to a file (machine");
+            pw.println("          readable). If path is not specified, default directory and file name will");
+            pw.println("          be used: /sdcard/instrument-logs/log-yyyyMMdd-hhmmss-SSS.instrumentation_data_proto");
             pw.println("      -w: wait for instrumentation to finish before returning.  Required for");
             pw.println("          test runners.");
             pw.println("      --user <USER_ID> | current: Specify user instrumentation runs in;");

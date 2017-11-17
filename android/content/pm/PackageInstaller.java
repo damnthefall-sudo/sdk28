@@ -444,6 +444,9 @@ public class PackageInstaller {
      * @param packageName The package to uninstall.
      * @param statusReceiver Where to deliver the result.
      */
+    @RequiresPermission(anyOf = {
+            Manifest.permission.DELETE_PACKAGES,
+            Manifest.permission.REQUEST_DELETE_PACKAGES})
     public void uninstall(@NonNull String packageName, @NonNull IntentSender statusReceiver) {
         uninstall(packageName, 0 /*flags*/, statusReceiver);
     }
@@ -476,6 +479,9 @@ public class PackageInstaller {
      * @param versionedPackage The versioned package to uninstall.
      * @param statusReceiver Where to deliver the result.
      */
+    @RequiresPermission(anyOf = {
+            Manifest.permission.DELETE_PACKAGES,
+            Manifest.permission.REQUEST_DELETE_PACKAGES})
     public void uninstall(@NonNull VersionedPackage versionedPackage,
             @NonNull IntentSender statusReceiver) {
         uninstall(versionedPackage, 0 /*flags*/, statusReceiver);
@@ -1184,10 +1190,10 @@ public class PackageInstaller {
         }
 
         /**
-         * Sets the UID that initiated package installation. This is informational
+         * Sets the UID that initiated the package installation. This is informational
          * and may be used as a signal for anti-malware purposes.
          *
-         * @see PackageManager#EXTRA_VERIFICATION_INSTALLER_UID
+         * @see Intent#EXTRA_ORIGINATING_UID
          */
         public void setOriginatingUid(int originatingUid) {
             this.originatingUid = originatingUid;

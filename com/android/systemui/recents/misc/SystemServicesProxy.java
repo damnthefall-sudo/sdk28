@@ -79,9 +79,11 @@ import com.android.systemui.UiOffloadThread;
 import com.android.systemui.recents.Recents;
 import com.android.systemui.recents.RecentsImpl;
 import com.android.systemui.shared.recents.model.Task;
+import com.android.systemui.shared.system.TaskStackChangeListeners;
 import com.android.systemui.statusbar.policy.UserInfoController;
 
 import java.util.List;
+import java.util.function.Consumer;
 
 /**
  * Acts as a shim around the real system services that we need to access data from, and provides
@@ -112,7 +114,6 @@ public class SystemServicesProxy {
     UserManager mUm;
     Display mDisplay;
     String mRecentsPackage;
-    private TaskStackChangeListeners mTaskStackChangeListeners;
     private int mCurrentUserId;
 
     boolean mIsSafeMode;
@@ -122,7 +123,6 @@ public class SystemServicesProxy {
     Paint mBgProtectionPaint;
     Canvas mBgProtectionCanvas;
 
-    private final Handler mHandler = new Handler();
     private final Runnable mGcRunnable = new Runnable() {
         @Override
         public void run() {
@@ -155,7 +155,6 @@ public class SystemServicesProxy {
         mRecentsPackage = context.getPackageName();
         mIsSafeMode = mPm.isSafeMode();
         mCurrentUserId = mAm.getCurrentUser();
-        mTaskStackChangeListeners = new TaskStackChangeListeners(Looper.getMainLooper());
 
         // Get the dummy thumbnail width/heights
         Resources res = context.getResources();
@@ -196,24 +195,6 @@ public class SystemServicesProxy {
     }
 
     /**
-     * Returns the top running task.
-     */
-    public ActivityManager.RunningTaskInfo getRunningTask() {
-        // Note: The set of running tasks from the system is ordered by recency
-        try {
-            List<ActivityManager.RunningTaskInfo> tasks = mIam.getFilteredTasks(1,
-                    ACTIVITY_TYPE_RECENTS /* ignoreActivityType */,
-                    WINDOWING_MODE_PINNED /* ignoreWindowingMode */);
-            if (tasks.isEmpty()) {
-                return null;
-            }
-            return tasks.get(0);
-        } catch (RemoteException e) {
-            return null;
-        }
-    }
-
-    /**
      * Returns whether the recents activity is currently visible.
      */
     public boolean isRecentsActivityVisible() {
@@ -225,6 +206,8 @@ public class SystemServicesProxy {
      *
      * @param isHomeStackVisible if provided, will return whether the home stack is visible
      *                           regardless of the recents visibility
+     *
+     * TODO(winsonc): Refactor this check to just use the recents activity lifecycle
      */
     public boolean isRecentsActivityVisible(MutableBoolean isHomeStackVisible) {
         if (mIam == null) return false;
@@ -239,13 +222,13 @@ public class SystemServicesProxy {
                 final WindowConfiguration winConfig = stackInfo.configuration.windowConfiguration;
                 final int activityType = winConfig.getActivityType();
                 final int windowingMode = winConfig.getWindowingMode();
-                if (activityType == ACTIVITY_TYPE_HOME) {
+                if (homeStackInfo == null && activityType == ACTIVITY_TYPE_HOME) {
                     homeStackInfo = stackInfo;
-                } else if (activityType == ACTIVITY_TYPE_STANDARD
+                } else if (fullscreenStackInfo == null && activityType == ACTIVITY_TYPE_STANDARD
                         && (windowingMode == WINDOWING_MODE_FULLSCREEN
                             || windowingMode == WINDOWING_MODE_SPLIT_SCREEN_SECONDARY)) {
                     fullscreenStackInfo = stackInfo;
-                } else if (activityType == ACTIVITY_TYPE_RECENTS) {
+                } else if (recentsStackInfo == null && activityType == ACTIVITY_TYPE_RECENTS) {
                     recentsStackInfo = stackInfo;
                 }
             }
@@ -291,7 +274,7 @@ public class SystemServicesProxy {
 
         try {
             final ActivityOptions options = ActivityOptions.makeBasic();
-            options.setDockCreateMode(createMode);
+            options.setSplitScreenCreateMode(createMode);
             options.setLaunchWindowingMode(WINDOWING_MODE_SPLIT_SCREEN_PRIMARY);
             mIam.startActivityFromRecents(taskId, options.toBundle());
             return true;
@@ -301,14 +284,15 @@ public class SystemServicesProxy {
         return false;
     }
 
-    /** Docks an already resumed task to the side of the screen. */
-    public boolean moveTaskToDockedStack(int taskId, int createMode, Rect initialBounds) {
+    /** Moves an already resumed task to the side of the screen to initiate split screen. */
+    public boolean setTaskWindowingModeSplitScreenPrimary(int taskId, int createMode,
+            Rect initialBounds) {
         if (mIam == null) {
             return false;
         }
 
         try {
-            return mIam.moveTaskToDockedStack(taskId, createMode, true /* onTop */,
+            return mIam.setTaskWindowingModeSplitScreenPrimary(taskId, createMode, true /* onTop */,
                     false /* animate */, initialBounds);
         } catch (RemoteException e) {
             e.printStackTrace();
@@ -363,32 +347,6 @@ public class SystemServicesProxy {
         return insets.right > 0;
     }
 
-    /**
-     * Cancels the current window transtion to/from Recents for the given task id.
-     */
-    public void cancelWindowTransition(int taskId) {
-        if (mIam == null) return;
-
-        try {
-            mIam.cancelTaskWindowTransition(taskId);
-        } catch (RemoteException e) {
-            e.printStackTrace();
-        }
-    }
-
-    /**
-     * Cancels the current thumbnail transtion to/from Recents for the given task id.
-     */
-    public void cancelThumbnailTransition(int taskId) {
-        if (mIam == null) return;
-
-        try {
-            mIam.cancelTaskThumbnailTransition(taskId);
-        } catch (RemoteException e) {
-            e.printStackTrace();
-        }
-    }
-
     /** Set the task's windowing mode. */
     public void setTaskWindowingMode(int taskId, int windowingMode) {
         if (mIam == null) return;
@@ -397,40 +355,6 @@ public class SystemServicesProxy {
             mIam.setTaskWindowingMode(taskId, windowingMode, false /* onTop */);
         } catch (RemoteException | IllegalArgumentException e) {
             e.printStackTrace();
-        }
-    }
-
-    /** Removes the task */
-    public void removeTask(final int taskId) {
-        if (mAm == null) return;
-
-        // Remove the task.
-        mUiOffloadThread.submit(() -> {
-            try {
-                mIam.removeTask(taskId);
-            } catch (RemoteException e) {
-                e.printStackTrace();
-            }
-        });
-    }
-
-    /**
-     * Sends a message to close other system windows.
-     */
-    public void sendCloseSystemWindows(String reason) {
-        mUiOffloadThread.submit(() -> {
-            try {
-                mIam.closeSystemDialogs(reason);
-            } catch (RemoteException e) {
-            }
-        });
-    }
-
-    public ActivityManager.TaskDescription getTaskDescription(int taskId) {
-        try {
-            return mIam.getTaskDescription(taskId);
-        } catch (RemoteException e) {
-            return null;
         }
     }
 
@@ -556,56 +480,6 @@ public class SystemServicesProxy {
                 opts != null ? opts.toBundle() : null, UserHandle.CURRENT));
     }
 
-    public void startActivityFromRecents(Context context, Task.TaskKey taskKey, String taskName,
-            ActivityOptions options,
-            @Nullable final StartActivityFromRecentsResultListener resultListener) {
-        startActivityFromRecents(context, taskKey, taskName, options,
-                WINDOWING_MODE_UNDEFINED, ACTIVITY_TYPE_UNDEFINED, resultListener);
-    }
-
-    /** Starts an activity from recents. */
-    public void startActivityFromRecents(Context context, Task.TaskKey taskKey, String taskName,
-            ActivityOptions options, int windowingMode, int activityType,
-            @Nullable final StartActivityFromRecentsResultListener resultListener) {
-        if (mIam == null) {
-            return;
-        }
-        if (taskKey.windowingMode == WINDOWING_MODE_SPLIT_SCREEN_PRIMARY) {
-            // We show non-visible docked tasks in Recents, but we always want to launch
-            // them in the fullscreen stack.
-            if (options == null) {
-                options = ActivityOptions.makeBasic();
-            }
-            options.setLaunchWindowingMode(WINDOWING_MODE_SPLIT_SCREEN_SECONDARY);
-        } else if (windowingMode != WINDOWING_MODE_UNDEFINED
-                || activityType != ACTIVITY_TYPE_UNDEFINED) {
-            if (options == null) {
-                options = ActivityOptions.makeBasic();
-            }
-            options.setLaunchWindowingMode(windowingMode);
-            options.setLaunchActivityType(activityType);
-        }
-        final ActivityOptions finalOptions = options;
-
-        // Execute this from another thread such that we can do other things (like caching the
-        // bitmap for the thumbnail) while AM is busy starting our activity.
-        mUiOffloadThread.submit(() -> {
-            try {
-                mIam.startActivityFromRecents(
-                        taskKey.id, finalOptions == null ? null : finalOptions.toBundle());
-                if (resultListener != null) {
-                    mHandler.post(() -> resultListener.onStartActivityResult(true));
-                }
-            } catch (Exception e) {
-                Log.e(TAG, context.getString(
-                        R.string.recents_launch_error_message, taskName), e);
-                if (resultListener != null) {
-                    mHandler.post(() -> resultListener.onStartActivityResult(false));
-                }
-            }
-        });
-    }
-
     /** Starts an in-place animation on the front most application windows. */
     public void startInPlaceAnimationOnFrontMostApplication(ActivityOptions opts) {
         if (mIam == null) return;
@@ -615,18 +489,6 @@ public class SystemServicesProxy {
                     opts == null ? null : opts.toBundle());
         } catch (Exception e) {
             e.printStackTrace();
-        }
-    }
-
-    /**
-     * Registers a task stack listener with the system.
-     * This should be called on the main thread.
-     */
-    public void registerTaskStackListener(TaskStackChangeListener listener) {
-        if (mIam == null) return;
-
-        synchronized (mTaskStackChangeListeners) {
-            mTaskStackChangeListeners.addListener(mIam, listener);
         }
     }
 

@@ -140,6 +140,18 @@ public class UserManager {
     public static final String DISALLOW_CONFIG_WIFI = "no_config_wifi";
 
     /**
+     * Specifies if a user is disallowed from changing the device
+     * language. The default value is <code>false</code>.
+     *
+     * <p>Key for user restrictions.
+     * <p>Type: Boolean
+     * @see DevicePolicyManager#addUserRestriction(ComponentName, String)
+     * @see DevicePolicyManager#clearUserRestriction(ComponentName, String)
+     * @see #getUserRestrictions()
+     */
+    public static final String DISALLOW_CONFIG_LOCALE = "no_config_locale";
+
+    /**
      * Specifies if a user is disallowed from installing applications.
      * The default value is <code>false</code>.
      *
@@ -792,6 +804,19 @@ public class UserManager {
     public static final String DISALLOW_AUTOFILL = "no_autofill";
 
     /**
+     * Specifies if user switching is blocked on the current user.
+     *
+     * <p> This restriction can only be set by the device owner, it will be applied to all users.
+     *
+     * <p>The default value is <code>false</code>.
+     *
+     * @see DevicePolicyManager#addUserRestriction(ComponentName, String)
+     * @see DevicePolicyManager#clearUserRestriction(ComponentName, String)
+     * @see #getUserRestrictions()
+     */
+    public static final String DISALLOW_USER_SWITCH = "no_user_switch";
+
+    /**
      * Application restriction key that is used to indicate the pending arrival
      * of real restrictions for the app.
      *
@@ -917,7 +942,7 @@ public class UserManager {
     /**
      * Returns whether switching users is currently allowed.
      * <p>For instance switching users is not allowed if the current user is in a phone call,
-     * or system user hasn't been unlocked yet
+     * system user hasn't been unlocked yet, or {@link #DISALLOW_USER_SWITCH} is set.
      * @hide
      */
     public boolean canSwitchUsers() {
@@ -927,7 +952,9 @@ public class UserManager {
         boolean isSystemUserUnlocked = isUserUnlocked(UserHandle.SYSTEM);
         boolean inCall = TelephonyManager.getDefault().getCallState()
                 != TelephonyManager.CALL_STATE_IDLE;
-        return (allowUserSwitchingWhenSystemUserLocked || isSystemUserUnlocked) && !inCall;
+        boolean isUserSwitchDisallowed = hasUserRestriction(DISALLOW_USER_SWITCH);
+        return (allowUserSwitchingWhenSystemUserLocked || isSystemUserUnlocked) && !inCall
+                && !isUserSwitchDisallowed;
     }
 
     /**
@@ -1022,12 +1049,22 @@ public class UserManager {
     }
 
     /**
-     * Used to check if the user making this call is linked to another user. Linked users may have
+     * @hide
+     * @deprecated Use {@link #isRestrictedProfile()}
+     */
+    @Deprecated
+    public boolean isLinkedUser() {
+        return isRestrictedProfile();
+    }
+
+    /**
+     * Returns whether the caller is running as restricted profile. Restricted profile may have
      * a reduced number of available apps, app restrictions and account restrictions.
      * @return whether the user making this call is a linked user
      * @hide
      */
-    public boolean isLinkedUser() {
+    @SystemApi
+    public boolean isRestrictedProfile() {
         try {
             return mService.isRestricted();
         } catch (RemoteException re) {
@@ -1042,6 +1079,20 @@ public class UserManager {
     public boolean canHaveRestrictedProfile(@UserIdInt int userId) {
         try {
             return mService.canHaveRestrictedProfile(userId);
+        } catch (RemoteException re) {
+            throw re.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Returns whether the calling user has at least one restricted profile associated with it.
+     * @return
+     * @hide
+     */
+    @SystemApi
+    public boolean hasRestrictedProfiles() {
+        try {
+            return mService.hasRestrictedProfiles();
         } catch (RemoteException re) {
             throw re.rethrowFromSystemServer();
         }
@@ -1066,6 +1117,7 @@ public class UserManager {
         UserInfo user = getUserInfo(UserHandle.myUserId());
         return user != null && user.isGuest();
     }
+
 
     /**
      * Checks if the calling app is running in a demo user. When running in a demo user,
@@ -2296,6 +2348,9 @@ public class UserManager {
      */
     public boolean isUserSwitcherEnabled() {
         if (!supportsMultipleUsers()) {
+            return false;
+        }
+        if (hasUserRestriction(DISALLOW_USER_SWITCH)) {
             return false;
         }
         // If Demo Mode is on, don't show user switcher
