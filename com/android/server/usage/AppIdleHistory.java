@@ -91,8 +91,6 @@ public class AppIdleHistory {
     private long mScreenOnSnapshot; // Elapsed time snapshot when last write of mScreenOnDuration
     private long mScreenOnDuration; // Total screen on duration since device was "born"
 
-    private long mElapsedTimeThreshold;
-    private long mScreenOnTimeThreshold;
     private final File mStorageDir;
 
     private boolean mScreenOn;
@@ -111,11 +109,6 @@ public class AppIdleHistory {
         mScreenOnSnapshot = elapsedRealtime;
         mStorageDir = storageDir;
         readScreenOnTime();
-    }
-
-    public void setThresholds(long elapsedTimeThreshold, long screenOnTimeThreshold) {
-        mElapsedTimeThreshold = elapsedTimeThreshold;
-        mScreenOnTimeThreshold = screenOnTimeThreshold;
     }
 
     public void updateDisplay(boolean screenOn, long elapsedRealtime) {
@@ -186,7 +179,7 @@ public class AppIdleHistory {
         writeScreenOnTime();
     }
 
-    public void reportUsage(String packageName, int userId, long elapsedRealtime) {
+    public int reportUsage(String packageName, int userId, long elapsedRealtime) {
         ArrayMap<String, AppUsageHistory> userHistory = getUserHistory(userId);
         AppUsageHistory appUsageHistory = getPackageHistory(userHistory, packageName,
                 elapsedRealtime, true);
@@ -197,12 +190,33 @@ public class AppIdleHistory {
                 + (elapsedRealtime - mElapsedSnapshot);
         appUsageHistory.lastUsedScreenTime = getScreenOnTime(elapsedRealtime);
         appUsageHistory.recent[HISTORY_SIZE - 1] = FLAG_LAST_STATE | FLAG_PARTIAL_ACTIVE;
-        appUsageHistory.currentBucket = AppStandby.STANDBY_BUCKET_ACTIVE;
-        appUsageHistory.bucketingReason = AppStandby.REASON_USAGE;
-        if (DEBUG) {
-            Slog.d(TAG, "Moved " + packageName + " to bucket=" + appUsageHistory.currentBucket
-                    + ", reason=" + appUsageHistory.bucketingReason);
+        if (appUsageHistory.currentBucket > STANDBY_BUCKET_ACTIVE) {
+            appUsageHistory.currentBucket = STANDBY_BUCKET_ACTIVE;
+            if (DEBUG) {
+                Slog.d(TAG, "Moved " + packageName + " to bucket=" + appUsageHistory.currentBucket
+                        + ", reason=" + appUsageHistory.bucketingReason);
+            }
         }
+        appUsageHistory.bucketingReason = AppStandby.REASON_USAGE;
+
+        return appUsageHistory.currentBucket;
+    }
+
+    public int reportMildUsage(String packageName, int userId, long elapsedRealtime) {
+        ArrayMap<String, AppUsageHistory> userHistory = getUserHistory(userId);
+        AppUsageHistory appUsageHistory = getPackageHistory(userHistory, packageName,
+                elapsedRealtime, true);
+        if (appUsageHistory.currentBucket > STANDBY_BUCKET_WORKING_SET) {
+            appUsageHistory.currentBucket = STANDBY_BUCKET_WORKING_SET;
+            if (DEBUG) {
+                Slog.d(TAG, "Moved " + packageName + " to bucket=" + appUsageHistory.currentBucket
+                        + ", reason=" + appUsageHistory.bucketingReason);
+            }
+        }
+        // TODO: Should this be a different reason for partial usage?
+        appUsageHistory.bucketingReason = AppStandby.REASON_USAGE;
+
+        return appUsageHistory.currentBucket;
     }
 
     public void setIdle(String packageName, int userId, long elapsedRealtime) {
@@ -313,7 +327,8 @@ public class AppIdleHistory {
         return (elapsedRealtime - mElapsedSnapshot + mElapsedDuration);
     }
 
-    public void setIdle(String packageName, int userId, boolean idle, long elapsedRealtime) {
+    /* Returns the new standby bucket the app is assigned to */
+    public int setIdle(String packageName, int userId, boolean idle, long elapsedRealtime) {
         ArrayMap<String, AppUsageHistory> userHistory = getUserHistory(userId);
         AppUsageHistory appUsageHistory = getPackageHistory(userHistory, packageName,
                 elapsedRealtime, true);
@@ -325,6 +340,7 @@ public class AppIdleHistory {
             // This is to pretend that the app was just used, don't freeze the state anymore.
             appUsageHistory.bucketingReason = REASON_USAGE;
         }
+        return appUsageHistory.currentBucket;
     }
 
     public void clearUsage(String packageName, int userId) {

@@ -91,14 +91,14 @@ public class AppStandbyController {
             0,
             0,
             COMPRESS_TIME ? 120 * 1000 : 1 * ONE_HOUR,
-            COMPRESS_TIME ? 240 * 1000 : 8 * ONE_HOUR
+            COMPRESS_TIME ? 240 * 1000 : 2 * ONE_HOUR
     };
 
     static final long[] ELAPSED_TIME_THRESHOLDS = {
             0,
             COMPRESS_TIME ?  1 * ONE_MINUTE : 12 * ONE_HOUR,
-            COMPRESS_TIME ?  4 * ONE_MINUTE :  2 * ONE_DAY,
-            COMPRESS_TIME ? 16 * ONE_MINUTE :  8 * ONE_DAY
+            COMPRESS_TIME ?  4 * ONE_MINUTE : 24 * ONE_HOUR,
+            COMPRESS_TIME ? 16 * ONE_MINUTE : 48 * ONE_HOUR
     };
 
     static final int[] THRESHOLD_BUCKETS = {
@@ -140,9 +140,7 @@ public class AppStandbyController {
     static final int MSG_PAROLE_STATE_CHANGED = 9;
     static final int MSG_ONE_TIME_CHECK_IDLE_STATES = 10;
 
-    long mAppIdleScreenThresholdMillis;
     long mCheckIdleIntervalMillis;
-    long mAppIdleWallclockThresholdMillis;
     long mAppIdleParoleIntervalMillis;
     long mAppIdleParoleDurationMillis;
     long[] mAppStandbyScreenThresholds = SCREEN_TIME_THRESHOLDS;
@@ -156,7 +154,7 @@ public class AppStandbyController {
 
     private volatile boolean mPendingOneTimeCheckIdleStates;
 
-    private final Handler mHandler;
+    private final AppStandbyHandler mHandler;
     private final Context mContext;
 
     // TODO: Provide a mechanism to set an external bucketing service
@@ -229,6 +227,7 @@ public class AppStandbyController {
         // Get sync adapters for the authority
         String[] packages = ContentResolver.getSyncAdapterPackagesForAuthorityAsUser(
                 authority, userId);
+        final long elapsedRealtime = SystemClock.elapsedRealtime();
         for (String packageName: packages) {
             // Only force the sync adapters to active if the provider is not in the same package and
             // the sync adapter is a system package.
@@ -239,7 +238,12 @@ public class AppStandbyController {
                     continue;
                 }
                 if (!packageName.equals(providerPkgName)) {
-                    setAppIdleAsync(packageName, false, userId);
+                    synchronized (mAppIdleLock) {
+                        int newBucket = mAppIdleHistory.reportMildUsage(packageName, userId,
+                                    elapsedRealtime);
+                        maybeInformListeners(packageName, userId, elapsedRealtime,
+                                newBucket);
+                    }
                 }
             } catch (PackageManager.NameNotFoundException e) {
                 // Shouldn't happen
@@ -408,6 +412,7 @@ public class AppStandbyController {
     private void maybeInformListeners(String packageName, int userId,
             long elapsedRealtime, int bucket) {
         synchronized (mAppIdleLock) {
+            // TODO: fold these into one call + lookup for efficiency if needed
             if (mAppIdleHistory.shouldInformListeners(packageName, userId,
                     elapsedRealtime, bucket)) {
                 mHandler.sendMessage(mHandler.obtainMessage(MSG_INFORM_LISTENERS,
@@ -493,11 +498,21 @@ public class AppStandbyController {
             if ((event.mEventType == UsageEvents.Event.MOVE_TO_FOREGROUND
                     || event.mEventType == UsageEvents.Event.MOVE_TO_BACKGROUND
                     || event.mEventType == UsageEvents.Event.SYSTEM_INTERACTION
-                    || event.mEventType == UsageEvents.Event.USER_INTERACTION)) {
-                mAppIdleHistory.reportUsage(event.mPackage, userId, elapsedRealtime);
+                    || event.mEventType == UsageEvents.Event.USER_INTERACTION
+                    || event.mEventType == UsageEvents.Event.NOTIFICATION_SEEN)) {
+
+                final int newBucket;
+                if (event.mEventType == UsageEvents.Event.NOTIFICATION_SEEN) {
+                    newBucket = mAppIdleHistory.reportMildUsage(event.mPackage, userId,
+                            elapsedRealtime);
+                } else {
+                    newBucket = mAppIdleHistory.reportUsage(event.mPackage, userId,
+                            elapsedRealtime);
+                }
+
+                maybeInformListeners(event.mPackage, userId, elapsedRealtime,
+                        newBucket);
                 if (previouslyIdle) {
-                    maybeInformListeners(event.mPackage, userId, elapsedRealtime,
-                            AppStandby.STANDBY_BUCKET_ACTIVE);
                     notifyBatteryStats(event.mPackage, userId, false);
                 }
             }
@@ -519,15 +534,15 @@ public class AppStandbyController {
 
         final boolean previouslyIdle = isAppIdleFiltered(packageName, appId,
                 userId, elapsedRealtime);
+        final int standbyBucket;
         synchronized (mAppIdleLock) {
-            mAppIdleHistory.setIdle(packageName, userId, idle, elapsedRealtime);
+            standbyBucket = mAppIdleHistory.setIdle(packageName, userId, idle, elapsedRealtime);
         }
         final boolean stillIdle = isAppIdleFiltered(packageName, appId,
                 userId, elapsedRealtime);
         // Inform listeners if necessary
         if (previouslyIdle != stillIdle) {
-            mHandler.sendMessage(mHandler.obtainMessage(MSG_INFORM_LISTENERS, userId,
-                    /* idle = */ stillIdle ? 1 : 0, packageName));
+            maybeInformListeners(packageName, userId, elapsedRealtime, standbyBucket);
             if (!stillIdle) {
                 notifyBatteryStats(packageName, userId, idle);
             }
@@ -723,7 +738,7 @@ public class AppStandbyController {
                 .sendToTarget();
     }
 
-    @StandbyBuckets int getAppStandbyBucket(String packageName, int userId,
+    @StandbyBuckets public int getAppStandbyBucket(String packageName, int userId,
             long elapsedRealtime, boolean shouldObfuscateInstantApps) {
         if (shouldObfuscateInstantApps &&
                 mInjector.isPackageEphemeral(userId, packageName)) {
@@ -737,6 +752,8 @@ public class AppStandbyController {
             String reason, long elapsedRealtime) {
         mAppIdleHistory.setAppStandbyBucket(packageName, userId, elapsedRealtime, newBucket,
                 reason);
+        maybeInformListeners(packageName, userId, elapsedRealtime,
+                newBucket);
     }
 
     private boolean isActiveDeviceAdmin(String packageName, int userId) {
@@ -896,14 +913,6 @@ public class AppStandbyController {
         pw.println();
         pw.println("Settings:");
 
-        pw.print("  mAppIdleDurationMillis=");
-        TimeUtils.formatDuration(mAppIdleScreenThresholdMillis, pw);
-        pw.println();
-
-        pw.print("  mAppIdleWallclockThresholdMillis=");
-        TimeUtils.formatDuration(mAppIdleWallclockThresholdMillis, pw);
-        pw.println();
-
         pw.print("  mCheckIdleIntervalMillis=");
         TimeUtils.formatDuration(mCheckIdleIntervalMillis, pw);
         pw.println();
@@ -1032,6 +1041,11 @@ public class AppStandbyController {
         public boolean isBoundWidgetPackage(AppWidgetManager appWidgetManager, String packageName,
                 int userId) {
             return appWidgetManager.isBoundWidgetPackage(packageName, userId);
+        }
+
+        String getAppIdleSettings() {
+            return Settings.Global.getString(mContext.getContentResolver(),
+                    Settings.Global.APP_IDLE_CONSTANTS);
         }
     }
 
@@ -1165,22 +1179,11 @@ public class AppStandbyController {
                 // Look at global settings for this.
                 // TODO: Maybe apply different thresholds for different users.
                 try {
-                    mParser.setString(Settings.Global.getString(mContext.getContentResolver(),
-                            Settings.Global.APP_IDLE_CONSTANTS));
+                    mParser.setString(mInjector.getAppIdleSettings());
                 } catch (IllegalArgumentException e) {
                     Slog.e(TAG, "Bad value for app idle settings: " + e.getMessage());
                     // fallthrough, mParser is empty and all defaults will be returned.
                 }
-
-                // Default: 12 hours of screen-on time sans dream-time
-                mAppIdleScreenThresholdMillis = mParser.getLong(KEY_IDLE_DURATION,
-                        COMPRESS_TIME ? ONE_MINUTE * 4 : 12 * 60 * ONE_MINUTE);
-
-                mAppIdleWallclockThresholdMillis = mParser.getLong(KEY_WALLCLOCK_THRESHOLD,
-                        COMPRESS_TIME ? ONE_MINUTE * 8 : 2L * 24 * 60 * ONE_MINUTE); // 2 days
-
-                mCheckIdleIntervalMillis = Math.min(mAppIdleScreenThresholdMillis / 4,
-                        COMPRESS_TIME ? ONE_MINUTE : 4 * 60 * ONE_MINUTE); // 4 hours
 
                 // Default: 24 hours between paroles
                 mAppIdleParoleIntervalMillis = mParser.getLong(KEY_PAROLE_INTERVAL,
@@ -1188,8 +1191,6 @@ public class AppStandbyController {
 
                 mAppIdleParoleDurationMillis = mParser.getLong(KEY_PAROLE_DURATION,
                         COMPRESS_TIME ? ONE_MINUTE : 10 * ONE_MINUTE); // 10 minutes
-                mAppIdleHistory.setThresholds(mAppIdleWallclockThresholdMillis,
-                        mAppIdleScreenThresholdMillis);
 
                 String screenThresholdsValue = mParser.getString(KEY_SCREEN_TIME_THRESHOLDS, null);
                 mAppStandbyScreenThresholds = parseLongArray(screenThresholdsValue,
@@ -1199,6 +1200,9 @@ public class AppStandbyController {
                         null);
                 mAppStandbyElapsedThresholds = parseLongArray(elapsedThresholdsValue,
                         ELAPSED_TIME_THRESHOLDS);
+                mCheckIdleIntervalMillis = Math.min(mAppStandbyElapsedThresholds[1] / 4,
+                        COMPRESS_TIME ? ONE_MINUTE : 4 * 60 * ONE_MINUTE); // 4 hours
+
             }
         }
 

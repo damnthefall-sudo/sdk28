@@ -45,10 +45,11 @@ import android.os.Trace;
 import android.util.Slog;
 import android.view.DisplayInfo;
 import android.view.IApplicationToken;
-import android.view.WindowManagerPolicy.StartingSurface;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.server.AttributeCache;
+import com.android.server.policy.WindowManagerPolicy.StartingSurface;
+
 /**
  * Controller for the app window token container. This is created by activity manager to link
  * activity records to the app window token container they use in window manager.
@@ -180,13 +181,12 @@ public class AppWindowContainerController
             IApplicationToken token, AppWindowContainerListener listener, int index,
             int requestedOrientation, boolean fullscreen, boolean showForAllUsers, int configChanges,
             boolean voiceInteraction, boolean launchTaskBehind, boolean alwaysFocusable,
-            int targetSdkVersion, int rotationAnimationHint, long inputDispatchingTimeoutNanos,
-            Rect bounds) {
+            int targetSdkVersion, int rotationAnimationHint, long inputDispatchingTimeoutNanos) {
         this(taskController, token, listener, index, requestedOrientation, fullscreen,
                 showForAllUsers,
                 configChanges, voiceInteraction, launchTaskBehind, alwaysFocusable,
                 targetSdkVersion, rotationAnimationHint, inputDispatchingTimeoutNanos,
-                WindowManagerService.getInstance(), bounds);
+                WindowManagerService.getInstance());
     }
 
     public AppWindowContainerController(TaskWindowContainerController taskController,
@@ -194,7 +194,7 @@ public class AppWindowContainerController
             int requestedOrientation, boolean fullscreen, boolean showForAllUsers, int configChanges,
             boolean voiceInteraction, boolean launchTaskBehind, boolean alwaysFocusable,
             int targetSdkVersion, int rotationAnimationHint, long inputDispatchingTimeoutNanos,
-            WindowManagerService service, Rect bounds) {
+            WindowManagerService service) {
         super(listener, service);
         mHandler = new H(service.mH.getLooper());
         mToken = token;
@@ -215,7 +215,7 @@ public class AppWindowContainerController
             atoken = createAppWindow(mService, token, voiceInteraction, task.getDisplayContent(),
                     inputDispatchingTimeoutNanos, fullscreen, showForAllUsers, targetSdkVersion,
                     requestedOrientation, rotationAnimationHint, configChanges, launchTaskBehind,
-                    alwaysFocusable, this, bounds);
+                    alwaysFocusable, this);
             if (DEBUG_TOKEN_MOVEMENT || DEBUG_ADD_REMOVE) Slog.v(TAG_WM, "addAppToken: " + atoken
                     + " controller=" + taskController + " at " + index);
             task.addChild(atoken, index);
@@ -227,11 +227,11 @@ public class AppWindowContainerController
             boolean voiceInteraction, DisplayContent dc, long inputDispatchingTimeoutNanos,
             boolean fullscreen, boolean showForAllUsers, int targetSdk, int orientation,
             int rotationAnimationHint, int configChanges, boolean launchTaskBehind,
-            boolean alwaysFocusable, AppWindowContainerController controller, Rect bounds) {
+            boolean alwaysFocusable, AppWindowContainerController controller) {
         return new AppWindowToken(service, token, voiceInteraction, dc,
                 inputDispatchingTimeoutNanos, fullscreen, showForAllUsers, targetSdk, orientation,
                 rotationAnimationHint, configChanges, launchTaskBehind, alwaysFocusable,
-                controller, bounds);
+                controller);
     }
 
     public void removeContainer(int displayId) {
@@ -295,17 +295,6 @@ public class AppWindowContainerController
             }
 
             return mContainer.getOrientationIgnoreVisibility();
-        }
-    }
-
-    // TODO(b/36505427): Maybe move to WindowContainerController so other sub-classes can use it as
-    // a generic way to set override config. Need to untangle current ways the override config is
-    // currently set for tasks and displays before we are doing that though.
-    public void onOverrideConfigurationChanged(Configuration overrideConfiguration, Rect bounds) {
-        synchronized(mWindowMap) {
-            if (mContainer != null) {
-                mContainer.onOverrideConfigurationChanged(overrideConfiguration, bounds);
-            }
         }
     }
 

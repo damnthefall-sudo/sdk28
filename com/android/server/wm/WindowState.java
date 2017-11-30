@@ -23,6 +23,7 @@ import static android.view.ViewTreeObserver.InternalInsetsInfo.TOUCHABLE_INSETS_
 import static android.view.ViewTreeObserver.InternalInsetsInfo.TOUCHABLE_INSETS_FRAME;
 import static android.view.ViewTreeObserver.InternalInsetsInfo.TOUCHABLE_INSETS_REGION;
 import static android.view.ViewTreeObserver.InternalInsetsInfo.TOUCHABLE_INSETS_VISIBLE;
+import static android.view.SurfaceControl.Transaction;
 import static android.view.WindowManager.LayoutParams.FIRST_SUB_WINDOW;
 import static android.view.WindowManager.LayoutParams.FIRST_SYSTEM_WINDOW;
 import static android.view.WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCREEN_ON;
@@ -41,6 +42,7 @@ import static android.view.WindowManager.LayoutParams.LAST_SUB_WINDOW;
 import static android.view.WindowManager.LayoutParams.MATCH_PARENT;
 import static android.view.WindowManager.LayoutParams.PRIVATE_FLAG_COMPATIBLE_WINDOW;
 import static android.view.WindowManager.LayoutParams.PRIVATE_FLAG_HIDE_NON_SYSTEM_OVERLAY_WINDOWS;
+import static android.view.WindowManager.LayoutParams.PRIVATE_FLAG_IS_ROUNDED_CORNERS_OVERLAY;
 import static android.view.WindowManager.LayoutParams.PRIVATE_FLAG_LAYOUT_CHILD_WINDOW_IN_PARENT_FRAME;
 import static android.view.WindowManager.LayoutParams.PRIVATE_FLAG_NO_MOVE_ANIMATION;
 import static android.view.WindowManager.LayoutParams.PRIVATE_FLAG_WILL_NOT_REPLACE_ON_RELAUNCH;
@@ -54,6 +56,10 @@ import static android.view.WindowManager.LayoutParams.TYPE_DOCK_DIVIDER;
 import static android.view.WindowManager.LayoutParams.TYPE_DRAWN_APPLICATION;
 import static android.view.WindowManager.LayoutParams.TYPE_INPUT_METHOD;
 import static android.view.WindowManager.LayoutParams.TYPE_INPUT_METHOD_DIALOG;
+import static android.view.WindowManager.LayoutParams.TYPE_MAGNIFICATION_OVERLAY;
+import static android.view.WindowManager.LayoutParams.TYPE_NAVIGATION_BAR;
+import static android.view.WindowManager.LayoutParams.TYPE_NAVIGATION_BAR_PANEL;
+import static android.view.WindowManager.LayoutParams.TYPE_STATUS_BAR;
 import static android.view.WindowManager.LayoutParams.TYPE_TOAST;
 import static android.view.WindowManager.LayoutParams.TYPE_WALLPAPER;
 import static android.view.WindowManager.LayoutParams.isSystemAlertWindowType;
@@ -61,10 +67,10 @@ import static android.view.WindowManagerGlobal.RELAYOUT_RES_DRAG_RESIZING_DOCKED
 import static android.view.WindowManagerGlobal.RELAYOUT_RES_DRAG_RESIZING_FREEFORM;
 import static android.view.WindowManagerGlobal.RELAYOUT_RES_FIRST_TIME;
 import static android.view.WindowManagerGlobal.RELAYOUT_RES_SURFACE_CHANGED;
-import static android.view.WindowManagerPolicy.FINISH_LAYOUT_REDO_WALLPAPER;
-import static android.view.WindowManagerPolicy.TRANSIT_ENTER;
-import static android.view.WindowManagerPolicy.TRANSIT_EXIT;
-import static android.view.WindowManagerPolicy.TRANSIT_PREVIEW_DONE;
+import static com.android.server.policy.WindowManagerPolicy.FINISH_LAYOUT_REDO_WALLPAPER;
+import static com.android.server.policy.WindowManagerPolicy.TRANSIT_ENTER;
+import static com.android.server.policy.WindowManagerPolicy.TRANSIT_EXIT;
+import static com.android.server.policy.WindowManagerPolicy.TRANSIT_PREVIEW_DONE;
 import static com.android.server.wm.DragResizeMode.DRAG_RESIZE_MODE_DOCKED_DIVIDER;
 import static com.android.server.wm.DragResizeMode.DRAG_RESIZE_MODE_FREEFORM;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_ADD_REMOVE;
@@ -147,14 +153,16 @@ import android.view.IWindowId;
 import android.view.InputChannel;
 import android.view.InputEvent;
 import android.view.InputEventReceiver;
+import android.view.SurfaceControl;
+import android.view.SurfaceSession;
 import android.view.View;
 import android.view.ViewTreeObserver;
 import android.view.WindowInfo;
 import android.view.WindowManager;
-import android.view.WindowManagerPolicy;
 
 import com.android.internal.util.ToBooleanFunction;
 import com.android.server.input.InputWindowHandle;
+import com.android.server.policy.WindowManagerPolicy;
 
 import java.io.PrintWriter;
 import java.lang.ref.WeakReference;
@@ -602,6 +610,14 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
                 };
             };
 
+    /**
+     * Indicates whether we have requested a Dim (in the sense of {@link Dimmer}) from our host
+     * container.
+     */
+    private boolean mIsDimming = false;
+
+    private static final float DEFAULT_DIM_AMOUNT_DEAD_WINDOW = 0.5f;
+
     WindowState(WindowManagerService service, Session s, IWindow c, WindowToken token,
            WindowState parentWindow, int appOp, int seq, WindowManager.LayoutParams a,
            int viewVisibility, int ownerId, boolean ownerCanAddInternalSystemWindow) {
@@ -799,7 +815,7 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
             layoutXDiff = 0;
             layoutYDiff = 0;
         } else {
-            getContainerBounds(mContainingFrame);
+            getBounds(mContainingFrame);
             if (mAppToken != null && !mAppToken.mFrozenBounds.isEmpty()) {
 
                 // If the bounds are frozen, we still want to translate the window freely and only
@@ -957,7 +973,7 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
             mContentInsets.setEmpty();
             mVisibleInsets.setEmpty();
         } else {
-            getDisplayContent().getLogicalDisplayRect(mTmpRect);
+            getDisplayContent().getBounds(mTmpRect);
             // Override right and/or bottom insets in case if the frame doesn't fit the screen in
             // non-fullscreen mode.
             boolean overrideRightInset = !windowsAreFloating && !inFullscreenContainer
@@ -1027,6 +1043,18 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
                 + " vi=" + mVisibleInsets.toShortString()
                 + " si=" + mStableInsets.toShortString()
                 + " of=" + mOutsets.toShortString());
+    }
+
+    // TODO: Look into whether this override is still necessary.
+    @Override
+    public Rect getBounds() {
+        if (isInMultiWindowMode()) {
+            return getTask().getBounds();
+        } else if (mAppToken != null){
+            return mAppToken.getBounds();
+        } else {
+            return super.getBounds();
+        }
     }
 
     @Override
@@ -2034,23 +2062,6 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
         return isVisibleOrAdding();
     }
 
-    void scheduleAnimationIfDimming() {
-        final DisplayContent dc = getDisplayContent();
-        if (dc == null) {
-            return;
-        }
-
-        // If layout is currently deferred, we want to hold of with updating the layers.
-        if (mService.mWindowPlacerLocked.isLayoutDeferred()) {
-            return;
-        }
-        final DimLayer.DimLayerUser dimLayerUser = getDimLayerUser();
-        if (dimLayerUser != null && dc.mDimLayerController.isDimming(dimLayerUser, mWinAnimator)) {
-            // Force an animation pass just to update the mDimLayer layer.
-            mService.scheduleAnimationLocked();
-        }
-    }
-
     private final class DeadWindowEventReceiver extends InputEventReceiver {
         DeadWindowEventReceiver(InputChannel inputChannel) {
             super(inputChannel, mService.mH.getLooper());
@@ -2106,31 +2117,16 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
         mInputWindowHandle.inputChannel = null;
     }
 
-    void applyDimLayerIfNeeded() {
-        // When the app is terminated (eg. from Recents), the task might have already been
-        // removed with the window pending removal. Don't apply dim in such cases, as there
-        // will be no more updateDimLayer() calls, which leaves the dimlayer invalid.
-        final AppWindowToken token = mAppToken;
-        if (token != null && token.removed) {
-            return;
-        }
-
-        final DisplayContent dc = getDisplayContent();
-        if (!mAnimatingExit && mAppDied) {
-            // If app died visible, apply a dim over the window to indicate that it's inactive
-            dc.mDimLayerController.applyDimAbove(getDimLayerUser(), mWinAnimator);
-        } else if ((mAttrs.flags & FLAG_DIM_BEHIND) != 0
-                && dc != null && !mAnimatingExit && isVisible()) {
-            dc.mDimLayerController.applyDimBehind(getDimLayerUser(), mWinAnimator);
-        }
-    }
-
-    private DimLayer.DimLayerUser getDimLayerUser() {
+    private Dimmer getDimmer() {
         Task task = getTask();
         if (task != null) {
-            return task;
+            return task.getDimmer();
         }
-        return getStack();
+        TaskStack taskStack = getStack();
+        if (taskStack != null) {
+            return taskStack.getDimmer();
+        }
+        return null;
     }
 
     /** Returns true if the replacement window was removed. */
@@ -2152,9 +2148,6 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
 
     private void removeReplacedWindow() {
         if (DEBUG_ADD_REMOVE) Slog.d(TAG, "Removing replaced window: " + this);
-        if (isDimming()) {
-            transferDimToReplacement();
-        }
         mWillReplaceWindow = false;
         mAnimateReplacingWindow = false;
         mReplacingRemoveRequested = false;
@@ -2217,11 +2210,11 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
             // need to intercept touches outside of that window. The dim layer user
             // associated with the window (task or stack) will give us the good bounds, as
             // they would be used to display the dim layer.
-            final DimLayer.DimLayerUser dimLayerUser = getDimLayerUser();
-            if (dimLayerUser != null) {
-                dimLayerUser.getDimBounds(mTmpRect);
+            final Task task = getTask();
+            if (task != null) {
+                task.getDimBounds(mTmpRect);
             } else {
-                getVisibleBounds(mTmpRect);
+                getStack().getDimBounds(mTmpRect);
             }
             if (inFreeformWindowingMode()) {
                 // For freeform windows we the touch region to include the whole surface for the
@@ -2465,7 +2458,7 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
         mPolicyVisibility = true;
         mPolicyVisibilityAfterAnim = true;
         if (doAnimation) {
-            mWinAnimator.applyAnimationLocked(WindowManagerPolicy.TRANSIT_ENTER, true);
+            mWinAnimator.applyAnimationLocked(TRANSIT_ENTER, true);
         }
         if (requestAnim) {
             mService.scheduleAnimationLocked();
@@ -2493,7 +2486,7 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
             return false;
         }
         if (doAnimation) {
-            mWinAnimator.applyAnimationLocked(WindowManagerPolicy.TRANSIT_EXIT, false);
+            mWinAnimator.applyAnimationLocked(TRANSIT_EXIT, false);
             if (mWinAnimator.mAnimation == null) {
                 doAnimation = false;
             }
@@ -2727,14 +2720,6 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
             return false;
         }
         return displayContent.isDefaultDisplay;
-    }
-
-    @Override
-    public boolean isDimming() {
-        final DimLayer.DimLayerUser dimLayerUser = getDimLayerUser();
-        final DisplayContent dc = getDisplayContent();
-        return dimLayerUser != null && dc != null
-                && dc.mDimLayerController.isDimming(dimLayerUser, mWinAnimator);
     }
 
     void setShowToOwnerOnlyLocked(boolean showToOwnerOnly) {
@@ -2979,33 +2964,12 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
 
     /** Is this window in a container that takes up the entire screen space? */
     private boolean inFullscreenContainer() {
-        if (mAppToken == null) {
-            return true;
-        }
-        if (mAppToken.hasBounds()) {
-            return false;
-        }
-        return !isInMultiWindowMode();
+        return mAppToken == null || (mAppToken.matchParentBounds() && !isInMultiWindowMode());
     }
 
     /** @return true when the window is in fullscreen task, but has non-fullscreen bounds set. */
     boolean isLetterboxedAppWindow() {
-        final Task task = getTask();
-        final boolean taskIsFullscreen = task != null && task.isFullscreen();
-        final boolean appWindowIsFullscreen = mAppToken != null && !mAppToken.hasBounds();
-
-        return taskIsFullscreen && !appWindowIsFullscreen;
-    }
-
-    /** Returns the appropriate bounds to use for computing frames. */
-    private void getContainerBounds(Rect outBounds) {
-        if (isInMultiWindowMode()) {
-            getTask().getBounds(outBounds);
-        } else if (mAppToken != null){
-            mAppToken.getBounds(outBounds);
-        } else {
-            outBounds.setEmpty();
-        }
+        return !isInMultiWindowMode() && mAppToken != null && !mAppToken.matchParentBounds();
     }
 
     boolean isDragResizeChanged() {
@@ -3071,7 +3035,7 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
         if (task == null) {
             return false;
         }
-        if (!inSplitScreenWindowingMode()) {
+        if (!inSplitScreenWindowingMode() && !inFreeformWindowingMode()) {
             return false;
         }
         if (mAttrs.width != MATCH_PARENT || mAttrs.height != MATCH_PARENT) {
@@ -3589,15 +3553,6 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
             winY *= mGlobalScale;
         }
         return winY;
-    }
-
-    private void transferDimToReplacement() {
-        final DimLayer.DimLayerUser dimLayerUser = getDimLayerUser();
-        final DisplayContent dc = getDisplayContent();
-        if (dimLayerUser != null && dc != null) {
-            dc.mDimLayerController.applyDim(dimLayerUser,
-                    mReplacementWindow.mWinAnimator, (mAttrs.flags & FLAG_DIM_BEHIND) != 0);
-        }
     }
 
     // During activity relaunch due to resize, we sometimes use window replacement
@@ -4156,9 +4111,6 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
             policyCrop.intersect(-mCompatFrame.left, -mCompatFrame.top,
                     displayInfo.logicalWidth - mCompatFrame.left,
                     displayInfo.logicalHeight - mCompatFrame.top);
-        } else if (mLayer >= mService.mSystemDecorLayer) {
-            // Above the decor layer is easy, just use the entire window
-            policyCrop.set(0, 0, mCompatFrame.width(), mCompatFrame.height());
         } else if (mDecorFrame.isEmpty()) {
             // Windows without policy decor aren't cropped.
             policyCrop.set(0, 0, mCompatFrame.width(), mCompatFrame.height());
@@ -4387,5 +4339,79 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
         } else {
             return false;
         }
+    }
+
+    @Override
+    boolean shouldMagnify() {
+        if (mAttrs.type == TYPE_INPUT_METHOD ||
+                mAttrs.type == TYPE_INPUT_METHOD_DIALOG ||
+                mAttrs.type == TYPE_MAGNIFICATION_OVERLAY ||
+                mAttrs.type == TYPE_NAVIGATION_BAR ||
+                // It's tempting to wonder: Have we forgotten the rounded corners overlay?
+                // worry not: it's a fake TYPE_NAVIGATION_BAR_PANEL
+                mAttrs.type == TYPE_NAVIGATION_BAR_PANEL ||
+                mAttrs.type == TYPE_STATUS_BAR) {
+            return false;
+        }
+        return true;
+    }
+
+    @Override
+    SurfaceSession getSession() {
+        if (mSession.mSurfaceSession != null) {
+            return mSession.mSurfaceSession;
+        } else {
+            return getParent().getSession();
+        }
+    }
+
+    @Override
+    boolean needsZBoost() {
+        return getAnimLayerAdjustment() > 0 || mWillReplaceWindow;
+    }
+
+    @Override
+    SurfaceControl.Builder makeSurface() {
+        return getParent().makeChildSurface(this);
+    }
+
+    private void applyDims(Dimmer dimmer) {
+        if (!mAnimatingExit && mAppDied) {
+            mIsDimming = true;
+            getDimmer().dimAbove(getPendingTransaction(), this, DEFAULT_DIM_AMOUNT_DEAD_WINDOW);
+        } else if ((mAttrs.flags & FLAG_DIM_BEHIND) != 0
+                && !mAnimatingExit && isVisible()) {
+            mIsDimming = true;
+            getDimmer().dimBelow(getPendingTransaction(), this, mAttrs.dimAmount);
+        }
+    }
+
+    @Override
+    void prepareSurfaces() {
+        final Dimmer dimmer = getDimmer();
+        mIsDimming = false;
+        if (dimmer != null) {
+            applyDims(dimmer);
+        }
+
+        mWinAnimator.prepareSurfaceLocked(true);
+        super.prepareSurfaces();
+    }
+
+    @Override
+    void assignLayer(Transaction t, int layer) {
+        // See comment in assignRelativeLayerForImeTargetChild
+        if (!isChildWindow()
+                || (mService.mInputMethodTarget != getParentWindow())
+                || !inSplitScreenWindowingMode()) {
+            super.assignLayer(t, layer);
+            return;
+        }
+        getDisplayContent().assignRelativeLayerForImeTargetChild(t, this);
+    }
+
+    @Override
+    public boolean isDimming() {
+        return mIsDimming;
     }
 }

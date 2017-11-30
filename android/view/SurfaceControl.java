@@ -56,11 +56,15 @@ public class SurfaceControl {
             Rect sourceCrop, int width, int height, int minLayer, int maxLayer,
             boolean allLayers, boolean useIdentityTransform);
     private static native void nativeCaptureLayers(IBinder layerHandleToken, Surface consumer,
-            int rotation);
+            Rect sourceCrop, float frameScale);
+    private static native GraphicBuffer nativeCaptureLayers(IBinder layerHandleToken,
+            Rect sourceCrop, float frameScale);
 
     private static native long nativeCreateTransaction();
     private static native long nativeGetNativeTransactionFinalizer();
     private static native void nativeApplyTransaction(long transactionObj, boolean sync);
+    private static native void nativeMergeTransaction(long transactionObj,
+            long otherTransactionObj);
     private static native void nativeSetAnimationTransaction(long transactionObj);
 
     private static native void nativeSetLayer(long transactionObj, long nativeObject, int zorder);
@@ -654,6 +658,19 @@ public class SurfaceControl {
         }
     }
 
+    /**
+     * Merge the supplied transaction in to the deprecated "global" transaction.
+     * This clears the supplied transaction in an identical fashion to {@link Transaction#merge}.
+     * <p>
+     * This is a utility for interop with legacy-code and will go away with the Global Transaction.
+     */
+    @Deprecated
+    public static void mergeToGlobalTransaction(Transaction t) {
+        synchronized(sGlobalTransaction) {
+            sGlobalTransaction.merge(t);
+        }
+    }
+
     /** end a transaction */
     public static void closeTransaction() {
         closeTransaction(false);
@@ -1162,14 +1179,24 @@ public class SurfaceControl {
      * Captures a layer and its children into the provided {@link Surface}.
      *
      * @param layerHandleToken The root layer to capture.
-     * @param consumer The {@link Surface} to capture the layer into.
-     * @param rotation Apply a custom clockwise rotation to the screenshot, i.e.
-     *                 Surface.ROTATION_0,90,180,270. Surfaceflinger will always capture in its
-     *                 native portrait orientation by default, so this is useful for returning
-     *                 captures that are independent of device orientation.
+     * @param consumer         The {@link Surface} to capture the layer into.
+     * @param sourceCrop       The portion of the root surface to capture; caller may pass in 'new
+     *                         Rect()' or null if no cropping is desired.
+     * @param frameScale       The desired scale of the returned buffer; the raw
+     *                         screen will be scaled up/down.
      */
-    public static void captureLayers(IBinder layerHandleToken, Surface consumer, int rotation) {
-        nativeCaptureLayers(layerHandleToken, consumer, rotation);
+    public static void captureLayers(IBinder layerHandleToken, Surface consumer, Rect sourceCrop,
+            float frameScale) {
+        nativeCaptureLayers(layerHandleToken, consumer, sourceCrop, frameScale);
+    }
+
+    /**
+     * Same as {@link #captureLayers(IBinder, Surface, Rect, float)} except this
+     * captures to a {@link GraphicBuffer} instead of a {@link Surface}.
+     */
+    public static GraphicBuffer captureLayersToBuffer(IBinder layerHandleToken, Rect sourceCrop,
+            float frameScale) {
+        return nativeCaptureLayers(layerHandleToken, sourceCrop, frameScale);
     }
 
     public static class Transaction implements Closeable {
@@ -1368,7 +1395,7 @@ public class SurfaceControl {
          * Sets the security of the surface.  Setting the flag is equivalent to creating the
          * Surface with the {@link #SECURE} flag.
          */
-        Transaction setSecure(SurfaceControl sc, boolean isSecure) {
+        public Transaction setSecure(SurfaceControl sc, boolean isSecure) {
             sc.checkNotReleased();
             if (isSecure) {
                 nativeSetFlags(mNativeObject, sc.mNativeObject, SECURE, SECURE);
@@ -1447,6 +1474,15 @@ public class SurfaceControl {
         /** flag the transaction as an animation */
         public Transaction setAnimationTransaction() {
             nativeSetAnimationTransaction(mNativeObject);
+            return this;
+        }
+
+        /**
+         * Merge the other transaction into this transaction, clearing the
+         * other transaction as if it had been applied.
+         */
+        public Transaction merge(Transaction other) {
+            nativeMergeTransaction(mNativeObject, other.mNativeObject);
             return this;
         }
     }

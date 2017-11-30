@@ -387,6 +387,12 @@ public final class PowerManager {
     public static final int GO_TO_SLEEP_REASON_SLEEP_BUTTON = 6;
 
     /**
+     * Go to sleep reason code: Going to sleep by request of an accessibility service
+     * @hide
+     */
+    public static final int GO_TO_SLEEP_REASON_ACCESSIBILITY = 7;
+
+    /**
      * Go to sleep flag: Skip dozing state and directly go to full sleep.
      * @hide
      */
@@ -527,8 +533,7 @@ public final class PowerManager {
             ServiceType.SOUND,
             ServiceType.BATTERY_STATS,
             ServiceType.DATA_SAVER,
-            ServiceType.FORCE_ALL_APPS_STANDBY_JOBS,
-            ServiceType.FORCE_ALL_APPS_STANDBY_ALARMS,
+            ServiceType.FORCE_ALL_APPS_STANDBY,
             ServiceType.OPTIONAL_SENSORS,
     })
     public @interface ServiceType {
@@ -545,14 +550,14 @@ public final class PowerManager {
         int DATA_SAVER = 10;
 
         /**
-         * Whether the job scheduler should force app standby on all apps on battery saver or not.
+         * Whether to enable force-app-standby on all apps or not.
          */
-        int FORCE_ALL_APPS_STANDBY_JOBS = 11;
+        int FORCE_ALL_APPS_STANDBY = 11;
 
         /**
-         * Whether the alarm manager should force app standby on all apps on battery saver or not.
+         * Whether to enable background check on all apps or not.
          */
-        int FORCE_ALL_APPS_STANDBY_ALARMS = 12;
+        int FORCE_BACKGROUND_CHECK = 12;
 
         /**
          * Whether to disable non-essential sensors. (e.g. edge sensors.)

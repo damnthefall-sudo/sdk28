@@ -30,10 +30,9 @@ import android.util.Slog;
 import android.util.SparseArray;
 import android.util.TimeUtils;
 import android.view.Choreographer;
-import android.view.SurfaceControl;
-import android.view.WindowManagerPolicy;
 
 import com.android.server.AnimationThread;
+import com.android.server.policy.WindowManagerPolicy;
 
 import java.io.PrintWriter;
 
@@ -200,7 +199,7 @@ public class WindowAnimator {
                     ++mAnimTransactionSequence;
                     dc.updateWindowsForAnimator(this);
                     dc.updateWallpaperForAnimator(this);
-                    dc.prepareWindowSurfaces();
+                    dc.prepareSurfaces();
                 }
 
                 for (int i = 0; i < numDisplays; i++) {
@@ -214,8 +213,6 @@ public class WindowAnimator {
                     if (screenRotationAnimation != null) {
                         screenRotationAnimation.updateSurfacesInTransaction();
                     }
-
-                    orAnimating(dc.animateDimLayers());
                     orAnimating(dc.getDockedDividerController().animate(mCurrentTime));
                     //TODO (multidisplay): Magnification is supported only for the default display.
                     if (accessibilityController != null && dc.isDefaultDisplay) {
@@ -235,6 +232,13 @@ public class WindowAnimator {
             } finally {
                 mService.closeSurfaceTransaction("WindowAnimator");
                 if (SHOW_TRANSACTIONS) Slog.i(TAG, "<<< CLOSE TRANSACTION animate");
+            }
+
+            final int numDisplays = mDisplayContentsAnimators.size();
+            for (int i = 0; i < numDisplays; i++) {
+                final int displayId = mDisplayContentsAnimators.keyAt(i);
+                final DisplayContent dc = mService.mRoot.getDisplayContentOrCreate(displayId);
+                dc.onPendingTransactionApplied();
             }
 
             boolean hasPendingLayoutChanges = mService.mRoot.hasPendingLayoutChanges(this);
@@ -270,6 +274,7 @@ public class WindowAnimator {
 
             mService.destroyPreservedSurfaceLocked();
             mService.mWindowPlacerLocked.destroyPendingSurfaces();
+
 
             if (DEBUG_WINDOW_TRACE) {
                 Slog.i(TAG, "!!! animate: exit mAnimating=" + mAnimating

@@ -125,8 +125,13 @@ public class Paint_Delegate {
      */
     @NonNull
     public List<FontInfo> getFonts() {
-        if (mTypeface == null) {
-            return Collections.emptyList();
+        Typeface_Delegate typeface = mTypeface;
+        if (typeface == null) {
+            if (Typeface.sDefaultTypeface == null) {
+                return Collections.emptyList();
+            }
+
+            typeface = Typeface_Delegate.getDelegate(Typeface.sDefaultTypeface.native_instance);
         }
 
         if (mFonts != null) {
@@ -138,7 +143,7 @@ public class Paint_Delegate {
                 new AffineTransform(mTextScaleX, mTextSkewX, 0, 1, 0, 0) :
                 null;
 
-        List<FontInfo> infoList = StreamSupport.stream(mTypeface.getFonts(mFontVariant).spliterator
+        List<FontInfo> infoList = StreamSupport.stream(typeface.getFonts(mFontVariant).spliterator
                 (), false)
                 .map(font -> getFontInfo(font, mTextSize, affineTransform))
                 .collect(Collectors.toList());

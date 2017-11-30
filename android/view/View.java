@@ -2929,6 +2929,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      *        1                          PFLAG3_TEMPORARY_DETACH
      *       1                           PFLAG3_NO_REVEAL_ON_FOCUS
      *      1                            PFLAG3_NOTIFY_AUTOFILL_ENTER_ON_LAYOUT
+     *     1                             PFLAG3_SCREEN_READER_FOCUSABLE
      * |-------|-------|-------|-------|
      */
 
@@ -3208,6 +3209,12 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * user visibility which cannot be done until the view is laid out.
      */
     static final int PFLAG3_NOTIFY_AUTOFILL_ENTER_ON_LAYOUT = 0x8000000;
+
+    /**
+     * Works like focusable for screen readers, but without the side effects on input focus.
+     * @see #setScreenReaderFocusable(boolean)
+     */
+    private static final int PFLAG3_SCREEN_READER_FOCUSABLE = 0x10000000;
 
     /* End of masks for mPrivateFlags3 */
 
@@ -4245,6 +4252,8 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         OnApplyWindowInsetsListener mOnApplyWindowInsetsListener;
 
         OnCapturedPointerListener mOnCapturedPointerListener;
+
+        private ArrayList<OnKeyFallbackListener> mKeyFallbackListeners;
     }
 
     ListenerInfo mListenerInfo;
@@ -5340,6 +5349,11 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                 case R.styleable.View_defaultFocusHighlightEnabled:
                     if (a.peekValue(attr) != null) {
                         setDefaultFocusHighlightEnabled(a.getBoolean(attr, true));
+                    }
+                    break;
+                case R.styleable.View_screenReaderFocusable:
+                    if (a.peekValue(attr) != null) {
+                        setScreenReaderFocusable(a.getBoolean(attr, false));
                     }
                     break;
             }
@@ -7194,7 +7208,8 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * @param text The announcement text.
      */
     public void announceForAccessibility(CharSequence text) {
-        if (AccessibilityManager.getInstance(mContext).isEnabled() && mParent != null) {
+        if (AccessibilityManager.getInstance(mContext).isObservedEventType(
+                AccessibilityEvent.TYPE_ANNOUNCEMENT) && mParent != null) {
             AccessibilityEvent event = AccessibilityEvent.obtain(
                     AccessibilityEvent.TYPE_ANNOUNCEMENT);
             onInitializeAccessibilityEvent(event);
@@ -8392,6 +8407,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         info.setEnabled(isEnabled());
         info.setClickable(isClickable());
         info.setFocusable(isFocusable());
+        info.setScreenReaderFocusable(isScreenReaderFocusable());
         info.setFocused(isFocused());
         info.setAccessibilityFocused(isAccessibilityFocused());
         info.setSelected(isSelected());
@@ -10348,6 +10364,45 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
     }
 
     /**
+     * Returns whether the view should be treated as a focusable unit by screen reader
+     * accessibility tools.
+     * @see #setScreenReaderFocusable(boolean)
+     *
+     * @return Whether the view should be treated as a focusable unit by screen reader.
+     */
+    public boolean isScreenReaderFocusable() {
+        return (mPrivateFlags3 & PFLAG3_SCREEN_READER_FOCUSABLE) != 0;
+    }
+
+    /**
+     * When screen readers (one type of accessibility tool) decide what should be read to the
+     * user, they typically look for input focusable ({@link #isFocusable()}) parents of
+     * non-focusable text items, and read those focusable parents and their non-focusable children
+     * as a unit. In some situations, this behavior is desirable for views that should not take
+     * input focus. Setting an item to be screen reader focusable requests that the view be
+     * treated as a unit by screen readers without any effect on input focusability. The default
+     * value of {@code false} lets screen readers use other signals, like focusable, to determine
+     * how to group items.
+     *
+     * @param screenReaderFocusable Whether the view should be treated as a unit by screen reader
+     *                              accessibility tools.
+     */
+    public void setScreenReaderFocusable(boolean screenReaderFocusable) {
+        int pflags3 = mPrivateFlags3;
+        if (screenReaderFocusable) {
+            pflags3 |= PFLAG3_SCREEN_READER_FOCUSABLE;
+        } else {
+            pflags3 &= ~PFLAG3_SCREEN_READER_FOCUSABLE;
+        }
+
+        if (pflags3 != mPrivateFlags3) {
+            mPrivateFlags3 = pflags3;
+            notifyViewAccessibilityStateChangedIfNeeded(
+                    AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
+        }
+    }
+
+    /**
      * Find the nearest view in the specified direction that can take focus.
      * This does not actually give focus to that view.
      *
@@ -10913,7 +10968,8 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         if ((mPrivateFlags2 & PFLAG2_ACCESSIBILITY_FOCUSED) != 0) {
             mPrivateFlags2 &= ~PFLAG2_ACCESSIBILITY_FOCUSED;
             invalidate();
-            if (AccessibilityManager.getInstance(mContext).isEnabled()) {
+            if (AccessibilityManager.getInstance(mContext).isObservedEventType(
+                    AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED)) {
                 AccessibilityEvent event = AccessibilityEvent.obtain(
                         AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED);
                 event.setAction(action);
@@ -11738,7 +11794,8 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
 
     private void sendViewTextTraversedAtGranularityEvent(int action, int granularity,
             int fromIndex, int toIndex) {
-        if (mParent == null) {
+        if (mParent == null || !AccessibilityManager.getInstance(mContext).isObservedEventType(
+                AccessibilityEvent.TYPE_VIEW_TEXT_TRAVERSED_AT_MOVEMENT_GRANULARITY)) {
             return;
         }
         AccessibilityEvent event = AccessibilityEvent.obtain(
@@ -25194,6 +25251,29 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
     }
 
     /**
+     * Interface definition for a callback to be invoked when a hardware key event is
+     * dispatched to this view during the fallback phase. This means no view in the hierarchy
+     * has handled this event.
+     */
+    public interface OnKeyFallbackListener {
+        /**
+         * Called when a hardware key is dispatched to a view in the fallback phase. This allows
+         * listeners to respond to events after the view hierarchy has had a chance to respond.
+         * <p>Key presses in software keyboards will generally NOT trigger this method,
+         * although some may elect to do so in some situations. Do not assume a
+         * software input method has to be key-based; even if it is, it may use key presses
+         * in a different way than you expect, so there is no way to reliably catch soft
+         * input key presses.
+         *
+         * @param v The view the key has been dispatched to.
+         * @param event The KeyEvent object containing full information about
+         *        the event.
+         * @return True if the listener has consumed the event, false otherwise.
+         */
+        boolean onKeyFallback(View v, KeyEvent event);
+    }
+
+    /**
      * Interface definition for a callback to be invoked when a touch event is
      * dispatched to this view. The callback will be invoked before the touch
      * event is given to the view.
@@ -26105,7 +26185,8 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
 
         @Override
         public void run() {
-            if (AccessibilityManager.getInstance(mContext).isEnabled()) {
+            if (AccessibilityManager.getInstance(mContext).isObservedEventType(
+                    AccessibilityEvent.TYPE_VIEW_SCROLLED)) {
                 AccessibilityEvent event = AccessibilityEvent.obtain(
                         AccessibilityEvent.TYPE_VIEW_SCROLLED);
                 event.setScrollDeltaX(mDeltaX);
@@ -26865,5 +26946,57 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             return null;
         }
         return mTooltipInfo.mTooltipPopup.getContentView();
+    }
+
+    /**
+     * Allows this view to handle {@link KeyEvent}s which weren't handled by normal dispatch. This
+     * occurs after the normal view hierarchy dispatch, but before the window callback. By default,
+     * this will dispatch into all the listeners registered via
+     * {@link #addKeyFallbackListener(OnKeyFallbackListener)} in last-in-first-out order (most
+     * recently added will receive events first).
+     *
+     * @param event A not-previously-handled event.
+     * @return {@code true} if the event was handled, {@code false} otherwise.
+     * @see #addKeyFallbackListener
+     */
+    public boolean onKeyFallback(@NonNull KeyEvent event) {
+        if (mListenerInfo != null && mListenerInfo.mKeyFallbackListeners != null) {
+            for (int i = mListenerInfo.mKeyFallbackListeners.size() - 1; i >= 0; --i) {
+                if (mListenerInfo.mKeyFallbackListeners.get(i).onKeyFallback(this, event)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Adds a listener which will receive unhandled {@link KeyEvent}s.
+     * @param listener the receiver of fallback {@link KeyEvent}s.
+     * @see #onKeyFallback(KeyEvent)
+     */
+    public void addKeyFallbackListener(OnKeyFallbackListener listener) {
+        ArrayList<OnKeyFallbackListener> fallbacks = getListenerInfo().mKeyFallbackListeners;
+        if (fallbacks == null) {
+            fallbacks = new ArrayList<>();
+            getListenerInfo().mKeyFallbackListeners = fallbacks;
+        }
+        fallbacks.add(listener);
+    }
+
+    /**
+     * Removes a listener which will receive unhandled {@link KeyEvent}s.
+     * @param listener the receiver of fallback {@link KeyEvent}s.
+     * @see #onKeyFallback(KeyEvent)
+     */
+    public void removeKeyFallbackListener(OnKeyFallbackListener listener) {
+        if (mListenerInfo != null) {
+            if (mListenerInfo.mKeyFallbackListeners != null) {
+                mListenerInfo.mKeyFallbackListeners.remove(listener);
+                if (mListenerInfo.mKeyFallbackListeners.isEmpty()) {
+                    mListenerInfo.mKeyFallbackListeners = null;
+                }
+            }
+        }
     }
 }

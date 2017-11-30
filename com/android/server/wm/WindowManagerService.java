@@ -65,10 +65,10 @@ import static android.view.WindowManager.LayoutParams.TYPE_VOICE_INTERACTION;
 import static android.view.WindowManager.LayoutParams.TYPE_WALLPAPER;
 import static android.view.WindowManagerGlobal.RELAYOUT_DEFER_SURFACE_DESTROY;
 import static android.view.WindowManagerGlobal.RELAYOUT_RES_SURFACE_CHANGED;
-import static android.view.WindowManagerPolicy.FINISH_LAYOUT_REDO_LAYOUT;
-import static android.view.WindowManagerPolicy.FINISH_LAYOUT_REDO_WALLPAPER;
 import static com.android.server.LockGuard.INDEX_WINDOW;
 import static com.android.server.LockGuard.installLock;
+import static com.android.server.policy.WindowManagerPolicy.FINISH_LAYOUT_REDO_LAYOUT;
+import static com.android.server.policy.WindowManagerPolicy.FINISH_LAYOUT_REDO_WALLPAPER;
 import static com.android.server.wm.AppTransition.TRANSIT_UNSET;
 import static com.android.server.wm.AppWindowAnimator.PROLONG_ANIMATION_AT_END;
 import static com.android.server.wm.AppWindowAnimator.PROLONG_ANIMATION_AT_START;
@@ -126,7 +126,6 @@ import android.app.AppOpsManager;
 import android.app.IActivityManager;
 import android.app.IAssistDataReceiver;
 import android.content.BroadcastReceiver;
-import android.content.ClipData;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
@@ -219,10 +218,7 @@ import android.view.WindowContentFrameStats;
 import android.view.WindowManager;
 import android.view.WindowManager.LayoutParams;
 import android.view.WindowManagerGlobal;
-import android.view.WindowManagerInternal;
-import android.view.WindowManagerPolicy;
-import android.view.WindowManagerPolicy.PointerEventListener;
-import android.view.WindowManagerPolicy.ScreenOffListener;
+import android.view.WindowManagerPolicyConstants.PointerEventListener;
 import android.view.animation.Animation;
 import android.view.inputmethod.InputMethodManagerInternal;
 
@@ -245,7 +241,8 @@ import com.android.server.LocalServices;
 import com.android.server.UiThread;
 import com.android.server.Watchdog;
 import com.android.server.input.InputManagerService;
-import android.view.DisplayFrames;
+import com.android.server.policy.WindowManagerPolicy;
+import com.android.server.policy.WindowManagerPolicy.ScreenOffListener;
 import com.android.server.power.ShutdownThread;
 import com.android.server.utils.PriorityDump;
 
@@ -529,7 +526,6 @@ public class WindowManagerService extends IWindowManager.Stub
 
     AccessibilityController mAccessibilityController;
 
-    final SurfaceSession mFxSession;
     Watermark mWatermark;
     StrictModeFlash mStrictModeFlash;
     CircularDisplayMask mCircularDisplayMask;
@@ -804,6 +800,13 @@ public class WindowManagerService extends IWindowManager.Stub
     static WindowManagerThreadPriorityBooster sThreadPriorityBooster =
             new WindowManagerThreadPriorityBooster();
 
+    class DefaultSurfaceBuilderFactory implements SurfaceBuilderFactory {
+        public SurfaceControl.Builder make(SurfaceSession s) {
+            return new SurfaceControl.Builder(s);
+        }
+    };
+    SurfaceBuilderFactory mSurfaceBuilderFactory = new DefaultSurfaceBuilderFactory();
+
     static void boostPriorityForLockedSection() {
         sThreadPriorityBooster.boost();
     }
@@ -992,7 +995,6 @@ public class WindowManagerService extends IWindowManager.Stub
             mPointerEventDispatcher = null;
         }
 
-        mFxSession = new SurfaceSession();
         mDisplayManager = (DisplayManager)context.getSystemService(Context.DISPLAY_SERVICE);
         mDisplays = mDisplayManager.getDisplays();
         for (Display display : mDisplays) {
@@ -2478,11 +2480,8 @@ public class WindowManagerService extends IWindowManager.Stub
                 mWaitingForConfig = true;
                 displayContent.setLayoutNeeded();
                 int anim[] = new int[2];
-                if (displayContent.isDimming()) {
-                    anim[0] = anim[1] = 0;
-                } else {
-                    mPolicy.selectRotationAnimationLw(anim);
-                }
+                mPolicy.selectRotationAnimationLw(anim);
+
                 startFreezingDisplayLocked(false, anim[0], anim[1], displayContent);
                 config = new Configuration(mTempConfiguration);
             }
@@ -3592,8 +3591,7 @@ public class WindowManagerService extends IWindowManager.Stub
                                 com.android.internal.R.dimen.circular_display_mask_thickness);
 
                         mCircularDisplayMask = new CircularDisplayMask(
-                                getDefaultDisplayContentLocked().getDisplay(),
-                                mFxSession,
+                                getDefaultDisplayContentLocked(),
                                 mPolicy.getWindowLayerFromTypeLw(
                                         WindowManager.LayoutParams.TYPE_POINTER)
                                         * TYPE_LAYER_MULTIPLIER + 10, screenOffset, maskThickness);
@@ -3621,8 +3619,7 @@ public class WindowManagerService extends IWindowManager.Stub
                 if (mEmulatorDisplayOverlay == null) {
                     mEmulatorDisplayOverlay = new EmulatorDisplayOverlay(
                             mContext,
-                            getDefaultDisplayContentLocked().getDisplay(),
-                            mFxSession,
+                            getDefaultDisplayContentLocked(),
                             mPolicy.getWindowLayerFromTypeLw(
                                     WindowManager.LayoutParams.TYPE_POINTER)
                                     * TYPE_LAYER_MULTIPLIER + 10);
@@ -3670,7 +3667,7 @@ public class WindowManagerService extends IWindowManager.Stub
                 // TODO(multi-display): support multiple displays
                 if (mStrictModeFlash == null) {
                     mStrictModeFlash = new StrictModeFlash(
-                            getDefaultDisplayContentLocked().getDisplay(), mFxSession);
+                            getDefaultDisplayContentLocked());
                 }
                 mStrictModeFlash.setVisibility(on);
             } finally {
@@ -3694,9 +3691,8 @@ public class WindowManagerService extends IWindowManager.Stub
         }
         try {
             Trace.traceBegin(TRACE_TAG_WINDOW_MANAGER, "screenshotWallpaper");
-            return screenshotApplications(null /* appToken */, DEFAULT_DISPLAY, -1 /* width */,
-                    -1 /* height */, true /* includeFullDisplay */, 1f /* frameScale */,
-                    Bitmap.Config.ARGB_8888, true /* wallpaperOnly */, false /* includeDecor */);
+            return screenshotApplications(DEFAULT_DISPLAY, Bitmap.Config.ARGB_8888,
+                    true /* wallpaperOnly */);
         } finally {
             Trace.traceEnd(TRACE_TAG_WINDOW_MANAGER);
         }
@@ -3715,10 +3711,8 @@ public class WindowManagerService extends IWindowManager.Stub
         }
 
         FgThread.getHandler().post(() -> {
-            Bitmap bm = screenshotApplications(null /* appToken */, DEFAULT_DISPLAY,
-                    -1 /* width */, -1 /* height */, true /* includeFullDisplay */,
-                    1f /* frameScale */, Bitmap.Config.ARGB_8888, false /* wallpaperOnly */,
-                    false /* includeDecor */);
+            Bitmap bm = screenshotApplications(DEFAULT_DISPLAY, Bitmap.Config.ARGB_8888,
+                    false /* wallpaperOnly */);
             try {
                 receiver.onHandleAssistScreenshot(bm);
             } catch (RemoteException e) {
@@ -3752,29 +3746,21 @@ public class WindowManagerService extends IWindowManager.Stub
      * In portrait mode, it grabs the full screenshot.
      *
      * @param displayId the Display to take a screenshot of.
-     * @param width the width of the target bitmap
-     * @param height the height of the target bitmap
-     * @param includeFullDisplay true if the screen should not be cropped before capture
-     * @param frameScale the scale to apply to the frame, only used when width = -1 and height = -1
      * @param config of the output bitmap
      * @param wallpaperOnly true if only the wallpaper layer should be included in the screenshot
-     * @param includeDecor whether to include window decors, like the status or navigation bar
-     *                     background of the window
      */
-    private Bitmap screenshotApplications(IBinder appToken, int displayId, int width,
-            int height, boolean includeFullDisplay, float frameScale, Bitmap.Config config,
-            boolean wallpaperOnly, boolean includeDecor) {
+    private Bitmap screenshotApplications(int displayId, Bitmap.Config config,
+            boolean wallpaperOnly) {
         final DisplayContent displayContent;
         synchronized(mWindowMap) {
             displayContent = mRoot.getDisplayContentOrCreate(displayId);
             if (displayContent == null) {
-                if (DEBUG_SCREENSHOT) Slog.i(TAG_WM, "Screenshot of " + appToken
-                        + ": returning null. No Display for displayId=" + displayId);
+                if (DEBUG_SCREENSHOT) Slog.i(TAG_WM, "Screenshot returning null. No Display for "
+                        + "displayId=" + displayId);
                 return null;
             }
         }
-        return displayContent.screenshotApplications(appToken, width, height,
-                includeFullDisplay, frameScale, config, wallpaperOnly, includeDecor);
+        return displayContent.screenshotDisplay(config, wallpaperOnly);
     }
 
     /**
@@ -4522,7 +4508,7 @@ public class WindowManagerService extends IWindowManager.Stub
 
         Display display = displayContent.getDisplay();
         mTaskPositioner = new TaskPositioner(this);
-        mTaskPositioner.register(display);
+        mTaskPositioner.register(displayContent);
         mInputMonitor.updateInputWindowsLw(true /*force*/);
 
         // We need to grab the touch focus so that the touch events during the
@@ -5519,7 +5505,7 @@ public class WindowManagerService extends IWindowManager.Stub
     }
 
     void reconfigureDisplayLocked(@NonNull DisplayContent displayContent) {
-        if (!mDisplayReady) {
+        if (!displayContent.isReady()) {
             return;
         }
         displayContent.configureDisplayPolicy();
@@ -5892,7 +5878,7 @@ public class WindowManagerService extends IWindowManager.Stub
 
             displayContent.updateDisplayInfo();
             screenRotationAnimation = new ScreenRotationAnimation(mContext, displayContent,
-                    mFxSession, inTransaction, mPolicy.isDefaultOrientationForced(), isSecure,
+                    inTransaction, mPolicy.isDefaultOrientationForced(), isSecure,
                     this);
             mAnimator.setScreenRotationAnimationLocked(mFrozenDisplayId,
                     screenRotationAnimation);
@@ -5952,11 +5938,10 @@ public class WindowManagerService extends IWindowManager.Stub
             // TODO(multidisplay): rotation on main screen only.
             DisplayInfo displayInfo = displayContent.getDisplayInfo();
             // Get rotation animation again, with new top window
-            boolean isDimming = displayContent.isDimming();
-            if (!mPolicy.validateRotationAnimationLw(mExitAnimId, mEnterAnimId, isDimming)) {
+            if (!mPolicy.validateRotationAnimationLw(mExitAnimId, mEnterAnimId, false)) {
                 mExitAnimId = mEnterAnimId = 0;
             }
-            if (screenRotationAnimation.dismiss(mFxSession, MAX_ANIMATION_DURATION,
+            if (screenRotationAnimation.dismiss(MAX_ANIMATION_DURATION,
                     getTransitionAnimationScaleLocked(), displayInfo.logicalWidth,
                         displayInfo.logicalHeight, mExitAnimId, mEnterAnimId)) {
                 scheduleAnimationLocked();
@@ -6040,8 +6025,8 @@ public class WindowManagerService extends IWindowManager.Stub
                 if (toks != null && toks.length > 0) {
                     // TODO(multi-display): Show watermarks on secondary displays.
                     final DisplayContent displayContent = getDefaultDisplayContentLocked();
-                    mWatermark = new Watermark(displayContent.getDisplay(),
-                            displayContent.mRealDisplayMetrics, mFxSession, toks);
+                    mWatermark = new Watermark(displayContent, displayContent.mRealDisplayMetrics,
+                            toks);
                 }
             }
         } catch (FileNotFoundException e) {
@@ -7456,6 +7441,11 @@ public class WindowManagerService extends IWindowManager.Stub
         public void registerDragDropControllerCallback(IDragDropCallback callback) {
             mDragDropController.registerCallback(callback);
         }
+
+        @Override
+        public void lockNow() {
+            WindowManagerService.this.lockNow(null);
+        }
     }
 
     void registerAppFreezeListener(AppFreezeListener listener) {
@@ -7557,4 +7547,13 @@ public class WindowManagerService extends IWindowManager.Stub
             w.setForceHideNonSystemOverlayWindowIfNeeded(hideSystemAlertWindows);
         }, false /* traverseTopToBottom */);
     }
+
+    public void applyMagnificationSpec(MagnificationSpec spec) {
+        getDefaultDisplayContentLocked().applyMagnificationSpec(spec);
+    }
+
+    SurfaceControl.Builder makeSurfaceBuilder(SurfaceSession s) {
+        return mSurfaceBuilderFactory.make(s);
+    }
 }
+

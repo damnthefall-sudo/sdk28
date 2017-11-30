@@ -386,8 +386,8 @@ public class RecyclerView extends ViewGroup implements ScrollingView, NestedScro
     private List<OnChildAttachStateChangeListener> mOnChildAttachStateListeners;
 
     /**
-     * Set to true when an adapter data set changed notification is received.
-     * In that case, we cannot run any animations since we don't know what happened until layout.
+     * True after an event occurs that signals that the entire data set has changed. In that case,
+     * we cannot run any animations since we don't know what happened until layout.
      *
      * Attached items are invalid until next layout, at which point layout will animate/replace
      * items as necessary, building up content from the (effectively) new adapter from scratch.
@@ -395,9 +395,18 @@ public class RecyclerView extends ViewGroup implements ScrollingView, NestedScro
      * Cached items must be discarded when setting this to true, so that the cache may be freely
      * used by prefetching until the next layout occurs.
      *
-     * @see #setDataSetChangedAfterLayout()
+     * @see #processDataSetCompletelyChanged(boolean)
      */
     boolean mDataSetHasChangedAfterLayout = false;
+
+    /**
+     * True after the data set has completely changed and
+     * {@link LayoutManager#onItemsChanged(RecyclerView)} should be called during the subsequent
+     * measure/layout.
+     *
+     * @see #processDataSetCompletelyChanged(boolean)
+     */
+    boolean mDispatchItemsChangedEvent = false;
 
     /**
      * This variable is incremented during a dispatchLayout and/or scroll.
@@ -1044,6 +1053,7 @@ public class RecyclerView extends ViewGroup implements ScrollingView, NestedScro
         // bail out if layout is frozen
         setLayoutFrozen(false);
         setAdapterInternal(adapter, true, removeAndRecycleExistingViews);
+        processDataSetCompletelyChanged(true);
         requestLayout();
     }
     /**
@@ -1059,6 +1069,7 @@ public class RecyclerView extends ViewGroup implements ScrollingView, NestedScro
         // bail out if layout is frozen
         setLayoutFrozen(false);
         setAdapterInternal(adapter, false, true);
+        processDataSetCompletelyChanged(false);
         requestLayout();
     }
 
@@ -1112,7 +1123,6 @@ public class RecyclerView extends ViewGroup implements ScrollingView, NestedScro
         }
         mRecycler.onAdapterChanged(oldAdapter, mAdapter, compatibleWithPrevious);
         mState.mStructureChanged = true;
-        setDataSetChangedAfterLayout();
     }
 
     /**
@@ -2509,7 +2519,15 @@ public class RecyclerView extends ViewGroup implements ScrollingView, NestedScro
         if (next == null || next == this) {
             return false;
         }
+        // panic, result view is not a child anymore, maybe workaround b/37864393
+        if (findContainingItemView(next) == null) {
+            return false;
+        }
         if (focused == null) {
+            return true;
+        }
+        // panic, focused view is not a child anymore, maybe workaround b/37864393
+        if (findContainingItemView(focused) == null) {
             return true;
         }
 
@@ -3221,7 +3239,8 @@ public class RecyclerView extends ViewGroup implements ScrollingView, NestedScro
     }
 
     /**
-     * Used when onMeasure is called before layout manager is set
+     * An implementation of {@link View#onMeasure(int, int)} to fall back to in various scenarios
+     * where this RecyclerView is otherwise lacking better information.
      */
     void defaultOnMeasure(int widthSpec, int heightSpec) {
         // calling LayoutManager here is not pretty but that API is already public and it is better
@@ -3398,7 +3417,9 @@ public class RecyclerView extends ViewGroup implements ScrollingView, NestedScro
             // Processing these items have no value since data set changed unexpectedly.
             // Instead, we just reset it.
             mAdapterHelper.reset();
-            mLayout.onItemsChanged(this);
+            if (mDispatchItemsChangedEvent) {
+                mLayout.onItemsChanged(this);
+            }
         }
         // simple animations are a subset of advanced animations (which will cause a
         // pre-layout step)
@@ -3821,6 +3842,7 @@ public class RecyclerView extends ViewGroup implements ScrollingView, NestedScro
         mLayout.removeAndRecycleScrapInt(mRecycler);
         mState.mPreviousLayoutItemCount = mState.mItemCount;
         mDataSetHasChangedAfterLayout = false;
+        mDispatchItemsChangedEvent = false;
         mState.mRunSimpleAnimations = false;
 
         mState.mRunPredictiveAnimations = false;
@@ -4288,19 +4310,21 @@ public class RecyclerView extends ViewGroup implements ScrollingView, NestedScro
                 viewHolder.getUnmodifiedPayloads());
     }
 
-
     /**
-     * Call this method to signal that *all* adapter content has changed (generally, because of
-     * setAdapter, swapAdapter, or notifyDataSetChanged), and that once layout occurs, all
-     * attached items should be discarded or animated.
+     * Processes the fact that, as far as we can tell, the data set has completely changed.
      *
-     * Attached items are labeled as invalid, and all cached items are discarded.
+     * <ul>
+     *   <li>Once layout occurs, all attached items should be discarded or animated.
+     *   <li>Attached items are labeled as invalid.
+     *   <li>Because items may still be prefetched between a "data set completely changed"
+     *       event and a layout event, all cached items are discarded.
+     * </ul>
      *
-     * It is still possible for items to be prefetched while mDataSetHasChangedAfterLayout == true,
-     * so this method must always discard all cached views so that the only valid items that remain
-     * in the cache, once layout occurs, are valid prefetched items.
+     * @param dispatchItemsChanged Whether to call
+     * {@link LayoutManager#onItemsChanged(RecyclerView)} during measure/layout.
      */
-    void setDataSetChangedAfterLayout() {
+    void processDataSetCompletelyChanged(boolean dispatchItemsChanged) {
+        mDispatchItemsChangedEvent |= dispatchItemsChanged;
         mDataSetHasChangedAfterLayout = true;
         markKnownViewsInvalid();
     }
@@ -5110,7 +5134,7 @@ public class RecyclerView extends ViewGroup implements ScrollingView, NestedScro
             assertNotInLayoutOrScroll(null);
             mState.mStructureChanged = true;
 
-            setDataSetChangedAfterLayout();
+            processDataSetCompletelyChanged(true);
             if (!mAdapterHelper.hasPendingUpdates()) {
                 requestLayout();
             }
@@ -7419,9 +7443,10 @@ public class RecyclerView extends ViewGroup implements ScrollingView, NestedScro
          * wants to handle the layout measurements itself.
          * <p>
          * This method is usually called by the LayoutManager with value {@code true} if it wants
-         * to support WRAP_CONTENT. If you are using a public LayoutManager but want to customize
-         * the measurement logic, you can call this method with {@code false} and override
-         * {@link LayoutManager#onMeasure(int, int)} to implement your custom measurement logic.
+         * to support {@link ViewGroup.LayoutParams#WRAP_CONTENT}. If you are using a public
+         * LayoutManager but want to customize the measurement logic, you can call this method with
+         * {@code false} and override {@link LayoutManager#onMeasure(Recycler, State, int, int)} to
+         * implement your custom measurement logic.
          * <p>
          * AutoMeasure is a convenience mechanism for LayoutManagers to easily wrap their content or
          * handle various specs provided by the RecyclerView's parent.
@@ -7495,24 +7520,26 @@ public class RecyclerView extends ViewGroup implements ScrollingView, NestedScro
         }
 
         /**
-         * Returns whether this LayoutManager supports automatic item animations.
-         * A LayoutManager wishing to support item animations should obey certain
-         * rules as outlined in {@link #onLayoutChildren(Recycler, State)}.
-         * The default return value is <code>false</code>, so subclasses of LayoutManager
-         * will not get predictive item animations by default.
-         *
-         * <p>Whether item animations are enabled in a RecyclerView is determined both
-         * by the return value from this method and the
+         * Returns whether this LayoutManager supports "predictive item animations".
+         * <p>
+         * "Predictive item animations" are automatically created animations that show
+         * where items came from, and where they are going to, as items are added, removed,
+         * or moved within a layout.
+         * <p>
+         * A LayoutManager wishing to support predictive item animations must override this
+         * method to return true (the default implementation returns false) and must obey certain
+         * behavioral contracts outlined in {@link #onLayoutChildren(Recycler, State)}.
+         * <p>
+         * Whether item animations actually occur in a RecyclerView is actually determined by both
+         * the return value from this method and the
          * {@link RecyclerView#setItemAnimator(ItemAnimator) ItemAnimator} set on the
          * RecyclerView itself. If the RecyclerView has a non-null ItemAnimator but this
-         * method returns false, then simple item animations will be enabled, in which
-         * views that are moving onto or off of the screen are simply faded in/out. If
-         * the RecyclerView has a non-null ItemAnimator and this method returns true,
-         * then there will be two calls to {@link #onLayoutChildren(Recycler, State)} to
-         * setup up the information needed to more intelligently predict where appearing
-         * and disappearing views should be animated from/to.</p>
+         * method returns false, then only "simple item animations" will be enabled in the
+         * RecyclerView, in which views whose position are changing are simply faded in/out. If the
+         * RecyclerView has a non-null ItemAnimator and this method returns true, then predictive
+         * item animations will be enabled in the RecyclerView.
          *
-         * @return true if predictive item animations should be enabled, false otherwise
+         * @return true if this LayoutManager supports predictive item animations, false otherwise.
          */
         public boolean supportsPredictiveItemAnimations() {
             return false;
@@ -9491,9 +9518,11 @@ public class RecyclerView extends ViewGroup implements ScrollingView, NestedScro
         }
 
         /**
-         * Called if the RecyclerView this LayoutManager is bound to has a different adapter set.
-         * The LayoutManager may use this opportunity to clear caches and configure state such
-         * that it can relayout appropriately with the new data and potentially new view types.
+         * Called if the RecyclerView this LayoutManager is bound to has a different adapter set via
+         * {@link RecyclerView#setAdapter(Adapter)} or
+         * {@link RecyclerView#swapAdapter(Adapter, boolean)}. The LayoutManager may use this
+         * opportunity to clear caches and configure state such that it can relayout appropriately
+         * with the new data and potentially new view types.
          *
          * <p>The default implementation removes all currently attached views.</p>
          *
@@ -9535,8 +9564,9 @@ public class RecyclerView extends ViewGroup implements ScrollingView, NestedScro
         }
 
         /**
-         * Called when {@link Adapter#notifyDataSetChanged()} is triggered instead of giving
-         * detailed information on what has actually changed.
+         * Called in response to a call to {@link Adapter#notifyDataSetChanged()} or
+         * {@link RecyclerView#swapAdapter(Adapter, boolean)} ()} and signals that the the entire
+         * data set has changed.
          *
          * @param recyclerView
          */
@@ -10042,7 +10072,7 @@ public class RecyclerView extends ViewGroup implements ScrollingView, NestedScro
             if (vScroll == 0 && hScroll == 0) {
                 return false;
             }
-            mRecyclerView.scrollBy(hScroll, vScroll);
+            mRecyclerView.smoothScrollBy(hScroll, vScroll);
             return true;
         }
 
@@ -11794,6 +11824,11 @@ public class RecyclerView extends ViewGroup implements ScrollingView, NestedScro
 
         boolean mStructureChanged = false;
 
+        /**
+         * True if the associated {@link RecyclerView} is in the pre-layout step where it is having
+         * its {@link LayoutManager} layout items where they will be at the beginning of a set of
+         * predictive item animations.
+         */
         boolean mInPreLayout = false;
 
         boolean mTrackOldChangeHolders = false;
@@ -11869,8 +11904,9 @@ public class RecyclerView extends ViewGroup implements ScrollingView, NestedScro
         }
 
         /**
-         * Returns true if
-         * @return
+         * Returns true if the {@link RecyclerView} is in the pre-layout step where it is having its
+         * {@link LayoutManager} layout items where they will be at the beginning of a set of
+         * predictive item animations.
          */
         public boolean isPreLayout() {
             return mInPreLayout;

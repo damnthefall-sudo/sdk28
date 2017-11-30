@@ -17,7 +17,6 @@ package android.app.slice;
 
 import android.Manifest.permission;
 import android.annotation.NonNull;
-import android.app.slice.widget.SliceView;
 import android.content.ContentProvider;
 import android.content.ContentResolver;
 import android.content.ContentValues;
@@ -37,6 +36,7 @@ import android.os.StrictMode.ThreadPolicy;
 import android.os.UserHandle;
 import android.util.Log;
 
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 
 /**
@@ -93,6 +93,10 @@ public abstract class SliceProvider extends ContentProvider {
     /**
      * @hide
      */
+    public static final String EXTRA_SUPPORTED_SPECS = "supported_specs";
+    /**
+     * @hide
+     */
     public static final String METHOD_SLICE = "bind_slice";
     /**
      * @hide
@@ -118,12 +122,25 @@ public abstract class SliceProvider extends ContentProvider {
      * off the main thread with a call to {@link ContentResolver#notifyChange(Uri, ContentObserver)}
      * when the app is ready to provide the complete data in onBindSlice.
      * <p>
+     * The slice returned should have a spec that is compatible with one of
+     * the supported specs.
      *
+     * @param sliceUri Uri to bind.
+     * @param supportedSpecs List of supported specs.
      * @see {@link Slice}.
      * @see {@link Slice#HINT_PARTIAL}
      */
-    // TODO: Provide alternate notifyChange that takes in the slice (i.e. notifyChange(Uri, Slice)).
-    public abstract Slice onBindSlice(Uri sliceUri);
+    public Slice onBindSlice(Uri sliceUri, List<SliceSpec> supportedSpecs) {
+        return onBindSlice(sliceUri);
+    }
+
+    /**
+     * @deprecated migrating to {@link #onBindSlice(Uri, List)}
+     */
+    @Deprecated
+    public Slice onBindSlice(Uri sliceUri) {
+        return null;
+    }
 
     /**
      * This method must be overridden if an {@link IntentFilter} is specified on the SliceProvider.
@@ -132,7 +149,6 @@ public abstract class SliceProvider extends ContentProvider {
      *
      * @return Uri representing the slice associated with the provided intent.
      * @see {@link Slice}
-     * @see {@link SliceView#setSlice(Intent)}
      */
     public @NonNull Uri onMapIntentToUri(Intent intent) {
         throw new UnsupportedOperationException(
@@ -195,8 +211,9 @@ public abstract class SliceProvider extends ContentProvider {
                         Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
                         "Slice binding requires the permission BIND_SLICE");
             }
+            List<SliceSpec> supportedSpecs = extras.getParcelableArrayList(EXTRA_SUPPORTED_SPECS);
 
-            Slice s = handleBindSlice(uri);
+            Slice s = handleBindSlice(uri, supportedSpecs);
             Bundle b = new Bundle();
             b.putParcelable(EXTRA_SLICE, s);
             return b;
@@ -205,9 +222,10 @@ public abstract class SliceProvider extends ContentProvider {
                     "Slice binding requires the permission BIND_SLICE");
             Intent intent = extras.getParcelable(EXTRA_INTENT);
             Uri uri = onMapIntentToUri(intent);
+            List<SliceSpec> supportedSpecs = extras.getParcelableArrayList(EXTRA_SUPPORTED_SPECS);
             Bundle b = new Bundle();
             if (uri != null) {
-                Slice s = handleBindSlice(uri);
+                Slice s = handleBindSlice(uri, supportedSpecs);
                 b.putParcelable(EXTRA_SLICE, s);
             } else {
                 b.putParcelable(EXTRA_SLICE, null);
@@ -217,14 +235,14 @@ public abstract class SliceProvider extends ContentProvider {
         return super.call(method, arg, extras);
     }
 
-    private Slice handleBindSlice(Uri sliceUri) {
+    private Slice handleBindSlice(Uri sliceUri, List<SliceSpec> supportedSpecs) {
         if (Looper.myLooper() == Looper.getMainLooper()) {
-            return onBindSliceStrict(sliceUri);
+            return onBindSliceStrict(sliceUri, supportedSpecs);
         } else {
             CountDownLatch latch = new CountDownLatch(1);
             Slice[] output = new Slice[1];
             Handler.getMain().post(() -> {
-                output[0] = onBindSliceStrict(sliceUri);
+                output[0] = onBindSliceStrict(sliceUri, supportedSpecs);
                 latch.countDown();
             });
             try {
@@ -236,14 +254,14 @@ public abstract class SliceProvider extends ContentProvider {
         }
     }
 
-    private Slice onBindSliceStrict(Uri sliceUri) {
+    private Slice onBindSliceStrict(Uri sliceUri, List<SliceSpec> supportedSpecs) {
         ThreadPolicy oldPolicy = StrictMode.getThreadPolicy();
         try {
             StrictMode.setThreadPolicy(new StrictMode.ThreadPolicy.Builder()
                     .detectAll()
                     .penaltyDeath()
                     .build());
-            return onBindSlice(sliceUri);
+            return onBindSlice(sliceUri, supportedSpecs);
         } finally {
             StrictMode.setThreadPolicy(oldPolicy);
         }

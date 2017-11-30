@@ -68,13 +68,13 @@ import android.util.SparseArray;
 import android.view.Display;
 import android.view.DisplayInfo;
 import android.view.Surface;
-import android.view.WindowManagerInternal;
 
 import com.android.server.AnimationThread;
 import com.android.server.DisplayThread;
 import com.android.server.LocalServices;
 import com.android.server.SystemService;
 import com.android.server.UiThread;
+import com.android.server.wm.WindowManagerInternal;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
@@ -1285,6 +1285,9 @@ public final class DisplayManagerService extends SystemService {
 
             pw.println();
             mPersistentDataStore.dump(pw);
+
+            pw.println();
+            mBrightnessTracker.dump(pw);
         }
     }
 
@@ -1920,6 +1923,11 @@ public final class DisplayManagerService extends SystemService {
         @Override
         public boolean isUidPresentOnDisplay(int uid, int displayId) {
             return isUidPresentOnDisplayInternal(uid, displayId);
+        }
+
+        @Override
+        public void persistBrightnessSliderEvents() {
+            mBrightnessTracker.persistEvents();
         }
     }
 }

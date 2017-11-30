@@ -9379,6 +9379,9 @@ public final class Settings {
         /** {@hide} */
         public static final String
                 BLUETOOTH_PAN_PRIORITY_PREFIX = "bluetooth_pan_priority_";
+        /** {@hide} */
+        public static final String
+                BLUETOOTH_HEARING_AID_PRIORITY_PREFIX = "bluetooth_hearing_aid_priority_";
 
         /**
          * Activity manager specific settings.
@@ -9745,6 +9748,14 @@ public final class Settings {
         }
 
         /**
+         * Get the key that retrieves a bluetooth hearing aid priority.
+         * @hide
+         */
+        public static final String getBluetoothHearingAidPriorityKey(String address) {
+            return BLUETOOTH_HEARING_AID_PRIORITY_PREFIX + address.toUpperCase(Locale.ROOT);
+        }
+
+        /**
          * Get the key that retrieves a bluetooth map priority.
          * @hide
          */
@@ -9852,6 +9863,27 @@ public final class Settings {
          * starting user code.  If 0, it will run normally.
          */
         public static final String WAIT_FOR_DEBUGGER = "wait_for_debugger";
+
+        /**
+         * Allow GPU debug layers?
+         * 0 = no
+         * 1 = yes
+         * @hide
+         */
+        public static final String ENABLE_GPU_DEBUG_LAYERS = "enable_gpu_debug_layers";
+
+        /**
+         * App allowed to load GPU debug layers
+         * @hide
+         */
+        public static final String GPU_DEBUG_APP = "gpu_debug_app";
+
+        /**
+         * Ordered GPU debug layer list
+         * i.e. <layer1>:<layer2>:...:<layerN>
+         * @hide
+         */
+        public static final String GPU_DEBUG_LAYERS = "gpu_debug_layers";
 
         /**
          * Control whether the process CPU usage meter should be shown.
@@ -10422,6 +10454,15 @@ public final class Settings {
          */
         public static final String STORAGE_SETTINGS_CLOBBER_THRESHOLD =
                 "storage_settings_clobber_threshold";
+
+        /**
+         * If set to 1, {@link Secure#LOCATION_MODE} will be set to {@link Secure#LOCATION_MODE_OFF}
+         * temporarily for all users.
+         *
+         * @hide
+         */
+        public static final String LOCATION_GLOBAL_KILL_SWITCH =
+                "location_global_kill_switch";
 
         /**
          * Settings to backup. This is here so that it's in the same place as the settings

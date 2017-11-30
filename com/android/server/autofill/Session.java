@@ -561,7 +561,8 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
 
     // FillServiceCallbacks
     @Override
-    public void onSaveRequestSuccess(@NonNull String servicePackageName) {
+    public void onSaveRequestSuccess(@NonNull String servicePackageName,
+            @Nullable IntentSender intentSender) {
         synchronized (mLock) {
             mIsSaving = false;
 
@@ -572,8 +573,12 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
             }
         }
         LogMaker log = newLogMaker(MetricsEvent.AUTOFILL_DATA_SAVE_REQUEST, servicePackageName)
-                .setType(MetricsEvent.TYPE_SUCCESS);
+                .setType(intentSender == null ? MetricsEvent.TYPE_SUCCESS : MetricsEvent.TYPE_OPEN);
         mMetricsLogger.write(log);
+        if (intentSender != null) {
+            if (sDebug) Slog.d(TAG, "Starting intent sender on save()");
+            startIntentSender(intentSender);
+        }
 
         // Nothing left to do...
         removeSelf();
@@ -1167,7 +1172,16 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
                         break;
                     }
                 }
+
                 value = getSanitizedValue(sanitizers, id, value);
+                if (value == null) {
+                    if (sDebug) {
+                        Slog.d(TAG, "value of required field " + id + " failed sanitization");
+                    }
+                    allRequiredAreNotEmpty = false;
+                    break;
+                }
+                viewState.setSanitizedValue(value);
                 currentValues.put(id, value);
                 final AutofillValue filledValue = viewState.getAutofilledValue();
 
@@ -1337,7 +1351,7 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
         return sanitizers;
     }
 
-    @NonNull
+    @Nullable
     private AutofillValue getSanitizedValue(
             @Nullable ArrayMap<AutofillId, InternalSanitizer> sanitizers,
             @NonNull AutofillId id,
@@ -1431,10 +1445,10 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
             if (sVerbose) Slog.v(TAG, "callSaveLocked(): updating " + context);
 
             for (int viewStateNum = 0; viewStateNum < mViewStates.size(); viewStateNum++) {
-                final ViewState state = mViewStates.valueAt(viewStateNum);
+                final ViewState viewState = mViewStates.valueAt(viewStateNum);
 
-                final AutofillId id = state.id;
-                final AutofillValue value = state.getCurrentValue();
+                final AutofillId id = viewState.id;
+                final AutofillValue value = viewState.getCurrentValue();
                 if (value == null) {
                     if (sVerbose) Slog.v(TAG, "callSaveLocked(): skipping " + id);
                     continue;
@@ -1446,9 +1460,17 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
                 }
                 if (sVerbose) Slog.v(TAG, "callSaveLocked(): updating " + id + " to " + value);
 
-                final AutofillValue sanitizedValue = getSanitizedValue(sanitizers, id, value);
+                AutofillValue sanitizedValue = viewState.getSanitizedValue();
 
-                node.updateAutofillValue(sanitizedValue);
+                if (sanitizedValue == null) {
+                    // Field is optional and haven't been sanitized yet.
+                    sanitizedValue = getSanitizedValue(sanitizers, id, value);
+                }
+                if (sanitizedValue != null) {
+                    node.updateAutofillValue(sanitizedValue);
+                } else if (sDebug) {
+                    Slog.d(TAG, "Not updating field " + id + " because it failed sanitization");
+                }
             }
 
             // Sanitize structure before it's sent to service.

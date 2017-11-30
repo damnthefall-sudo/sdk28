@@ -19,7 +19,7 @@ package android.arch.paging;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 
-import java.util.List;
+import java.util.concurrent.Executor;
 
 abstract class ContiguousDataSource<Key, Value> extends DataSource<Key, Value> {
     @Override
@@ -27,36 +27,15 @@ abstract class ContiguousDataSource<Key, Value> extends DataSource<Key, Value> {
         return true;
     }
 
-    abstract void loadInitial(Key key, int initialLoadSize, boolean enablePlaceholders,
-            @NonNull PageResult.Receiver<Key, Value> receiver);
+    abstract void loadInitial(@Nullable Key key, int initialLoadSize,
+            int pageSize, boolean enablePlaceholders,
+            @NonNull Executor mainThreadExecutor, @NonNull PageResult.Receiver<Value> receiver);
 
-    void loadAfter(int currentEndIndex, @NonNull Value currentEndItem, int pageSize,
-            @NonNull PageResult.Receiver<Key, Value> receiver) {
-        if (!isInvalid()) {
-            List<Value> list = loadAfterImpl(currentEndIndex, currentEndItem, pageSize);
+    abstract void loadAfter(int currentEndIndex, @NonNull Value currentEndItem, int pageSize,
+            @NonNull Executor mainThreadExecutor, @NonNull PageResult.Receiver<Value> receiver);
 
-            if (list != null && !isInvalid()) {
-                receiver.postOnPageResult(new PageResult<>(
-                        PageResult.APPEND, new Page<Key, Value>(list), 0, 0, 0));
-                return;
-            }
-        }
-        receiver.postOnPageResult(new PageResult<Key, Value>(PageResult.APPEND));
-    }
-
-    void loadBefore(int currentBeginIndex, @NonNull Value currentBeginItem, int pageSize,
-            @NonNull PageResult.Receiver<Key, Value> receiver) {
-        if (!isInvalid()) {
-            List<Value> list = loadBeforeImpl(currentBeginIndex, currentBeginItem, pageSize);
-
-            if (list != null && !isInvalid()) {
-                receiver.postOnPageResult(new PageResult<>(
-                        PageResult.PREPEND, new Page<Key, Value>(list), 0, 0, 0));
-                return;
-            }
-        }
-        receiver.postOnPageResult(new PageResult<Key, Value>(PageResult.PREPEND));
-    }
+    abstract void loadBefore(int currentBeginIndex, @NonNull Value currentBeginItem, int pageSize,
+            @NonNull Executor mainThreadExecutor, @NonNull PageResult.Receiver<Value> receiver);
 
     /**
      * Get the key from either the position, or item, or null if position/item invalid.
@@ -65,12 +44,4 @@ abstract class ContiguousDataSource<Key, Value> extends DataSource<Key, Value> {
      * that isn't yet loaded, a fallback item (last loaded item accessed) will be passed.
      */
     abstract Key getKey(int position, Value item);
-
-    @Nullable
-    abstract List<Value> loadAfterImpl(int currentEndIndex,
-            @NonNull Value currentEndItem, int pageSize);
-
-    @Nullable
-    abstract List<Value> loadBeforeImpl(int currentBeginIndex,
-            @NonNull Value currentBeginItem, int pageSize);
 }

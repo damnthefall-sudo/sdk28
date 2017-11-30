@@ -75,6 +75,7 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
     private final PendingIntent mPullingAlarmIntent;
     private final BroadcastReceiver mAppUpdateReceiver;
     private final BroadcastReceiver mUserUpdateReceiver;
+    private final ShutdownEventReceiver mShutdownEventReceiver;
     private final KernelWakelockReader mKernelWakelockReader = new KernelWakelockReader();
     private final KernelWakelockStats mTmpWakelockStats = new KernelWakelockStats();
     private final KernelCpuSpeedReader[] mKernelCpuSpeedReaders;
@@ -109,6 +110,7 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
                 }
             }
         };
+        mShutdownEventReceiver = new ShutdownEventReceiver();
         Slog.w(TAG, "Registered receiver for ACTION_PACKAGE_REPLACE AND ADDED.");
         PowerProfile powerProfile = new PowerProfile(context);
         final int numClusters = powerProfile.getNumCpuClusters();
@@ -239,18 +241,43 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
           Slog.d(TAG, "Time to poll something.");
         synchronized (sStatsdLock) {
           if (sStatsd == null) {
-            Slog.w(TAG, "Could not access statsd to inform it of pulling alarm firing");
+            Slog.w(TAG, "Could not access statsd to inform it of pulling alarm firing.");
             return;
           }
           try {
             // Two-way call to statsd to retain AlarmManager wakelock
             sStatsd.informPollAlarmFired();
           } catch (RemoteException e) {
-            Slog.w(TAG, "Failed to inform statsd of pulling alarm firing", e);
+            Slog.w(TAG, "Failed to inform statsd of pulling alarm firing.", e);
           }
         }
         // AlarmManager releases its own wakelock here.
       }
+    }
+
+    public final static class ShutdownEventReceiver extends BroadcastReceiver {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            /**
+             * Skip immediately if intent is not relevant to device shutdown.
+             */
+            if (!intent.getAction().equals(Intent.ACTION_REBOOT)
+                    && !intent.getAction().equals(Intent.ACTION_SHUTDOWN)) {
+                return;
+            }
+            Slog.i(TAG, "StatsCompanionService noticed a shutdown.");
+            synchronized (sStatsdLock) {
+                if (sStatsd == null) {
+                    Slog.w(TAG, "Could not access statsd to inform it of a shutdown event.");
+                    return;
+                }
+                try {
+                    sStatsd.writeDataToDisk();
+                } catch (Exception e) {
+                    Slog.w(TAG, "Failed to inform statsd of a shutdown event.", e);
+                }
+            }
+        }
     }
 
     @Override // Binder call
@@ -496,6 +523,18 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
         sayHiToStatsd(); // tell statsd that we're ready too and link to it
     }
 
+    @Override
+    public void triggerUidSnapshot() {
+      enforceCallingPermission();
+      synchronized (sStatsdLock) {
+        try {
+          informAllUidsLocked(mContext);
+        } catch (RemoteException e) {
+          Slog.e(TAG, "Failed to trigger uid snapshot.", e);
+        }
+      }
+    }
+
     private void enforceCallingPermission() {
         if (Binder.getCallingPid() == Process.myPid()) {
             return;
@@ -572,7 +611,7 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
                     Slog.e(TAG, "linkToDeath(StatsdDeathRecipient) failed", e);
                     forgetEverything();
                 }
-                // Setup broadcast receiver for updates
+                // Setup broadcast receiver for updates.
                 IntentFilter filter = new IntentFilter(Intent.ACTION_PACKAGE_REPLACED);
                 filter.addAction(Intent.ACTION_PACKAGE_ADDED);
                 filter.addAction(Intent.ACTION_PACKAGE_REMOVED);
@@ -586,6 +625,12 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
                 filter.addAction(Intent.ACTION_USER_REMOVED);
                 mContext.registerReceiverAsUser(mUserUpdateReceiver, UserHandle.ALL,
                         filter, null, null);
+
+                // Setup receiver for device reboots or shutdowns.
+                filter = new IntentFilter(Intent.ACTION_REBOOT);
+                filter.addAction(Intent.ACTION_SHUTDOWN);
+                mContext.registerReceiverAsUser(
+                        mShutdownEventReceiver, UserHandle.ALL, filter, null, null);
 
                 // Pull the latest state of UID->app name, version mapping when statsd starts.
                 informAllUidsLocked(mContext);
@@ -609,6 +654,7 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
             sStatsd = null;
             mContext.unregisterReceiver(mAppUpdateReceiver);
             mContext.unregisterReceiver(mUserUpdateReceiver);
+            mContext.unregisterReceiver(mShutdownEventReceiver);
             cancelAnomalyAlarm();
             cancelPullingAlarms();
         }

@@ -16,7 +16,6 @@
 
 package com.android.server.wm;
 
-import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED;
 import static android.content.pm.ActivityInfo.CONFIG_ORIENTATION;
 import static android.content.pm.ActivityInfo.CONFIG_SCREEN_SIZE;
 import static android.content.pm.ActivityInfo.SCREEN_ORIENTATION_BEHIND;
@@ -28,8 +27,8 @@ import static android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED;
 import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION;
 import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION_STARTING;
 import static android.view.WindowManager.LayoutParams.TYPE_BASE_APPLICATION;
-import static android.view.WindowManagerPolicy.FINISH_LAYOUT_REDO_ANIM;
-import static android.view.WindowManagerPolicy.FINISH_LAYOUT_REDO_WALLPAPER;
+import static com.android.server.policy.WindowManagerPolicy.FINISH_LAYOUT_REDO_ANIM;
+import static com.android.server.policy.WindowManagerPolicy.FINISH_LAYOUT_REDO_WALLPAPER;
 import static com.android.server.wm.AppTransition.TRANSIT_UNSET;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_ADD_REMOVE;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_ANIM;
@@ -67,10 +66,10 @@ import android.view.IApplicationToken;
 import android.view.SurfaceControl;
 import android.view.WindowManager;
 import android.view.WindowManager.LayoutParams;
-import android.view.WindowManagerPolicy.StartingSurface;
 
 import com.android.internal.util.ToBooleanFunction;
 import com.android.server.input.InputApplicationHandle;
+import com.android.server.policy.WindowManagerPolicy.StartingSurface;
 import com.android.server.wm.WindowManagerService.H;
 
 import java.io.PrintWriter;
@@ -176,11 +175,6 @@ class AppWindowToken extends WindowToken implements WindowManagerService.AppFree
     private boolean mLastContainsShowWhenLockedWindow;
     private boolean mLastContainsDismissKeyguardWindow;
 
-    // The bounds of this activity. Mainly used for aspect-ratio compatibility.
-    // TODO(b/36505427): Every level on WindowContainer now has bounds information, which directly
-    // affects the configuration. We should probably move this into that class.
-    private final Rect mBounds = new Rect();
-
     ArrayDeque<Rect> mFrozenBounds = new ArrayDeque<>();
     ArrayDeque<Configuration> mFrozenMergedConfig = new ArrayDeque<>();
 
@@ -197,8 +191,8 @@ class AppWindowToken extends WindowToken implements WindowManagerService.AppFree
             DisplayContent dc, long inputDispatchingTimeoutNanos, boolean fullscreen,
             boolean showForAllUsers, int targetSdk, int orientation, int rotationAnimationHint,
             int configChanges, boolean launchTaskBehind, boolean alwaysFocusable,
-            AppWindowContainerController controller, Rect bounds) {
-        this(service, token, voiceInteraction, dc, fullscreen, bounds);
+            AppWindowContainerController controller) {
+        this(service, token, voiceInteraction, dc, fullscreen);
         setController(controller);
         mInputDispatchingTimeoutNanos = inputDispatchingTimeoutNanos;
         mShowForAllUsers = showForAllUsers;
@@ -215,7 +209,7 @@ class AppWindowToken extends WindowToken implements WindowManagerService.AppFree
     }
 
     AppWindowToken(WindowManagerService service, IApplicationToken token, boolean voiceInteraction,
-            DisplayContent dc, boolean fillsParent, Rect bounds) {
+            DisplayContent dc, boolean fillsParent) {
         super(service, token != null ? token.asBinder() : null, TYPE_APPLICATION, true, dc,
                 false /* ownerCanManageAppTokens */);
         appToken = token;
@@ -223,27 +217,6 @@ class AppWindowToken extends WindowToken implements WindowManagerService.AppFree
         mFillsParent = fillsParent;
         mInputApplicationHandle = new InputApplicationHandle(this);
         mAppAnimator = new AppWindowAnimator(this, service);
-        if (bounds != null) {
-            mBounds.set(bounds);
-        }
-    }
-
-    void onOverrideConfigurationChanged(Configuration overrideConfiguration, Rect bounds) {
-        onOverrideConfigurationChanged(overrideConfiguration);
-        if (mBounds.equals(bounds)) {
-            return;
-        }
-        // TODO(b/36505427): If bounds is in WC, then we can automatically call onResize() when set.
-        mBounds.set(bounds);
-        onResize();
-    }
-
-    void getBounds(Rect outBounds) {
-        outBounds.set(mBounds);
-    }
-
-    boolean hasBounds() {
-        return !mBounds.isEmpty();
     }
 
     void onFirstWindowDrawn(WindowState win, WindowStateAnimator winAnimator) {

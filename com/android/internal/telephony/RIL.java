@@ -54,6 +54,7 @@ import android.hardware.radio.V1_0.SmsWriteArgs;
 import android.hardware.radio.V1_0.UusInfo;
 import android.net.ConnectivityManager;
 import android.os.AsyncResult;
+import android.os.Build;
 import android.os.Handler;
 import android.os.HwBinder;
 import android.os.Message;
@@ -80,15 +81,17 @@ import android.telephony.SignalStrength;
 import android.telephony.SmsManager;
 import android.telephony.TelephonyHistogram;
 import android.telephony.TelephonyManager;
+import android.telephony.data.DataProfile;
 import android.text.TextUtils;
 import android.util.Log;
 import android.util.SparseArray;
 
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.internal.telephony.cat.ComprehensionTlv;
+import com.android.internal.telephony.cat.ComprehensionTlvTag;
 import com.android.internal.telephony.cdma.CdmaInformationRecords;
 import com.android.internal.telephony.cdma.CdmaSmsBroadcastConfigInfo;
 import com.android.internal.telephony.dataconnection.DataCallResponse;
-import com.android.internal.telephony.dataconnection.DataProfile;
 import com.android.internal.telephony.gsm.SmsBroadcastConfigInfo;
 import com.android.internal.telephony.metrics.TelephonyMetrics;
 import com.android.internal.telephony.nano.TelephonyProto.SmsSession;
@@ -188,6 +191,9 @@ public class RIL extends BaseCommands implements CommandsInterface {
     static final String[] HIDL_SERVICE_NAME = {"slot1", "slot2", "slot3"};
 
     static final int IRADIO_GET_SERVICE_DELAY_MILLIS = 4 * 1000;
+
+    static final String EMPTY_ALPHA_LONG = "";
+    static final String EMPTY_ALPHA_SHORT = "";
 
     public static List<TelephonyHistogram> getTelephonyRILTimingHistograms() {
         List<TelephonyHistogram> list;
@@ -1061,23 +1067,23 @@ public class RIL extends BaseCommands implements CommandsInterface {
     private static DataProfileInfo convertToHalDataProfile(DataProfile dp) {
         DataProfileInfo dpi = new DataProfileInfo();
 
-        dpi.profileId = dp.profileId;
-        dpi.apn = dp.apn;
-        dpi.protocol = dp.protocol;
-        dpi.roamingProtocol = dp.roamingProtocol;
-        dpi.authType = dp.authType;
-        dpi.user = dp.user;
-        dpi.password = dp.password;
-        dpi.type = dp.type;
-        dpi.maxConnsTime = dp.maxConnsTime;
-        dpi.maxConns = dp.maxConns;
-        dpi.waitTime = dp.waitTime;
-        dpi.enabled = dp.enabled;
-        dpi.supportedApnTypesBitmap = dp.supportedApnTypesBitmap;
-        dpi.bearerBitmap = dp.bearerBitmap;
-        dpi.mtu = dp.mtu;
-        dpi.mvnoType = convertToHalMvnoType(dp.mvnoType);
-        dpi.mvnoMatchData = dp.mvnoMatchData;
+        dpi.profileId = dp.getProfileId();
+        dpi.apn = dp.getApn();
+        dpi.protocol = dp.getProtocol();
+        dpi.roamingProtocol = dp.getRoamingProtocol();
+        dpi.authType = dp.getAuthType();
+        dpi.user = dp.getUserName();
+        dpi.password = dp.getPassword();
+        dpi.type = dp.getType();
+        dpi.maxConnsTime = dp.getMaxConnsTime();
+        dpi.maxConns = dp.getMaxConns();
+        dpi.waitTime = dp.getWaitTime();
+        dpi.enabled = dp.isEnabled();
+        dpi.supportedApnTypesBitmap = dp.getSupportedApnTypesBitmap();
+        dpi.bearerBitmap = dp.getBearerBitmap();
+        dpi.mtu = dp.getMtu();
+        dpi.mvnoType = convertToHalMvnoType(dp.getMvnoType());
+        dpi.mvnoMatchData = dp.getMvnoMatchData();
 
         return dpi;
     }
@@ -1143,7 +1149,7 @@ public class RIL extends BaseCommands implements CommandsInterface {
 
             try {
                 radioProxy.setupDataCall(rr.mSerial, radioTechnology, dpi,
-                        dataProfile.modemCognitive, allowRoaming, isRoaming);
+                        dataProfile.isModemCognitive(), allowRoaming, isRoaming);
                 mMetrics.writeRilSetupDataCall(mPhoneId, rr.mSerial, radioTechnology, dpi.profileId,
                         dpi.apn, dpi.authType, dpi.protocol);
             } catch (RemoteException | RuntimeException e) {
@@ -1167,12 +1173,16 @@ public class RIL extends BaseCommands implements CommandsInterface {
                     mRILDefaultWorkSource);
 
             if (RILJ_LOGD) {
-                riljLog(rr.serialString() + "> iccIO: "
-                        + requestToString(rr.mRequest) + " command = 0x"
-                        + Integer.toHexString(command) + " fileId = 0x"
-                        + Integer.toHexString(fileId) + " path = " + path + " p1 = "
-                        + p1 + " p2 = " + p2 + " p3 = " + " data = " + data
-                        + " aid = " + aid);
+                if (Build.IS_DEBUGGABLE) {
+                    riljLog(rr.serialString() + "> iccIO: "
+                            + requestToString(rr.mRequest) + " command = 0x"
+                            + Integer.toHexString(command) + " fileId = 0x"
+                            + Integer.toHexString(fileId) + " path = " + path + " p1 = "
+                            + p1 + " p2 = " + p2 + " p3 = " + " data = " + data
+                            + " aid = " + aid);
+                } else {
+                    riljLog(rr.serialString() + "> iccIO: " + requestToString(rr.mRequest));
+                }
             }
 
             IccIo iccIo = new IccIo();
@@ -2027,7 +2037,7 @@ public class RIL extends BaseCommands implements CommandsInterface {
 
             if (RILJ_LOGD) {
                 riljLog(rr.serialString() + "> " + requestToString(rr.mRequest) + " contents = "
-                        + contents);
+                        + (Build.IS_DEBUGGABLE ? contents : censoredTerminalResponse(contents)));
             }
 
             try {
@@ -2037,6 +2047,33 @@ public class RIL extends BaseCommands implements CommandsInterface {
                 handleRadioProxyExceptionForRR(rr, "sendTerminalResponse", e);
             }
         }
+    }
+
+    private String censoredTerminalResponse(String terminalResponse) {
+        try {
+            byte[] bytes = IccUtils.hexStringToBytes(terminalResponse);
+            if (bytes != null) {
+                List<ComprehensionTlv> ctlvs = ComprehensionTlv.decodeMany(bytes, 0);
+                int from = 0;
+                for (ComprehensionTlv ctlv : ctlvs) {
+                    // Find text strings which might be personal information input by user,
+                    // then replace it with "********".
+                    if (ComprehensionTlvTag.TEXT_STRING.value() == ctlv.getTag()) {
+                        byte[] target = Arrays.copyOfRange(ctlv.getRawValue(), from,
+                                ctlv.getValueIndex() + ctlv.getLength());
+                        terminalResponse = terminalResponse.toLowerCase().replace(
+                                IccUtils.bytesToHexString(target), "********");
+                    }
+                    // The text string tag and the length field should also be hidden.
+                    from = ctlv.getValueIndex() + ctlv.getLength();
+                }
+            }
+        } catch (Exception e) {
+            Rlog.e(RILJ_LOG_TAG, "Could not censor the terminal response: " + e);
+            terminalResponse = null;
+        }
+
+        return terminalResponse;
     }
 
     @Override
@@ -2864,7 +2901,7 @@ public class RIL extends BaseCommands implements CommandsInterface {
 
             try {
                 radioProxy.setInitialAttachApn(rr.mSerial, convertToHalDataProfile(dataProfile),
-                        dataProfile.modemCognitive, isRoaming);
+                        dataProfile.isModemCognitive(), isRoaming);
             } catch (RemoteException | RuntimeException e) {
                 handleRadioProxyExceptionForRR(rr, "setInitialAttachApn", e);
             }
@@ -2969,9 +3006,13 @@ public class RIL extends BaseCommands implements CommandsInterface {
                     mRILDefaultWorkSource);
 
             if (RILJ_LOGD) {
-                riljLog(rr.serialString() + "> " + requestToString(rr.mRequest)
-                        + " cla = " + cla + " instruction = " + instruction
-                        + " p1 = " + p1 + " p2 = " + " p3 = " + p3 + " data = " + data);
+                if (Build.IS_DEBUGGABLE) {
+                    riljLog(rr.serialString() + "> " + requestToString(rr.mRequest)
+                            + " cla = " + cla + " instruction = " + instruction
+                            + " p1 = " + p1 + " p2 = " + " p3 = " + p3 + " data = " + data);
+                } else {
+                    riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
+                }
             }
 
             SimApdu msg = createSimApdu(0, cla, instruction, p1, p2, p3, data);
@@ -2991,8 +3032,12 @@ public class RIL extends BaseCommands implements CommandsInterface {
                     mRILDefaultWorkSource);
 
             if (RILJ_LOGD) {
-                riljLog(rr.serialString() + "> " + requestToString(rr.mRequest) + " aid = " + aid
-                        + " p2 = " + p2);
+                if (Build.IS_DEBUGGABLE) {
+                    riljLog(rr.serialString() + "> " + requestToString(rr.mRequest) + " aid = " + aid
+                            + " p2 = " + p2);
+                } else {
+                    riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
+                }
             }
 
             try {
@@ -3038,9 +3083,13 @@ public class RIL extends BaseCommands implements CommandsInterface {
                     mRILDefaultWorkSource);
 
             if (RILJ_LOGD) {
-                riljLog(rr.serialString() + "> " + requestToString(rr.mRequest) + " channel = "
-                        + channel + " cla = " + cla + " instruction = " + instruction
-                        + " p1 = " + p1 + " p2 = " + " p3 = " + p3 + " data = " + data);
+                if (Build.IS_DEBUGGABLE) {
+                    riljLog(rr.serialString() + "> " + requestToString(rr.mRequest) + " channel = "
+                            + channel + " cla = " + cla + " instruction = " + instruction
+                            + " p1 = " + p1 + " p2 = " + " p3 = " + p3 + " data = " + data);
+                } else {
+                    riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
+                }
             }
 
             SimApdu msg = createSimApdu(channel, cla, instruction, p1, p2, p3, data);
@@ -4813,7 +4862,80 @@ public class RIL extends BaseCommands implements CommandsInterface {
         return capacityResponse;
     }
 
-    static ArrayList<CellInfo> convertHalCellInfoList(
+    private static void writeToParcelForGsm(
+            Parcel p, int lac, int cid, int arfcn, int bsic, String mcc, String mnc,
+            String al, String as, int ss, int ber, int ta) {
+        p.writeInt(lac);
+        p.writeInt(cid);
+        p.writeInt(arfcn);
+        p.writeInt(bsic);
+        p.writeString(mcc);
+        p.writeString(mnc);
+        p.writeString(al);
+        p.writeString(as);
+        p.writeInt(ss);
+        p.writeInt(ber);
+        p.writeInt(ta);
+    }
+
+    private static void writeToParcelForCdma(
+            Parcel p, int ni, int si, int bsi, int lon, int lat, String al, String as,
+            int dbm, int ecio, int eDbm, int eEcio, int eSnr) {
+        p.writeInt(ni);
+        p.writeInt(si);
+        p.writeInt(bsi);
+        p.writeInt(lon);
+        p.writeInt(lat);
+        p.writeString(al);
+        p.writeString(as);
+        p.writeInt(dbm);
+        p.writeInt(ecio);
+        p.writeInt(eDbm);
+        p.writeInt(eEcio);
+        p.writeInt(eSnr);
+    }
+
+    private static void writeToParcelForLte(
+            Parcel p, int ci, int pci, int tac, int earfcn, String mcc, String mnc, String al,
+            String as, int ss, int rsrp, int rsrq, int rssnr, int cqi, int ta) {
+        p.writeInt(ci);
+        p.writeInt(pci);
+        p.writeInt(tac);
+        p.writeInt(earfcn);
+        p.writeString(mcc);
+        p.writeString(mnc);
+        p.writeString(al);
+        p.writeString(as);
+        p.writeInt(ss);
+        p.writeInt(rsrp);
+        p.writeInt(rsrq);
+        p.writeInt(rssnr);
+        p.writeInt(cqi);
+        p.writeInt(ta);
+    }
+
+    private static void writeToParcelForWcdma(
+            Parcel p, int lac, int cid, int psc, int uarfcn, String mcc, String mnc,
+            String al, String as, int ss, int ber) {
+        p.writeInt(lac);
+        p.writeInt(cid);
+        p.writeInt(psc);
+        p.writeInt(uarfcn);
+        p.writeString(mcc);
+        p.writeString(mnc);
+        p.writeString(al);
+        p.writeString(as);
+        p.writeInt(ss);
+        p.writeInt(ber);
+    }
+
+    /**
+     * Convert CellInfo defined in 1.0/types.hal to CellInfo type.
+     * @param records List of CellInfo defined in 1.0/types.hal
+     * @return List of converted CellInfo object
+     */
+    @VisibleForTesting
+    public static ArrayList<CellInfo> convertHalCellInfoList(
             ArrayList<android.hardware.radio.V1_0.CellInfo> records) {
         ArrayList<CellInfo> response = new ArrayList<CellInfo>(records.size());
 
@@ -4827,60 +4949,182 @@ public class RIL extends BaseCommands implements CommandsInterface {
             switch (record.cellInfoType) {
                 case CellInfoType.GSM: {
                     CellInfoGsm cellInfoGsm = record.gsm.get(0);
-                    p.writeInt(Integer.parseInt(cellInfoGsm.cellIdentityGsm.mcc));
-                    p.writeInt(Integer.parseInt(cellInfoGsm.cellIdentityGsm.mnc));
-                    p.writeInt(cellInfoGsm.cellIdentityGsm.lac);
-                    p.writeInt(cellInfoGsm.cellIdentityGsm.cid);
-                    p.writeInt(cellInfoGsm.cellIdentityGsm.arfcn);
-                    p.writeInt(Byte.toUnsignedInt(cellInfoGsm.cellIdentityGsm.bsic));
-                    p.writeInt(cellInfoGsm.signalStrengthGsm.signalStrength);
-                    p.writeInt(cellInfoGsm.signalStrengthGsm.bitErrorRate);
-                    p.writeInt(cellInfoGsm.signalStrengthGsm.timingAdvance);
+                    writeToParcelForGsm(
+                            p,
+                            cellInfoGsm.cellIdentityGsm.lac,
+                            cellInfoGsm.cellIdentityGsm.cid,
+                            cellInfoGsm.cellIdentityGsm.arfcn,
+                            Byte.toUnsignedInt(cellInfoGsm.cellIdentityGsm.bsic),
+                            cellInfoGsm.cellIdentityGsm.mcc,
+                            cellInfoGsm.cellIdentityGsm.mnc,
+                            EMPTY_ALPHA_LONG,
+                            EMPTY_ALPHA_SHORT,
+                            cellInfoGsm.signalStrengthGsm.signalStrength,
+                            cellInfoGsm.signalStrengthGsm.bitErrorRate,
+                            cellInfoGsm.signalStrengthGsm.timingAdvance);
                     break;
                 }
 
                 case CellInfoType.CDMA: {
                     CellInfoCdma cellInfoCdma = record.cdma.get(0);
-                    p.writeInt(cellInfoCdma.cellIdentityCdma.networkId);
-                    p.writeInt(cellInfoCdma.cellIdentityCdma.systemId);
-                    p.writeInt(cellInfoCdma.cellIdentityCdma.baseStationId);
-                    p.writeInt(cellInfoCdma.cellIdentityCdma.longitude);
-                    p.writeInt(cellInfoCdma.cellIdentityCdma.latitude);
-                    p.writeInt(cellInfoCdma.signalStrengthCdma.dbm);
-                    p.writeInt(cellInfoCdma.signalStrengthCdma.ecio);
-                    p.writeInt(cellInfoCdma.signalStrengthEvdo.dbm);
-                    p.writeInt(cellInfoCdma.signalStrengthEvdo.ecio);
-                    p.writeInt(cellInfoCdma.signalStrengthEvdo.signalNoiseRatio);
+                    writeToParcelForCdma(
+                            p,
+                            cellInfoCdma.cellIdentityCdma.networkId,
+                            cellInfoCdma.cellIdentityCdma.systemId,
+                            cellInfoCdma.cellIdentityCdma.baseStationId,
+                            cellInfoCdma.cellIdentityCdma.longitude,
+                            cellInfoCdma.cellIdentityCdma.latitude,
+                            EMPTY_ALPHA_LONG,
+                            EMPTY_ALPHA_SHORT,
+                            cellInfoCdma.signalStrengthCdma.dbm,
+                            cellInfoCdma.signalStrengthCdma.ecio,
+                            cellInfoCdma.signalStrengthEvdo.dbm,
+                            cellInfoCdma.signalStrengthEvdo.ecio,
+                            cellInfoCdma.signalStrengthEvdo.signalNoiseRatio);
                     break;
                 }
 
                 case CellInfoType.LTE: {
                     CellInfoLte cellInfoLte = record.lte.get(0);
-                    p.writeInt(Integer.parseInt(cellInfoLte.cellIdentityLte.mcc));
-                    p.writeInt(Integer.parseInt(cellInfoLte.cellIdentityLte.mnc));
-                    p.writeInt(cellInfoLte.cellIdentityLte.ci);
-                    p.writeInt(cellInfoLte.cellIdentityLte.pci);
-                    p.writeInt(cellInfoLte.cellIdentityLte.tac);
-                    p.writeInt(cellInfoLte.cellIdentityLte.earfcn);
-                    p.writeInt(cellInfoLte.signalStrengthLte.signalStrength);
-                    p.writeInt(cellInfoLte.signalStrengthLte.rsrp);
-                    p.writeInt(cellInfoLte.signalStrengthLte.rsrq);
-                    p.writeInt(cellInfoLte.signalStrengthLte.rssnr);
-                    p.writeInt(cellInfoLte.signalStrengthLte.cqi);
-                    p.writeInt(cellInfoLte.signalStrengthLte.timingAdvance);
+                    writeToParcelForLte(
+                            p,
+                            cellInfoLte.cellIdentityLte.ci,
+                            cellInfoLte.cellIdentityLte.pci,
+                            cellInfoLte.cellIdentityLte.tac,
+                            cellInfoLte.cellIdentityLte.earfcn,
+                            cellInfoLte.cellIdentityLte.mcc,
+                            cellInfoLte.cellIdentityLte.mnc,
+                            EMPTY_ALPHA_LONG,
+                            EMPTY_ALPHA_SHORT,
+                            cellInfoLte.signalStrengthLte.signalStrength,
+                            cellInfoLte.signalStrengthLte.rsrp,
+                            cellInfoLte.signalStrengthLte.rsrq,
+                            cellInfoLte.signalStrengthLte.rssnr,
+                            cellInfoLte.signalStrengthLte.cqi,
+                            cellInfoLte.signalStrengthLte.timingAdvance);
                     break;
                 }
 
                 case CellInfoType.WCDMA: {
                     CellInfoWcdma cellInfoWcdma = record.wcdma.get(0);
-                    p.writeInt(Integer.parseInt(cellInfoWcdma.cellIdentityWcdma.mcc));
-                    p.writeInt(Integer.parseInt(cellInfoWcdma.cellIdentityWcdma.mnc));
-                    p.writeInt(cellInfoWcdma.cellIdentityWcdma.lac);
-                    p.writeInt(cellInfoWcdma.cellIdentityWcdma.cid);
-                    p.writeInt(cellInfoWcdma.cellIdentityWcdma.psc);
-                    p.writeInt(cellInfoWcdma.cellIdentityWcdma.uarfcn);
-                    p.writeInt(cellInfoWcdma.signalStrengthWcdma.signalStrength);
-                    p.writeInt(cellInfoWcdma.signalStrengthWcdma.bitErrorRate);
+                    writeToParcelForWcdma(
+                            p,
+                            cellInfoWcdma.cellIdentityWcdma.lac,
+                            cellInfoWcdma.cellIdentityWcdma.cid,
+                            cellInfoWcdma.cellIdentityWcdma.psc,
+                            cellInfoWcdma.cellIdentityWcdma.uarfcn,
+                            cellInfoWcdma.cellIdentityWcdma.mcc,
+                            cellInfoWcdma.cellIdentityWcdma.mnc,
+                            EMPTY_ALPHA_LONG,
+                            EMPTY_ALPHA_SHORT,
+                            cellInfoWcdma.signalStrengthWcdma.signalStrength,
+                            cellInfoWcdma.signalStrengthWcdma.bitErrorRate);
+                    break;
+                }
+
+                default:
+                    throw new RuntimeException("unexpected cellinfotype: " + record.cellInfoType);
+            }
+
+            p.setDataPosition(0);
+            CellInfo InfoRec = CellInfo.CREATOR.createFromParcel(p);
+            p.recycle();
+            response.add(InfoRec);
+        }
+
+        return response;
+    }
+
+    /**
+     * Convert CellInfo defined in 1.2/types.hal to CellInfo type.
+     * @param records List of CellInfo defined in 1.2/types.hal
+     * @return List of converted CellInfo object
+     */
+    @VisibleForTesting
+    public static ArrayList<CellInfo> convertHalCellInfoList_1_2(
+            ArrayList<android.hardware.radio.V1_2.CellInfo> records) {
+        ArrayList<CellInfo> response = new ArrayList<CellInfo>(records.size());
+
+        for (android.hardware.radio.V1_2.CellInfo record : records) {
+            // first convert RIL CellInfo to Parcel
+            Parcel p = Parcel.obtain();
+            p.writeInt(record.cellInfoType);
+            p.writeInt(record.registered ? 1 : 0);
+            p.writeInt(record.timeStampType);
+            p.writeLong(record.timeStamp);
+            switch (record.cellInfoType) {
+                case CellInfoType.GSM: {
+                    android.hardware.radio.V1_2.CellInfoGsm cellInfoGsm = record.gsm.get(0);
+                    writeToParcelForGsm(
+                            p,
+                            cellInfoGsm.cellIdentityGsm.base.lac,
+                            cellInfoGsm.cellIdentityGsm.base.cid,
+                            cellInfoGsm.cellIdentityGsm.base.arfcn,
+                            Byte.toUnsignedInt(cellInfoGsm.cellIdentityGsm.base.bsic),
+                            cellInfoGsm.cellIdentityGsm.base.mcc,
+                            cellInfoGsm.cellIdentityGsm.base.mnc,
+                            cellInfoGsm.cellIdentityGsm.operatorNames.alphaLong,
+                            cellInfoGsm.cellIdentityGsm.operatorNames.alphaShort,
+                            cellInfoGsm.signalStrengthGsm.signalStrength,
+                            cellInfoGsm.signalStrengthGsm.bitErrorRate,
+                            cellInfoGsm.signalStrengthGsm.timingAdvance);
+                    break;
+                }
+
+                case CellInfoType.CDMA: {
+                    android.hardware.radio.V1_2.CellInfoCdma cellInfoCdma = record.cdma.get(0);
+                    writeToParcelForCdma(
+                            p,
+                            cellInfoCdma.cellIdentityCdma.base.networkId,
+                            cellInfoCdma.cellIdentityCdma.base.systemId,
+                            cellInfoCdma.cellIdentityCdma.base.baseStationId,
+                            cellInfoCdma.cellIdentityCdma.base.longitude,
+                            cellInfoCdma.cellIdentityCdma.base.latitude,
+                            cellInfoCdma.cellIdentityCdma.operatorNames.alphaLong,
+                            cellInfoCdma.cellIdentityCdma.operatorNames.alphaShort,
+                            cellInfoCdma.signalStrengthCdma.dbm,
+                            cellInfoCdma.signalStrengthCdma.ecio,
+                            cellInfoCdma.signalStrengthEvdo.dbm,
+                            cellInfoCdma.signalStrengthEvdo.ecio,
+                            cellInfoCdma.signalStrengthEvdo.signalNoiseRatio);
+                    break;
+                }
+
+                case CellInfoType.LTE: {
+                    android.hardware.radio.V1_2.CellInfoLte cellInfoLte = record.lte.get(0);
+                    writeToParcelForLte(
+                            p,
+                            cellInfoLte.cellIdentityLte.base.ci,
+                            cellInfoLte.cellIdentityLte.base.pci,
+                            cellInfoLte.cellIdentityLte.base.tac,
+                            cellInfoLte.cellIdentityLte.base.earfcn,
+                            cellInfoLte.cellIdentityLte.base.mcc,
+                            cellInfoLte.cellIdentityLte.base.mnc,
+                            cellInfoLte.cellIdentityLte.operatorNames.alphaLong,
+                            cellInfoLte.cellIdentityLte.operatorNames.alphaShort,
+                            cellInfoLte.signalStrengthLte.signalStrength,
+                            cellInfoLte.signalStrengthLte.rsrp,
+                            cellInfoLte.signalStrengthLte.rsrq,
+                            cellInfoLte.signalStrengthLte.rssnr,
+                            cellInfoLte.signalStrengthLte.cqi,
+                            cellInfoLte.signalStrengthLte.timingAdvance);
+                    break;
+                }
+
+                case CellInfoType.WCDMA: {
+                    android.hardware.radio.V1_2.CellInfoWcdma cellInfoWcdma = record.wcdma.get(0);
+                    writeToParcelForWcdma(
+                            p,
+                            cellInfoWcdma.cellIdentityWcdma.base.lac,
+                            cellInfoWcdma.cellIdentityWcdma.base.cid,
+                            cellInfoWcdma.cellIdentityWcdma.base.psc,
+                            cellInfoWcdma.cellIdentityWcdma.base.uarfcn,
+                            cellInfoWcdma.cellIdentityWcdma.base.mcc,
+                            cellInfoWcdma.cellIdentityWcdma.base.mnc,
+                            cellInfoWcdma.cellIdentityWcdma.operatorNames.alphaLong,
+                            cellInfoWcdma.cellIdentityWcdma.operatorNames.alphaShort,
+                            cellInfoWcdma.signalStrengthWcdma.signalStrength,
+                            cellInfoWcdma.signalStrengthWcdma.bitErrorRate);
                     break;
                 }
 

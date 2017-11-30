@@ -120,7 +120,7 @@ public class BatteryStatsImpl extends BatteryStats {
     private static final int MAGIC = 0xBA757475; // 'BATSTATS'
 
     // Current on-disk Parcel version
-    private static final int VERSION = 168 + (USE_OLD_HISTORY ? 1000 : 0);
+    private static final int VERSION = 169 + (USE_OLD_HISTORY ? 1000 : 0);
 
     // Maximum number of items we will record in the history.
     private static final int MAX_HISTORY_ITEMS;
@@ -599,6 +599,8 @@ public class BatteryStatsImpl extends BatteryStats {
     private LongSamplingCounter mDischargeScreenOffCounter;
     private LongSamplingCounter mDischargeScreenDozeCounter;
     private LongSamplingCounter mDischargeCounter;
+    private LongSamplingCounter mDischargeLightDozeCounter;
+    private LongSamplingCounter mDischargeDeepDozeCounter;
 
     static final int MAX_LEVEL_STEPS = 200;
 
@@ -694,6 +696,16 @@ public class BatteryStatsImpl extends BatteryStats {
     @Override
     public long getUahDischargeScreenDoze(int which) {
         return mDischargeScreenDozeCounter.getCountLocked(which);
+    }
+
+    @Override
+    public long getUahDischargeLightDoze(int which) {
+        return mDischargeLightDozeCounter.getCountLocked(which);
+    }
+
+    @Override
+    public long getUahDischargeDeepDoze(int which) {
+        return mDischargeDeepDozeCounter.getCountLocked(which);
     }
 
     @Override
@@ -6008,6 +6020,11 @@ public class BatteryStatsImpl extends BatteryStats {
         }
 
         @Override
+        public Timer getMulticastWakelockStats() {
+            return mWifiMulticastTimer;
+        }
+
+        @Override
         public ArrayMap<String, ? extends BatteryStats.Timer> getSyncStats() {
             return mSyncStats.getMap();
         }
@@ -9085,6 +9102,8 @@ public class BatteryStatsImpl extends BatteryStats {
         mBluetoothScanTimer = new StopwatchTimer(mClocks, null, -14, null, mOnBatteryTimeBase);
         mDischargeScreenOffCounter = new LongSamplingCounter(mOnBatteryScreenOffTimeBase);
         mDischargeScreenDozeCounter = new LongSamplingCounter(mOnBatteryTimeBase);
+        mDischargeLightDozeCounter = new LongSamplingCounter(mOnBatteryTimeBase);
+        mDischargeDeepDozeCounter = new LongSamplingCounter(mOnBatteryTimeBase);
         mDischargeCounter = new LongSamplingCounter(mOnBatteryTimeBase);
         mOnBattery = mOnBatteryInternal = false;
         long uptime = mClocks.uptimeMillis() * 1000;
@@ -9664,6 +9683,8 @@ public class BatteryStatsImpl extends BatteryStats {
         mChargeStepTracker.init();
         mDischargeScreenOffCounter.reset(false);
         mDischargeScreenDozeCounter.reset(false);
+        mDischargeLightDozeCounter.reset(false);
+        mDischargeDeepDozeCounter.reset(false);
         mDischargeCounter.reset(false);
     }
 
@@ -11263,6 +11284,11 @@ public class BatteryStatsImpl extends BatteryStats {
                 if (isScreenDoze(mScreenState)) {
                     mDischargeScreenDozeCounter.addCountLocked(chargeDiff);
                 }
+                if (mDeviceIdleMode == DEVICE_IDLE_MODE_LIGHT) {
+                    mDischargeLightDozeCounter.addCountLocked(chargeDiff);
+                } else if (mDeviceIdleMode == DEVICE_IDLE_MODE_DEEP) {
+                    mDischargeDeepDozeCounter.addCountLocked(chargeDiff);
+                }
             }
             mHistoryCur.batteryChargeUAh = chargeUAh;
             setOnBatteryLocked(elapsedRealtime, uptime, onBattery, oldStatus, level, chargeUAh);
@@ -11307,6 +11333,11 @@ public class BatteryStatsImpl extends BatteryStats {
                     mDischargeScreenOffCounter.addCountLocked(chargeDiff);
                     if (isScreenDoze(mScreenState)) {
                         mDischargeScreenDozeCounter.addCountLocked(chargeDiff);
+                    }
+                    if (mDeviceIdleMode == DEVICE_IDLE_MODE_LIGHT) {
+                        mDischargeLightDozeCounter.addCountLocked(chargeDiff);
+                    } else if (mDeviceIdleMode == DEVICE_IDLE_MODE_DEEP) {
+                        mDischargeDeepDozeCounter.addCountLocked(chargeDiff);
                     }
                 }
                 mHistoryCur.batteryChargeUAh = chargeUAh;
@@ -12069,6 +12100,8 @@ public class BatteryStatsImpl extends BatteryStats {
         mDischargeCounter.readSummaryFromParcelLocked(in);
         mDischargeScreenOffCounter.readSummaryFromParcelLocked(in);
         mDischargeScreenDozeCounter.readSummaryFromParcelLocked(in);
+        mDischargeLightDozeCounter.readSummaryFromParcelLocked(in);
+        mDischargeDeepDozeCounter.readSummaryFromParcelLocked(in);
         int NPKG = in.readInt();
         if (NPKG > 0) {
             mDailyPackageChanges = new ArrayList<>(NPKG);
@@ -12493,6 +12526,8 @@ public class BatteryStatsImpl extends BatteryStats {
         mDischargeCounter.writeSummaryFromParcelLocked(out);
         mDischargeScreenOffCounter.writeSummaryFromParcelLocked(out);
         mDischargeScreenDozeCounter.writeSummaryFromParcelLocked(out);
+        mDischargeLightDozeCounter.writeSummaryFromParcelLocked(out);
+        mDischargeDeepDozeCounter.writeSummaryFromParcelLocked(out);
         if (mDailyPackageChanges != null) {
             final int NPKG = mDailyPackageChanges.size();
             out.writeInt(NPKG);
@@ -13044,6 +13079,8 @@ public class BatteryStatsImpl extends BatteryStats {
         mDischargeCounter = new LongSamplingCounter(mOnBatteryTimeBase, in);
         mDischargeScreenOffCounter = new LongSamplingCounter(mOnBatteryScreenOffTimeBase, in);
         mDischargeScreenDozeCounter = new LongSamplingCounter(mOnBatteryTimeBase, in);
+        mDischargeLightDozeCounter = new LongSamplingCounter(mOnBatteryTimeBase, in);
+        mDischargeDeepDozeCounter = new LongSamplingCounter(mOnBatteryTimeBase, in);
         mLastWriteTime = in.readLong();
 
         mRpmStats.clear();
@@ -13230,6 +13267,8 @@ public class BatteryStatsImpl extends BatteryStats {
         mDischargeCounter.writeToParcel(out);
         mDischargeScreenOffCounter.writeToParcel(out);
         mDischargeScreenDozeCounter.writeToParcel(out);
+        mDischargeLightDozeCounter.writeToParcel(out);
+        mDischargeDeepDozeCounter.writeToParcel(out);
         out.writeLong(mLastWriteTime);
 
         out.writeInt(mRpmStats.size());

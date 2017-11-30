@@ -119,12 +119,13 @@ import static android.view.WindowManager.TAKE_SCREENSHOT_FULLSCREEN;
 import static android.view.WindowManager.TAKE_SCREENSHOT_SELECTED_REGION;
 import static android.view.WindowManagerGlobal.ADD_OKAY;
 import static android.view.WindowManagerGlobal.ADD_PERMISSION_DENIED;
-import static android.view.WindowManagerPolicy.WindowManagerFuncs.CAMERA_LENS_COVERED;
-import static android.view.WindowManagerPolicy.WindowManagerFuncs.CAMERA_LENS_COVER_ABSENT;
-import static android.view.WindowManagerPolicy.WindowManagerFuncs.CAMERA_LENS_UNCOVERED;
-import static android.view.WindowManagerPolicy.WindowManagerFuncs.LID_ABSENT;
-import static android.view.WindowManagerPolicy.WindowManagerFuncs.LID_CLOSED;
-import static android.view.WindowManagerPolicy.WindowManagerFuncs.LID_OPEN;
+
+import static com.android.server.policy.WindowManagerPolicy.WindowManagerFuncs.CAMERA_LENS_COVERED;
+import static com.android.server.policy.WindowManagerPolicy.WindowManagerFuncs.CAMERA_LENS_COVER_ABSENT;
+import static com.android.server.policy.WindowManagerPolicy.WindowManagerFuncs.CAMERA_LENS_UNCOVERED;
+import static com.android.server.policy.WindowManagerPolicy.WindowManagerFuncs.LID_ABSENT;
+import static com.android.server.policy.WindowManagerPolicy.WindowManagerFuncs.LID_CLOSED;
+import static com.android.server.policy.WindowManagerPolicy.WindowManagerFuncs.LID_OPEN;
 
 import android.annotation.Nullable;
 import android.app.ActivityManager;
@@ -210,7 +211,6 @@ import android.util.Slog;
 import android.util.SparseArray;
 import android.util.proto.ProtoOutputStream;
 import android.view.Display;
-import android.view.DisplayFrames;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
 import android.view.IApplicationToken;
@@ -230,9 +230,6 @@ import android.view.ViewConfiguration;
 import android.view.WindowManager;
 import android.view.WindowManager.LayoutParams;
 import android.view.WindowManagerGlobal;
-import android.view.WindowManagerInternal;
-import android.view.WindowManagerInternal.AppTransitionListener;
-import android.view.WindowManagerPolicy;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityManager;
 import android.view.animation.Animation;
@@ -243,6 +240,7 @@ import android.view.inputmethod.InputMethodManagerInternal;
 
 import com.android.internal.R;
 import com.android.internal.annotations.GuardedBy;
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.logging.MetricsLogger;
 import com.android.internal.policy.IKeyguardDismissCallback;
 import com.android.internal.policy.IShortcutService;
@@ -259,6 +257,9 @@ import com.android.server.policy.keyguard.KeyguardStateMonitor.StateCallback;
 import com.android.server.statusbar.StatusBarManagerInternal;
 import com.android.server.vr.VrManagerInternal;
 import com.android.server.wm.AppTransition;
+import com.android.server.wm.DisplayFrames;
+import com.android.server.wm.WindowManagerInternal;
+import com.android.server.wm.WindowManagerInternal.AppTransitionListener;
 
 import java.io.File;
 import java.io.FileReader;
@@ -304,6 +305,10 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     static final int LONG_PRESS_POWER_GLOBAL_ACTIONS = 1;
     static final int LONG_PRESS_POWER_SHUT_OFF = 2;
     static final int LONG_PRESS_POWER_SHUT_OFF_NO_CONFIRM = 3;
+    static final int LONG_PRESS_POWER_GO_TO_VOICE_ASSIST = 4;
+
+    static final int VERY_LONG_PRESS_POWER_NOTHING = 0;
+    static final int VERY_LONG_PRESS_POWER_GLOBAL_ACTIONS = 1;
 
     static final int MULTI_PRESS_POWER_NOTHING = 0;
     static final int MULTI_PRESS_POWER_THEATER_MODE = 1;
@@ -569,6 +574,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     boolean mLidControlsSleep;
     int mShortPressOnPowerBehavior;
     int mLongPressOnPowerBehavior;
+    int mVeryLongPressOnPowerBehavior;
     int mDoublePressOnPowerBehavior;
     int mTriplePressOnPowerBehavior;
     int mLongPressOnBackBehavior;
@@ -586,6 +592,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     boolean mHasSoftInput = false;
     boolean mTranslucentDecorEnabled = true;
     boolean mUseTvRouting;
+    int mVeryLongPressTimeout;
 
     private boolean mHandleVolumeKeysInWM;
 
@@ -796,6 +803,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     private static final int MSG_HANDLE_ALL_APPS = 26;
     private static final int MSG_LAUNCH_ASSIST = 27;
     private static final int MSG_LAUNCH_ASSIST_LONG_PRESS = 28;
+    private static final int MSG_POWER_VERY_LONG_PRESS = 29;
 
     private static final int MSG_REQUEST_TRANSIENT_BARS_ARG_STATUS = 0;
     private static final int MSG_REQUEST_TRANSIENT_BARS_ARG_NAVIGATION = 1;
@@ -854,6 +862,9 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                     break;
                 case MSG_POWER_LONG_PRESS:
                     powerLongPress();
+                    break;
+                case MSG_POWER_VERY_LONG_PRESS:
+                    powerVeryLongPress();
                     break;
                 case MSG_UPDATE_DREAMING_SLEEP_TOKEN:
                     updateDreamingSleepToken(msg.arg1 != 0);
@@ -1043,7 +1054,8 @@ public class PhoneWindowManager implements WindowManagerPolicy {
 
     private ImmersiveModeConfirmation mImmersiveModeConfirmation;
 
-    private SystemGesturesPointerEventListener mSystemGestures;
+    @VisibleForTesting
+    SystemGesturesPointerEventListener mSystemGestures;
 
     IStatusBarService getStatusBarService() {
         synchronized (mServiceAquireLock) {
@@ -1299,6 +1311,12 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                     msg.setAsynchronous(true);
                     mHandler.sendMessageDelayed(msg,
                             ViewConfiguration.get(mContext).getDeviceGlobalActionKeyTimeout());
+
+                    if (hasVeryLongPressOnPowerBehavior()) {
+                        Message longMsg = mHandler.obtainMessage(MSG_POWER_VERY_LONG_PRESS);
+                        longMsg.setAsynchronous(true);
+                        mHandler.sendMessageDelayed(longMsg, mVeryLongPressTimeout);
+                    }
                 }
             } else {
                 wakeUpFromPowerKey(event.getDownTime());
@@ -1308,6 +1326,13 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                     msg.setAsynchronous(true);
                     mHandler.sendMessageDelayed(msg,
                             ViewConfiguration.get(mContext).getDeviceGlobalActionKeyTimeout());
+
+                    if (hasVeryLongPressOnPowerBehavior()) {
+                        Message longMsg = mHandler.obtainMessage(MSG_POWER_VERY_LONG_PRESS);
+                        longMsg.setAsynchronous(true);
+                        mHandler.sendMessageDelayed(longMsg, mVeryLongPressTimeout);
+                    }
+
                     mBeganFromNonInteractive = true;
                 } else {
                     final int maxCount = getMaxMultiPressPowerCount();
@@ -1368,6 +1393,9 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         if (!mPowerKeyHandled) {
             mPowerKeyHandled = true;
             mHandler.removeMessages(MSG_POWER_LONG_PRESS);
+        }
+        if (hasVeryLongPressOnPowerBehavior()) {
+            mHandler.removeMessages(MSG_POWER_VERY_LONG_PRESS);
         }
     }
 
@@ -1516,6 +1544,29 @@ public class PhoneWindowManager implements WindowManagerPolicy {
             sendCloseSystemWindows(SYSTEM_DIALOG_REASON_GLOBAL_ACTIONS);
             mWindowManagerFuncs.shutdown(behavior == LONG_PRESS_POWER_SHUT_OFF);
             break;
+        case LONG_PRESS_POWER_GO_TO_VOICE_ASSIST:
+            mPowerKeyHandled = true;
+            performHapticFeedbackLw(null, HapticFeedbackConstants.LONG_PRESS, false);
+            final boolean keyguardActive = mKeyguardDelegate == null
+                    ? false
+                    : mKeyguardDelegate.isShowing();
+            if (!keyguardActive) {
+                Intent intent = new Intent(Intent.ACTION_VOICE_ASSIST);
+                startActivityAsUser(intent, UserHandle.CURRENT_OR_SELF);
+            }
+            break;
+        }
+    }
+
+    private void powerVeryLongPress() {
+        switch (mVeryLongPressOnPowerBehavior) {
+        case VERY_LONG_PRESS_POWER_NOTHING:
+            break;
+        case VERY_LONG_PRESS_POWER_GLOBAL_ACTIONS:
+            mPowerKeyHandled = true;
+            performHapticFeedbackLw(null, HapticFeedbackConstants.LONG_PRESS, false);
+            showGlobalActionsInternal();
+            break;
         }
     }
 
@@ -1572,6 +1623,10 @@ public class PhoneWindowManager implements WindowManagerPolicy {
 
     private boolean hasLongPressOnPowerBehavior() {
         return getResolvedLongPressOnPowerBehavior() != LONG_PRESS_POWER_NOTHING;
+    }
+
+    private boolean hasVeryLongPressOnPowerBehavior() {
+        return mVeryLongPressOnPowerBehavior != VERY_LONG_PRESS_POWER_NOTHING;
     }
 
     private boolean hasLongPressOnBackBehavior() {
@@ -1979,12 +2034,16 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                 com.android.internal.R.integer.config_shortPressOnPowerBehavior);
         mLongPressOnPowerBehavior = mContext.getResources().getInteger(
                 com.android.internal.R.integer.config_longPressOnPowerBehavior);
+        mVeryLongPressOnPowerBehavior = mContext.getResources().getInteger(
+                com.android.internal.R.integer.config_veryLongPressOnPowerBehavior);
         mDoublePressOnPowerBehavior = mContext.getResources().getInteger(
                 com.android.internal.R.integer.config_doublePressOnPowerBehavior);
         mTriplePressOnPowerBehavior = mContext.getResources().getInteger(
                 com.android.internal.R.integer.config_triplePressOnPowerBehavior);
         mShortPressOnSleepBehavior = mContext.getResources().getInteger(
                 com.android.internal.R.integer.config_shortPressOnSleepBehavior);
+        mVeryLongPressTimeout = mContext.getResources().getInteger(
+                com.android.internal.R.integer.config_veryLongPressTimeout);
 
         mUseTvRouting = AudioSystem.getPlatformType(mContext) == AudioSystem.PLATFORM_TELEVISION;
 
@@ -2607,17 +2666,21 @@ public class PhoneWindowManager implements WindowManagerPolicy {
             // The status bar is the only window allowed to exhibit keyguard behavior.
             attrs.privateFlags &= ~WindowManager.LayoutParams.PRIVATE_FLAG_KEYGUARD;
         }
+    }
 
+    private int getImpliedSysUiFlagsForLayout(LayoutParams attrs) {
+        int impliedFlags = 0;
         if ((attrs.flags & FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS) != 0) {
-            attrs.subtreeSystemUiVisibility |= View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+            impliedFlags |= View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
         }
         final boolean forceWindowDrawsStatusBarBackground =
                 (attrs.privateFlags & PRIVATE_FLAG_FORCE_DRAW_STATUS_BAR_BACKGROUND) != 0;
         if ((attrs.flags & FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS) != 0
                 || forceWindowDrawsStatusBarBackground
                         && attrs.height == MATCH_PARENT && attrs.width == MATCH_PARENT) {
-            attrs.subtreeSystemUiVisibility |= View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN;
+            impliedFlags |= View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN;
         }
+        return impliedFlags;
     }
 
     void readLidState() {
@@ -2667,7 +2730,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     @Override
     public void onConfigurationChanged() {
         // TODO(multi-display): Define policy for secondary displays.
-        Context uiContext = ActivityThread.currentActivityThread().getSystemUiContext();
+        Context uiContext = getSystemUiContext();
         final Resources res = uiContext.getResources();
 
         mStatusBarHeight =
@@ -2706,6 +2769,11 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                     res.getDimensionPixelSize(
                             com.android.internal.R.dimen.navigation_bar_width_car_mode);
         }
+    }
+
+    @VisibleForTesting
+    Context getSystemUiContext() {
+        return ActivityThread.currentActivityThread().getSystemUiContext();
     }
 
     @Override
@@ -4768,7 +4836,8 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         final int fl = PolicyControl.getWindowFlags(win, attrs);
         final int pfl = attrs.privateFlags;
         final int sim = attrs.softInputMode;
-        final int sysUiFl = PolicyControl.getSystemUiVisibility(win, null);
+        final int requestedSysUiFl = PolicyControl.getSystemUiVisibility(win, null);
+        final int sysUiFl = requestedSysUiFl | getImpliedSysUiFlagsForLayout(attrs);
 
         final Rect pf = mTmpParentFrame;
         final Rect df = mTmpDisplayFrame;
@@ -8062,19 +8131,6 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     }
 
     @Override
-    public boolean canMagnifyWindow(int windowType) {
-        switch (windowType) {
-            case WindowManager.LayoutParams.TYPE_INPUT_METHOD:
-            case WindowManager.LayoutParams.TYPE_INPUT_METHOD_DIALOG:
-            case WindowManager.LayoutParams.TYPE_NAVIGATION_BAR:
-            case WindowManager.LayoutParams.TYPE_MAGNIFICATION_OVERLAY: {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    @Override
     public boolean isTopLevelWindow(int windowType) {
         if (windowType >= WindowManager.LayoutParams.FIRST_SUB_WINDOW
                 && windowType <= WindowManager.LayoutParams.LAST_SUB_WINDOW) {
@@ -8205,6 +8261,9 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         pw.print(prefix);
                 pw.print("mLongPressOnPowerBehavior=");
                 pw.println(longPressOnPowerBehaviorToString(mLongPressOnPowerBehavior));
+        pw.print(prefix);
+                pw.print("mVeryLongPressOnPowerBehavior=");
+                pw.println(veryLongPressOnPowerBehaviorToString(mVeryLongPressOnPowerBehavior));
         pw.print(prefix);
                 pw.print("mDoublePressOnPowerBehavior=");
                 pw.println(multiPressOnPowerBehaviorToString(mDoublePressOnPowerBehavior));
@@ -8458,6 +8517,18 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                 return Integer.toString(behavior);
         }
     }
+
+    private static String veryLongPressOnPowerBehaviorToString(int behavior) {
+        switch (behavior) {
+            case VERY_LONG_PRESS_POWER_NOTHING:
+                return "VERY_LONG_PRESS_POWER_NOTHING";
+            case VERY_LONG_PRESS_POWER_GLOBAL_ACTIONS:
+                return "VERY_LONG_PRESS_POWER_GLOBAL_ACTIONS";
+            default:
+                return Integer.toString(behavior);
+        }
+    }
+
     private static String multiPressOnPowerBehaviorToString(int behavior) {
         switch (behavior) {
             case MULTI_PRESS_POWER_NOTHING:

@@ -26,10 +26,11 @@ import android.view.MotionEvent;
 import android.view.MotionEvent.PointerCoords;
 import android.view.MotionEvent.PointerProperties;
 import android.view.ViewConfiguration;
-import android.view.WindowManagerPolicy;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityManager;
 import android.view.accessibility.AccessibilityNodeInfo;
+
+import com.android.server.policy.WindowManagerPolicy;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -790,7 +791,7 @@ class TouchExplorer extends BaseEventStreamTransformation
      */
     private void sendAccessibilityEvent(int type) {
         AccessibilityManager accessibilityManager = AccessibilityManager.getInstance(mContext);
-        if (accessibilityManager.isEnabled()) {
+        if (accessibilityManager.isObservedEventType(type)) {
             AccessibilityEvent event = AccessibilityEvent.obtain(type);
             event.setWindowId(mAms.getActiveWindowId());
             accessibilityManager.sendAccessibilityEvent(event);

@@ -35,6 +35,7 @@ import android.telephony.NetworkScanRequest;
 import android.telephony.Rlog;
 import android.telephony.ServiceState;
 import android.telephony.SignalStrength;
+import android.telephony.data.DataProfile;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.telephony.BaseCommands;
@@ -49,7 +50,6 @@ import com.android.internal.telephony.SmsResponse;
 import com.android.internal.telephony.UUSInfo;
 import com.android.internal.telephony.cdma.CdmaSmsBroadcastConfigInfo;
 import com.android.internal.telephony.dataconnection.DataCallResponse;
-import com.android.internal.telephony.dataconnection.DataProfile;
 import com.android.internal.telephony.gsm.SmsBroadcastConfigInfo;
 import com.android.internal.telephony.gsm.SuppServiceNotification;
 import com.android.internal.telephony.uicc.IccCardStatus;
@@ -132,6 +132,7 @@ public class SimulatedCommands extends BaseCommands
 
     private boolean mDcSuccess = true;
     private DataCallResponse mDcResponse;
+    private boolean mIsRadioPowerFailResponse = false;
 
     //***** Constructor
     public
@@ -1188,11 +1189,17 @@ public class SimulatedCommands extends BaseCommands
 
     @Override
     public void setRadioPower(boolean on, Message result) {
+        if (mIsRadioPowerFailResponse) {
+            resultFail(result, null, new RuntimeException("setRadioPower failed!"));
+            return;
+        }
+
         if(on) {
             setRadioState(RadioState.RADIO_ON);
         } else {
             setRadioState(RadioState.RADIO_OFF);
         }
+        resultSuccess(result, null);
     }
 
 
@@ -2150,5 +2157,9 @@ public class SimulatedCommands extends BaseCommands
     public void setOnRestrictedStateChanged(Handler h, int what, Object obj) {
         super.setOnRestrictedStateChanged(h, what, obj);
         SimulatedCommandsVerifier.getInstance().setOnRestrictedStateChanged(h, what, obj);
+    }
+
+    public void setRadioPowerFailResponse(boolean fail) {
+        mIsRadioPowerFailResponse = fail;
     }
 }

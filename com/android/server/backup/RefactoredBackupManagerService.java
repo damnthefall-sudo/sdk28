@@ -48,7 +48,6 @@ import android.app.backup.IBackupObserver;
 import android.app.backup.IFullBackupRestoreObserver;
 import android.app.backup.IRestoreSession;
 import android.app.backup.ISelectBackupTransportCallback;
-import android.app.backup.SelectBackupTransportCallback;
 import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
@@ -103,6 +102,7 @@ import com.android.server.backup.fullbackup.PerformFullTransportBackupTask;
 import com.android.server.backup.internal.BackupHandler;
 import com.android.server.backup.internal.BackupRequest;
 import com.android.server.backup.internal.ClearDataObserver;
+import com.android.server.backup.internal.OnTaskFinishedListener;
 import com.android.server.backup.internal.Operation;
 import com.android.server.backup.internal.PerformInitializeTask;
 import com.android.server.backup.internal.ProvisionedObserver;
@@ -117,6 +117,7 @@ import com.android.server.backup.params.ClearRetryParams;
 import com.android.server.backup.params.RestoreParams;
 import com.android.server.backup.restore.ActiveRestoreSession;
 import com.android.server.backup.restore.PerformUnifiedRestoreTask;
+import com.android.server.backup.transport.TransportClient;
 import com.android.server.backup.utils.AppBackupUtils;
 import com.android.server.backup.utils.BackupManagerMonitorUtils;
 import com.android.server.backup.utils.BackupObserverUtils;
@@ -1585,14 +1586,36 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
             return BackupManager.ERROR_BACKUP_NOT_ALLOWED;
         }
 
+        // We're using pieces of the new binding on-demand infra-structure and the old always-bound
+        // infra-structure below this comment. The TransportManager.getCurrentTransportClient() line
+        // is using the new one and TransportManager.getCurrentTransportBinder() is using the old.
+        // This is weird but there is a reason.
+        // This is the natural place to put TransportManager.getCurrentTransportClient() because of
+        // the null handling below that should be the same for TransportClient.
+        // TransportClient.connect() would return a IBackupTransport for us (instead of using the
+        // old infra), but it may block and we don't want this in this thread.
+        // The only usage of transport in this method is for transport.transportDirName(). When the
+        // push-from-transport part of binding on-demand is in place we will replace the calls for
+        // IBackupTransport.transportDirName() with calls for
+        // TransportManager.transportDirName(transportName) or similar. So we'll leave the old piece
+        // here until we implement that.
+        // TODO(brufino): Remove always-bound code mTransportManager.getCurrentTransportBinder()
+        TransportClient transportClient =
+                mTransportManager.getCurrentTransportClient("BMS.requestBackup()");
         IBackupTransport transport = mTransportManager.getCurrentTransportBinder();
-        if (transport == null) {
+        if (transportClient == null || transport == null) {
+            if (transportClient != null) {
+                mTransportManager.disposeOfTransportClient(transportClient, "BMS.requestBackup()");
+            }
             BackupObserverUtils.sendBackupFinished(observer, BackupManager.ERROR_TRANSPORT_ABORTED);
             monitor = BackupManagerMonitorUtils.monitorEvent(monitor,
                     BackupManagerMonitor.LOG_EVENT_ID_TRANSPORT_IS_NULL,
                     null, BackupManagerMonitor.LOG_EVENT_CATEGORY_TRANSPORT, null);
             return BackupManager.ERROR_TRANSPORT_ABORTED;
         }
+
+        OnTaskFinishedListener listener =
+                caller -> mTransportManager.disposeOfTransportClient(transportClient, caller);
 
         ArrayList<String> fullBackupList = new ArrayList<>();
         ArrayList<String> kvBackupList = new ArrayList<>();
@@ -1640,8 +1663,8 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
         boolean nonIncrementalBackup = (flags & BackupManager.FLAG_NON_INCREMENTAL_BACKUP) != 0;
 
         Message msg = mBackupHandler.obtainMessage(MSG_REQUEST_BACKUP);
-        msg.obj = new BackupParams(transport, dirName, kvBackupList, fullBackupList, observer,
-                monitor, true, nonIncrementalBackup);
+        msg.obj = new BackupParams(transportClient, dirName, kvBackupList, fullBackupList, observer,
+                monitor, listener, true, nonIncrementalBackup);
         mBackupHandler.sendMessage(msg);
         return BackupManager.SUCCESS;
     }
@@ -2135,8 +2158,17 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
             mFullBackupQueue.remove(0);
             CountDownLatch latch = new CountDownLatch(1);
             String[] pkg = new String[]{entry.packageName};
-            mRunningFullBackupTask = new PerformFullTransportBackupTask(this, null, pkg, true,
-                    scheduledJob, latch, null, null, false /* userInitiated */);
+            mRunningFullBackupTask = PerformFullTransportBackupTask.newWithCurrentTransport(
+                    this,
+                    /* observer */ null,
+                    pkg,
+                    /* updateSchedule */ true,
+                    scheduledJob,
+                    latch,
+                    /* backupObserver */ null,
+                    /* monitor */ null,
+                    /* userInitiated */ false,
+                    "BMS.beginFullBackup()");
             // Acquiring wakelock for PerformFullTransportBackupTask before its start.
             mWakelock.acquire();
             (new Thread(mRunningFullBackupTask)).start();
@@ -2490,8 +2522,17 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
             final long oldId = Binder.clearCallingIdentity();
             try {
                 CountDownLatch latch = new CountDownLatch(1);
-                PerformFullTransportBackupTask task = new PerformFullTransportBackupTask(this, null,
-                        pkgNames, false, null, latch, null, null, false /* userInitiated */);
+                Runnable task = PerformFullTransportBackupTask.newWithCurrentTransport(
+                        this,
+                        /* observer */ null,
+                        pkgNames,
+                        /* updateSchedule */ false,
+                        /* runningJob */ null,
+                        latch,
+                        /* backupObserver */ null,
+                        /* monitor */ null,
+                        /* userInitiated */ false,
+                        "BMS.fullTransportBackup()");
                 // Acquiring wakelock for PerformFullTransportBackupTask before its start.
                 mWakelock.acquire();
                 (new Thread(task, "full-transport-master")).start();

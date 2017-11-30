@@ -801,6 +801,9 @@ class SettingsProtoDumpUtil {
                 Settings.Global.BLUETOOTH_PAN_PRIORITY_PREFIX,
                 GlobalSettingsProto.BLUETOOTH_PAN_PRIORITY_PREFIX);
         dumpSetting(s, p,
+                Settings.Global.BLUETOOTH_HEARING_AID_PRIORITY_PREFIX,
+                GlobalSettingsProto.BLUETOOTH_HEARING_AID_PRIORITY_PREFIX);
+        dumpSetting(s, p,
                 Settings.Global.ACTIVITY_MANAGER_CONSTANTS,
                 GlobalSettingsProto.ACTIVITY_MANAGER_CONSTANTS);
         dumpSetting(s, p,
@@ -869,6 +872,15 @@ class SettingsProtoDumpUtil {
         dumpSetting(s, p,
                 Settings.Global.WAIT_FOR_DEBUGGER,
                 GlobalSettingsProto.WAIT_FOR_DEBUGGER);
+        dumpSetting(s, p,
+                Settings.Global.ENABLE_GPU_DEBUG_LAYERS,
+                GlobalSettingsProto.ENABLE_GPU_DEBUG_LAYERS);
+        dumpSetting(s, p,
+                Settings.Global.GPU_DEBUG_APP,
+                GlobalSettingsProto.GPU_DEBUG_APP);
+        dumpSetting(s, p,
+                Settings.Global.GPU_DEBUG_LAYERS,
+                GlobalSettingsProto.GPU_DEBUG_LAYERS);
         // Settings.Global.SHOW_PROCESSES intentionally excluded since it's deprecated.
         dumpSetting(s, p,
                 Settings.Global.LOW_POWER_MODE,

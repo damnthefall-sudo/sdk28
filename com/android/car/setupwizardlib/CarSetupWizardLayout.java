@@ -23,6 +23,7 @@ import android.view.LayoutInflater;
 import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 
 
 /**
@@ -40,6 +41,8 @@ public class CarSetupWizardLayout extends LinearLayout {
      */
     private Button mPrimaryContinueButton;
     private Button mSecondaryContinueButton;
+
+    private ProgressBar mProgressBar;
 
     public CarSetupWizardLayout(Context context) {
         this(context, null);
@@ -84,6 +87,8 @@ public class CarSetupWizardLayout extends LinearLayout {
         String secondaryContinueButtonText;
         boolean secondaryContinueButtonEnabled;
 
+        boolean showProgressBar;
+
         try {
             showBackButton = attrArray.getBoolean(
                     R.styleable.CarSetupWizardLayout_showBackButton, true);
@@ -99,6 +104,8 @@ public class CarSetupWizardLayout extends LinearLayout {
                     R.styleable.CarSetupWizardLayout_secondaryContinueButtonText);
             secondaryContinueButtonEnabled = attrArray.getBoolean(
                     R.styleable.CarSetupWizardLayout_secondaryContinueButtonEnabled, true);
+            showProgressBar = attrArray.getBoolean(
+                    R.styleable.CarSetupWizardLayout_showProgressBar, false);
         } finally {
             attrArray.recycle();
         }
@@ -130,14 +137,16 @@ public class CarSetupWizardLayout extends LinearLayout {
             setSecondaryContinueButtonVisible(false);
         }
 
-        // TODO: Handle loading bar logic
+        mProgressBar = findViewById(R.id.progress_bar);
+        setProgressBarVisible(showProgressBar);
+
     }
 
     /**
      * Set a given button's visibility.
      */
-    private void setViewVisible(View button, boolean visible) {
-        button.setVisibility(visible ? View.VISIBLE : View.GONE);
+    private void setViewVisible(View view, boolean visible) {
+        view.setVisibility(visible ? View.VISIBLE : View.GONE);
     }
 
     /**
@@ -211,5 +220,12 @@ public class CarSetupWizardLayout extends LinearLayout {
      */
     public void setSecondaryContinueButtonVisible(boolean visible) {
         setViewVisible(mSecondaryContinueButton, visible);
+    }
+
+    /**
+     * Set the progress bar visibility to the given visibility.
+     */
+    public void setProgressBarVisible(boolean visible) {
+        setViewVisible(mProgressBar, visible);
     }
 }

@@ -134,7 +134,6 @@ class ActivityStarter {
     private static final int INVALID_LAUNCH_MODE = -1;
 
     private final ActivityManagerService mService;
-    private final IPackageManager mPackageManager;
     private final ActivityStackSupervisor mSupervisor;
     private final ActivityStartInterceptor mInterceptor;
 
@@ -234,9 +233,8 @@ class ActivityStarter {
         mIntentDelivered = false;
     }
 
-    ActivityStarter(ActivityManagerService service, IPackageManager packageManager) {
+    ActivityStarter(ActivityManagerService service) {
         mService = service;
-        mPackageManager = packageManager;
         mSupervisor = mService.mStackSupervisor;
         mInterceptor = new ActivityStartInterceptor(mService, mSupervisor);
     }
@@ -379,7 +377,7 @@ class ActivityStarter {
                     && sourceRecord.info.applicationInfo.uid != aInfo.applicationInfo.uid) {
                 try {
                     intent.addCategory(Intent.CATEGORY_VOICE);
-                    if (!mPackageManager.activitySupportsIntent(
+                    if (!mService.getPackageManager().activitySupportsIntent(
                             intent.getComponent(), intent, resolvedType)) {
                         Slog.w(TAG,
                                 "Activity being started in current voice task does not support voice: "
@@ -397,7 +395,7 @@ class ActivityStarter {
             // If the caller is starting a new voice session, just make sure the target
             // is actually allowing it to run this way.
             try {
-                if (!mPackageManager.activitySupportsIntent(intent.getComponent(),
+                if (!mService.getPackageManager().activitySupportsIntent(intent.getComponent(),
                         intent, resolvedType)) {
                     Slog.w(TAG,
                             "Activity being started in new voice task does not support: "
@@ -608,21 +606,9 @@ class ActivityStarter {
             return;
         }
 
-        if (startedActivityStack.inSplitScreenPrimaryWindowingMode()) {
-            final ActivityStack homeStack = mSupervisor.mHomeStack;
-            final boolean homeStackVisible = homeStack != null && homeStack.isVisible();
-            if (homeStackVisible) {
-                // We launch an activity while being in home stack, which means either launcher or
-                // recents into docked stack. We don't want the launched activity to be alone in a
-                // docked stack, so we want to immediately launch recents too.
-                if (DEBUG_RECENTS) Slog.d(TAG, "Scheduling recents launch.");
-                mService.mWindowManager.showRecentApps(true /* fromHome */);
-            }
-            return;
-        }
-
-        boolean clearedTask = (mLaunchFlags & (FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK))
-                == (FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK) && (mReuseTask != null);
+        final int clearTaskFlags = FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK;
+        boolean clearedTask = (mLaunchFlags & clearTaskFlags) == clearTaskFlags
+                && mReuseTask != null;
         if (startedActivityStack.inPinnedWindowingMode()
                 && (result == START_TASK_TO_FRONT || result == START_DELIVERED_TO_TOP
                 || clearedTask)) {
@@ -1758,7 +1744,8 @@ class ActivityStarter {
                     mSupervisor.getNextTaskIdForUserLocked(mStartActivity.userId),
                     mNewTaskInfo != null ? mNewTaskInfo : mStartActivity.info,
                     mNewTaskIntent != null ? mNewTaskIntent : mIntent, mVoiceSession,
-                    mVoiceInteractor, !mLaunchTaskBehind /* toTop */);
+                    mVoiceInteractor, !mLaunchTaskBehind /* toTop */, mStartActivity, mSourceRecord,
+                    mOptions);
             addOrReparentStartingActivity(task, "setTaskFromReuseOrCreateNewTask - mReuseTask");
             updateBounds(mStartActivity.getTask(), mLaunchBounds);
 
@@ -1967,7 +1954,7 @@ class ActivityStarter {
         final ActivityRecord prev = mTargetStack.getTopActivity();
         final TaskRecord task = (prev != null) ? prev.getTask() : mTargetStack.createTaskRecord(
                 mSupervisor.getNextTaskIdForUserLocked(mStartActivity.userId), mStartActivity.info,
-                mIntent, null, null, true);
+                mIntent, null, null, true, mStartActivity, mSourceRecord, mOptions);
         addOrReparentStartingActivity(task, "setTaskToCurrentTopOrCreateNewTask");
         mTargetStack.positionChildWindowContainerAtTop(task);
         if (DEBUG_TASKS) Slog.v(TAG_TASKS, "Starting new activity " + mStartActivity
@@ -2124,18 +2111,13 @@ class ActivityStarter {
             return mReuseTask.getStack();
         }
 
-        final int vrDisplayId = mPreferredDisplayId == mService.mVr2dDisplayId
-                ? mPreferredDisplayId : INVALID_DISPLAY;
-        final ActivityStack launchStack = mSupervisor.getLaunchStack(r, aOptions, task, ON_TOP,
-                vrDisplayId);
-
-        if (launchStack != null) {
-            return launchStack;
-        }
-
         if (((launchFlags & FLAG_ACTIVITY_LAUNCH_ADJACENT) == 0)
                  || mPreferredDisplayId != DEFAULT_DISPLAY) {
-            return null;
+            // We don't pass in the default display id into the get launch stack call so it can do a
+            // full resolution.
+            final int candidateDisplay =
+                    mPreferredDisplayId != DEFAULT_DISPLAY ? mPreferredDisplayId : INVALID_DISPLAY;
+            return mSupervisor.getLaunchStack(r, aOptions, task, ON_TOP, candidateDisplay);
         }
         // Otherwise handle adjacent launch.
 
@@ -2167,7 +2149,7 @@ class ActivityStarter {
                         mSupervisor.getDefaultDisplay().getSplitScreenPrimaryStack();
                 if (dockedStack != null && !dockedStack.shouldBeVisible(r)) {
                     // There is a docked stack, but it isn't visible, so we can't launch into that.
-                    return null;
+                    return mSupervisor.getLaunchStack(r, aOptions, task, ON_TOP);
                 } else {
                     return dockedStack;
                 }
