@@ -17,7 +17,9 @@
 package androidx.app.slice.widget;
 
 import static android.app.slice.Slice.HINT_ACTIONS;
-import static android.app.slice.SliceItem.FORMAT_COLOR;
+import static android.app.slice.Slice.HINT_HORIZONTAL;
+import static android.app.slice.Slice.SUBTYPE_COLOR;
+import static android.app.slice.SliceItem.FORMAT_INT;
 import static android.app.slice.SliceItem.FORMAT_SLICE;
 
 import android.arch.lifecycle.Observer;
@@ -32,7 +34,6 @@ import android.util.AttributeSet;
 import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.FrameLayout;
 
 import java.util.List;
 
@@ -80,21 +81,22 @@ public class SliceView extends ViewGroup implements Observer<Slice> {
      * @hide
      */
     @RestrictTo(RestrictTo.Scope.LIBRARY)
-    public abstract static class SliceModeView extends FrameLayout {
-
-        public SliceModeView(Context context) {
-            super(context);
-        }
+    public interface SliceModeView {
 
         /**
          * @return the mode of the slice being presented.
          */
-        public abstract int getMode();
+        int getMode();
 
         /**
          * @param slice the slice to show in this view.
          */
-        public abstract void setSlice(Slice slice);
+        void setSlice(Slice slice);
+
+        /**
+         * @return the view.
+         */
+        View getView();
     }
 
     /**
@@ -152,7 +154,7 @@ public class SliceView extends ViewGroup implements Observer<Slice> {
         mActions = new ActionRow(getContext(), true);
         mActions.setBackground(new ColorDrawable(0xffeeeeee));
         mCurrentView = new LargeTemplateView(getContext());
-        addView(mCurrentView, getChildLp(mCurrentView));
+        addView(mCurrentView.getView(), getChildLp(mCurrentView.getView()));
         addView(mActions, getChildLp(mActions));
         mShortcutSize = getContext().getResources()
                 .getDimensionPixelSize(R.dimen.abc_slice_shortcut_size);
@@ -173,17 +175,18 @@ public class SliceView extends ViewGroup implements Observer<Slice> {
                 ? mActions.getMeasuredHeight()
                 : 0;
         int newHeightSpec = MeasureSpec.makeMeasureSpec(
-                mCurrentView.getMeasuredHeight() + actionHeight, MeasureSpec.EXACTLY);
+                mCurrentView.getView().getMeasuredHeight() + actionHeight, MeasureSpec.EXACTLY);
         setMeasuredDimension(width, newHeightSpec);
     }
 
     @Override
     protected void onLayout(boolean changed, int l, int t, int r, int b) {
-        mCurrentView.layout(0, 0, mCurrentView.getMeasuredWidth(),
-                mCurrentView.getMeasuredHeight());
+        View v = mCurrentView.getView();
+        v.layout(0, 0, v.getMeasuredWidth(),
+                v.getMeasuredHeight());
         if (mActions.getVisibility() != View.GONE) {
-            mActions.layout(0, mCurrentView.getMeasuredHeight(), mActions.getMeasuredWidth(),
-                    mCurrentView.getMeasuredHeight() + mActions.getMeasuredHeight());
+            mActions.layout(0, v.getMeasuredHeight(), mActions.getMeasuredWidth(),
+                    v.getMeasuredHeight() + mActions.getMeasuredHeight());
         }
     }
 
@@ -256,7 +259,12 @@ public class SliceView extends ViewGroup implements Observer<Slice> {
             case MODE_SHORTCUT:
                 return new ShortcutView(getContext());
             case MODE_SMALL:
-                return new SmallTemplateView(getContext());
+                // Check if it's horizontal
+                if (SliceQuery.hasHints(mCurrentSlice, HINT_HORIZONTAL)) {
+                    return new GridRowView(getContext());
+                } else {
+                    return new RowView(getContext());
+                }
         }
         return new LargeTemplateView(getContext());
     }
@@ -266,7 +274,7 @@ public class SliceView extends ViewGroup implements Observer<Slice> {
             return;
         }
         // TODO: Smarter mapping here from one state to the next.
-        SliceItem color = SliceQuery.find(mCurrentSlice, FORMAT_COLOR);
+        SliceItem color = SliceQuery.findSubtype(mCurrentSlice, FORMAT_INT, SUBTYPE_COLOR);
         List<SliceItem> items = mCurrentSlice.getItems();
         SliceItem actionRow = SliceQuery.find(mCurrentSlice, FORMAT_SLICE,
                 HINT_ACTIONS,
@@ -277,17 +285,17 @@ public class SliceView extends ViewGroup implements Observer<Slice> {
         } else {
             removeAllViews();
             mCurrentView = createView(mode);
-            addView(mCurrentView, getChildLp(mCurrentView));
+            addView(mCurrentView.getView(), getChildLp(mCurrentView.getView()));
             addView(mActions, getChildLp(mActions));
         }
         if (mode == MODE_LARGE) {
             ((LargeTemplateView) mCurrentView).setScrollable(mIsScrollable);
         }
         if (items.size() > 1 || (items.size() != 0 && items.get(0) != actionRow)) {
-            mCurrentView.setVisibility(View.VISIBLE);
+            mCurrentView.getView().setVisibility(View.VISIBLE);
             mCurrentView.setSlice(mCurrentSlice);
         } else {
-            mCurrentView.setVisibility(View.GONE);
+            mCurrentView.getView().setVisibility(View.GONE);
         }
 
         boolean showActions = mShowActions && actionRow != null

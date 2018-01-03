@@ -1645,6 +1645,11 @@ public class AudioService extends IAudioService.Stub
     };
 
     private int getNewRingerMode(int stream, int index, int flags) {
+        // setRingerMode does nothing if the device is single volume,so the value would be unchanged
+        if (mIsSingleVolume) {
+            return getRingerModeExternal();
+        }
+
         // setting volume on ui sounds stream type also controls silent mode
         if (((flags & AudioManager.FLAG_ALLOW_RINGER_MODES) != 0) ||
                 (stream == getUiSoundsStreamType())) {
@@ -2198,7 +2203,7 @@ public class AudioService extends IAudioService.Stub
         return (mStreamStates[streamType].getMaxIndex() + 5) / 10;
     }
 
-    /** @see AudioManager#getStreamMinVolume(int) */
+    /** @see AudioManager#getStreamMinVolumeInt(int) */
     public int getStreamMinVolume(int streamType) {
         ensureValidStreamType(streamType);
         return (mStreamStates[streamType].getMinIndex() + 5) / 10;
@@ -2246,12 +2251,15 @@ public class AudioService extends IAudioService.Stub
         if (DEBUG_VOL) {
             Log.d(TAG, String.format("Mic mute %s, user=%d", on, userId));
         }
-        // If mute is for current user actually mute, else just persist the setting
-        // which will be loaded on user switch.
+        // only mute for the current user
         if (getCurrentUserId() == userId) {
+            final boolean currentMute = AudioSystem.isMicrophoneMuted();
             AudioSystem.muteMicrophone(on);
+            if (on != currentMute) {
+                mContext.sendBroadcast(new Intent(AudioManager.ACTION_MICROPHONE_MUTE_CHANGED)
+                        .setFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY));
+            }
         }
-        // Post a persist microphone msg.
     }
 
     @Override
@@ -3691,7 +3699,7 @@ public class AudioService extends IAudioService.Stub
     private int checkForRingerModeChange(int oldIndex, int direction, int step, boolean isMuted,
             String caller, int flags) {
         int result = FLAG_ADJUST_VOLUME;
-        if (isPlatformTelevision()) {
+        if (isPlatformTelevision() || mIsSingleVolume) {
             return result;
         }
 
@@ -3879,7 +3887,8 @@ public class AudioService extends IAudioService.Stub
         IsInCall = telecomManager.isInCall();
         Binder.restoreCallingIdentity(ident);
 
-        return (IsInCall || getMode() == AudioManager.MODE_IN_COMMUNICATION);
+        return (IsInCall || getMode() == AudioManager.MODE_IN_COMMUNICATION ||
+                getMode() == AudioManager.MODE_IN_CALL);
     }
 
     /**

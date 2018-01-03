@@ -52,6 +52,13 @@ import java.util.concurrent.locks.ReentrantLock;
 //@SuppressWarnings({"unused", "WeakerAccess"})
 public abstract class RoomDatabase {
     private static final String DB_IMPL_SUFFIX = "_Impl";
+    /**
+     * Unfortunately, we cannot read this value so we are only setting it to the SQLite default.
+     *
+     * @hide
+     */
+    @RestrictTo(RestrictTo.Scope.LIBRARY_GROUP)
+    public static final int MAX_BIND_PARAMETER_CNT = 999;
     // set by the generated open helper.
     protected volatile SupportSQLiteDatabase mDatabase;
     private SupportSQLiteOpenHelper mOpenHelper;
@@ -90,7 +97,7 @@ public abstract class RoomDatabase {
      * @param configuration The database configuration.
      */
     @CallSuper
-    public void init(DatabaseConfiguration configuration) {
+    public void init(@NonNull DatabaseConfiguration configuration) {
         mOpenHelper = createOpenHelper(configuration);
         mCallbacks = configuration.callbacks;
         mAllowMainThreadQueries = configuration.allowMainThreadQueries;
@@ -101,6 +108,7 @@ public abstract class RoomDatabase {
      *
      * @return The SQLite open helper used by this database.
      */
+    @NonNull
     public SupportSQLiteOpenHelper getOpenHelper() {
         return mOpenHelper;
     }
@@ -113,6 +121,7 @@ public abstract class RoomDatabase {
      * @param config The configuration of the Room database.
      * @return A new SupportSQLiteOpenHelper to be used while connecting to the database.
      */
+    @NonNull
     protected abstract SupportSQLiteOpenHelper createOpenHelper(DatabaseConfiguration config);
 
     /**
@@ -122,6 +131,7 @@ public abstract class RoomDatabase {
      *
      * @return Creates a new InvalidationTracker.
      */
+    @NonNull
     protected abstract InvalidationTracker createInvalidationTracker();
 
     /**
@@ -199,7 +209,7 @@ public abstract class RoomDatabase {
      * @param sql The query to compile.
      * @return The compiled query.
      */
-    public SupportSQLiteStatement compileStatement(String sql) {
+    public SupportSQLiteStatement compileStatement(@NonNull String sql) {
         assertNotMainThread();
         return mOpenHelper.getWritableDatabase().compileStatement(sql);
     }
@@ -238,7 +248,7 @@ public abstract class RoomDatabase {
      *
      * @param body The piece of code to execute.
      */
-    public void runInTransaction(Runnable body) {
+    public void runInTransaction(@NonNull Runnable body) {
         beginTransaction();
         try {
             body.run();
@@ -256,7 +266,7 @@ public abstract class RoomDatabase {
      * @param <V>  The type of the return value.
      * @return The value returned from the {@link Callable}.
      */
-    public <V> V runInTransaction(Callable<V> body) {
+    public <V> V runInTransaction(@NonNull Callable<V> body) {
         beginTransaction();
         try {
             V result = body.call();
@@ -278,7 +288,7 @@ public abstract class RoomDatabase {
      *
      * @param db The database instance.
      */
-    protected void internalInitInvalidationTracker(SupportSQLiteDatabase db) {
+    protected void internalInitInvalidationTracker(@NonNull SupportSQLiteDatabase db) {
         mInvalidationTracker.internalInit(db);
     }
 
@@ -290,6 +300,7 @@ public abstract class RoomDatabase {
      *
      * @return The invalidation tracker for the database.
      */
+    @NonNull
     public InvalidationTracker getInvalidationTracker() {
         return mInvalidationTracker;
     }
@@ -365,7 +376,7 @@ public abstract class RoomDatabase {
          * @return this
          */
         @NonNull
-        public Builder<T> addMigrations(Migration... migrations) {
+        public Builder<T> addMigrations(@NonNull Migration... migrations) {
             mMigrationContainer.addMigrations(migrations);
             return this;
         }
@@ -471,7 +482,7 @@ public abstract class RoomDatabase {
          *
          * @param migrations List of available migrations.
          */
-        public void addMigrations(Migration... migrations) {
+        public void addMigrations(@NonNull Migration... migrations) {
             for (Migration migration : migrations) {
                 addMigration(migration);
             }

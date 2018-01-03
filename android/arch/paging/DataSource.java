@@ -30,11 +30,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * Base class for loading pages of snapshot data into a {@link PagedList}.
  * <p>
  * DataSource is queried to load pages of content into a {@link PagedList}. A PagedList can grow as
- * it loads more data, but the data loaded cannot be updated.
- * <p>
- * A PagedList / DataSource pair serve as a snapshot of the data set being loaded. If the
- * underlying data set is modified, a new PagedList / DataSource pair must be created to represent
- * the new data.
+ * it loads more data, but the data loaded cannot be updated. If the underlying data set is
+ * modified, a new PagedList / DataSource pair must be created to represent the new data.
  * <h4>Loading Pages</h4>
  * PagedList queries data from its DataSource in response to loading hints. {@link PagedListAdapter}
  * calls {@link PagedList#loadAround(int)} to load content as the user scrolls in a RecyclerView.
@@ -68,18 +65,23 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * copy changes, invalidate the previous DataSource, and a new one wrapping the new state of the
  * snapshot can be created.
  * <h4>Implementing a DataSource</h4>
- * To implement, extend either the {@link KeyedDataSource}, or {@link PositionalDataSource}
- * subclass. Choose based on whether each load operation is based on the position of the data in the
- * list.
+ * To implement, extend one of the subclasses: {@link PageKeyedDataSource},
+ * {@link ItemKeyedDataSource}, or {@link PositionalDataSource}.
  * <p>
- * Use {@link KeyedDataSource} if you need to use data from item {@code N-1} to load item
+ * Use {@link PageKeyedDataSource} if pages you load embed keys for loading adjacent pages. For
+ * example a network response that returns some items, and a next/previous page links.
+ * <p>
+ * Use {@link ItemKeyedDataSource} if you need to use data from item {@code N-1} to load item
  * {@code N}. For example, if requesting the backend for the next comments in the list
  * requires the ID or timestamp of the most recent loaded comment, or if querying the next users
  * from a name-sorted database query requires the name and unique ID of the previous.
  * <p>
- * Use {@link PositionalDataSource} if you can load arbitrary pages based solely on position
- * information, and can provide a fixed item count. PositionalDataSource supports querying pages at
- * arbitrary positions, so can provide data to PagedLists in arbitrary order.
+ * Use {@link PositionalDataSource} if you can load pages of a requested size at arbitrary
+ * positions, and provide a fixed item count. PositionalDataSource supports querying pages at
+ * arbitrary positions, so can provide data to PagedLists in arbitrary order. Note that
+ * PositionalDataSource is required to respect page size for efficient tiling. If you want to
+ * override page size (e.g. when network page size constraints are only known at runtime), use one
+ * of the other DataSource classes.
  * <p>
  * Because a {@code null} item indicates a placeholder in {@link PagedList}, DataSource may not
  * return {@code null} items in lists that it loads. This is so that users of the PagedList
@@ -115,8 +117,13 @@ public abstract class DataSource<Key, Value> {
         /**
          * Create a DataSource.
          * <p>
-         * The DataSource should invalidate itself if the snapshot is no longer valid, and a new
-         * DataSource should be queried from the Factory.
+         * The DataSource should invalidate itself if the snapshot is no longer valid. If a
+         * DataSource becomes invalid, the only way to query more data is to create a new DataSource
+         * from the Factory.
+         * <p>
+         * {@link LivePagedListBuilder} for example will construct a new PagedList and DataSource
+         * when the current DataSource is invalidated, and pass the new PagedList through the
+         * {@code LiveData<PagedList>} to observers.
          *
          * @return the new DataSource.
          */
@@ -159,11 +166,11 @@ public abstract class DataSource<Key, Value> {
         private Executor mPostExecutor = null;
         private boolean mHasSignalled = false;
 
-        BaseLoadCallback(@PageResult.ResultType int resultType, @NonNull DataSource dataSource,
+        BaseLoadCallback(@NonNull DataSource dataSource, @PageResult.ResultType int resultType,
                 @Nullable Executor mainThreadExecutor, @NonNull PageResult.Receiver<T> receiver) {
+            mDataSource = dataSource;
             mResultType = resultType;
             mPostExecutor = mainThreadExecutor;
-            mDataSource = dataSource;
             mReceiver = receiver;
         }
 
@@ -173,19 +180,29 @@ public abstract class DataSource<Key, Value> {
             }
         }
 
+        /**
+         * Call before verifying args, or dispatching actul results
+         *
+         * @return true if DataSource was invalid, and invalid result dispatched
+         */
+        boolean dispatchInvalidResultIfInvalid() {
+            if (mDataSource.isInvalid()) {
+                dispatchResultToReceiver(PageResult.<T>getInvalidResult());
+                return true;
+            }
+            return false;
+        }
+
         void dispatchResultToReceiver(final @NonNull PageResult<T> result) {
             Executor executor;
             synchronized (mSignalLock) {
                 if (mHasSignalled) {
                     throw new IllegalStateException(
-                            "LoadCallback already dispatched, cannot dispatch again.");
+                            "callback.onResult already called, cannot call again.");
                 }
                 mHasSignalled = true;
                 executor = mPostExecutor;
             }
-
-            final PageResult<T> resolvedResult =
-                    mDataSource.isInvalid() ? PageResult.<T>getInvalidResult() : result;
 
             if (executor != null) {
                 executor.execute(new Runnable() {

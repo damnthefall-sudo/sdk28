@@ -65,6 +65,12 @@ class ActivityDisplay extends ConfigurationContainer<ActivityStack> {
     static final int POSITION_TOP = Integer.MAX_VALUE;
     static final int POSITION_BOTTOM = Integer.MIN_VALUE;
 
+
+    /**
+     * Counter for next free stack ID to use for dynamic activity stacks. Unique across displays.
+     */
+    private static int sNextFreeStackId = 0;
+
     private ActivityStackSupervisor mSupervisor;
     /** Actual Display this object tracks. */
     int mDisplayId;
@@ -231,6 +237,10 @@ class ActivityDisplay extends ConfigurationContainer<ActivityStack> {
         return getOrCreateStack(windowingMode, activityType, onTop);
     }
 
+    private int getNextStackId() {
+        return sNextFreeStackId++;
+    }
+
     /**
      * Creates a stack matching the input windowing mode and activity type on this display.
      * @param windowingMode The windowing mode the stack should be created in. If
@@ -278,7 +288,7 @@ class ActivityDisplay extends ConfigurationContainer<ActivityStack> {
             }
         }
 
-        final int stackId = mSupervisor.getNextStackId();
+        final int stackId = getNextStackId();
         return createStackUnchecked(windowingMode, activityType, stackId, onTop);
     }
 
@@ -399,15 +409,16 @@ class ActivityDisplay extends ConfigurationContainer<ActivityStack> {
                 otherStack.setWindowingMode(WINDOWING_MODE_FULLSCREEN);
             }
         } finally {
-            if (mHomeStack != null && !isTopStack(mHomeStack)) {
+            final ActivityStack topFullscreenStack =
+                    getStack(WINDOWING_MODE_FULLSCREEN, ACTIVITY_TYPE_STANDARD);
+            if (topFullscreenStack != null && mHomeStack != null && !isTopStack(mHomeStack)) {
                 // Whenever split-screen is dismissed we want the home stack directly behind the
-                // currently top stack so it shows up when the top stack is finished.
-                final ActivityStack topStack = getTopStack();
+                // current top fullscreen stack so it shows up when the top stack is finished.
                 // TODO: Would be better to use ActivityDisplay.positionChildAt() for this, however
                 // ActivityDisplay doesn't have a direct controller to WM side yet. We can switch
                 // once we have that.
                 mHomeStack.moveToFront("onSplitScreenModeDismissed");
-                topStack.moveToFront("onSplitScreenModeDismissed");
+                topFullscreenStack.moveToFront("onSplitScreenModeDismissed");
             }
             mSupervisor.mWindowManager.continueSurfaceLayout();
         }
@@ -423,7 +434,9 @@ class ActivityDisplay extends ConfigurationContainer<ActivityStack> {
                         || !otherStack.affectedBySplitScreenResize()) {
                     continue;
                 }
-                otherStack.setWindowingMode(WINDOWING_MODE_SPLIT_SCREEN_SECONDARY);
+                otherStack.setWindowingMode(WINDOWING_MODE_SPLIT_SCREEN_SECONDARY,
+                        false /* animate */, false /* showRecents */,
+                        true /* enteringSplitScreenMode */);
             }
         } finally {
             mSupervisor.mWindowManager.continueSurfaceLayout();
@@ -541,6 +554,16 @@ class ActivityDisplay extends ConfigurationContainer<ActivityStack> {
 
     boolean isTopStack(ActivityStack stack) {
         return stack == getTopStack();
+    }
+
+    boolean isTopFullscreenStack(ActivityStack stack) {
+        for (int i = mStacks.size() - 1; i >= 0; --i) {
+            final ActivityStack current = mStacks.get(i);
+            if (current.getWindowingMode() == WINDOWING_MODE_FULLSCREEN) {
+                return current == stack;
+            }
+        }
+        return false;
     }
 
     int getIndexOf(ActivityStack stack) {

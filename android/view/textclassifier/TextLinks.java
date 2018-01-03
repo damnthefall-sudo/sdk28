@@ -22,6 +22,8 @@ import android.annotation.Nullable;
 import android.os.LocaleList;
 import android.text.SpannableString;
 import android.text.style.ClickableSpan;
+import android.view.View;
+import android.widget.TextView;
 
 import com.android.internal.util.Preconditions;
 
@@ -103,11 +105,7 @@ public final class TextLinks {
             mOriginalText = originalText;
             mStart = start;
             mEnd = end;
-            mEntityScores = new EntityConfidence<>();
-
-            for (Map.Entry<String, Float> entry : entityScores.entrySet()) {
-                mEntityScores.setEntityType(entry.getKey(), entry.getValue());
-            }
+            mEntityScores = new EntityConfidence<>(entityScores);
         }
 
         /**
@@ -163,14 +161,26 @@ public final class TextLinks {
     public static final class Options {
 
         private LocaleList mDefaultLocales;
+        private TextClassifier.EntityConfig mEntityConfig;
 
         /**
-         * @param defaultLocales ordered list of locale preferences that may be used to disambiguate
-         *      the provided text. If no locale preferences exist, set this to null or an empty
-         *      locale list.
+         * @param defaultLocales ordered list of locale preferences that may be used to
+         *                       disambiguate the provided text. If no locale preferences exist,
+         *                       set this to null or an empty locale list.
          */
         public Options setDefaultLocales(@Nullable LocaleList defaultLocales) {
             mDefaultLocales = defaultLocales;
+            return this;
+        }
+
+        /**
+         * Sets the entity configuration to use. This determines what types of entities the
+         * TextClassifier will look for.
+         *
+         * @param entityConfig EntityConfig to use
+         */
+        public Options setEntityConfig(@Nullable TextClassifier.EntityConfig entityConfig) {
+            mEntityConfig = entityConfig;
             return this;
         }
 
@@ -181,6 +191,15 @@ public final class TextLinks {
         @Nullable
         public LocaleList getDefaultLocales() {
             return mDefaultLocales;
+        }
+
+        /**
+         * @return The config representing the set of entities to look for.
+         * @see #setEntityConfig(TextClassifier.EntityConfig)
+         */
+        @Nullable
+        public TextClassifier.EntityConfig getEntityConfig() {
+            return mEntityConfig;
         }
     }
 
@@ -193,9 +212,14 @@ public final class TextLinks {
      * @hide
      */
     public static final Function<TextLink, ClickableSpan> DEFAULT_SPAN_FACTORY =
-            textLink -> {
-                // TODO: Implement.
-                throw new UnsupportedOperationException("Not yet implemented");
+            textLink -> new ClickableSpan() {
+                @Override
+                public void onClick(View widget) {
+                    if (widget instanceof TextView) {
+                        final TextView textView = (TextView) widget;
+                        textView.requestActionMode(textLink);
+                    }
+                }
             };
 
     /**

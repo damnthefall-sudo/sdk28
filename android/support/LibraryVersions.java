@@ -36,14 +36,24 @@ public class LibraryVersions {
     public static final Version ROOM = FLATFOOT_1_0_BATCH;
 
     /**
-     * Version code for Lifecycle extensions (live data, view model etc)
+     * Version code for Lifecycle extensions (ProcessLifecycleOwner, Fragment support)
      */
-    public static final Version LIFECYCLES_EXT = FLATFOOT_1_0_BATCH;
+    public static final Version LIFECYCLES_EXT = new Version("1.1.0-SNAPSHOT");
+
+    /**
+     * Version code for Lifecycle LiveData
+     */
+    public static final Version LIFECYCLES_LIVEDATA = LIFECYCLES_EXT;
+
+    /**
+     * Version code for Lifecycle ViewModel
+     */
+    public static final Version LIFECYCLES_VIEWMODEL = LIFECYCLES_EXT;
 
     /**
      * Version code for RecyclerView & Room paging
      */
-    public static final Version PAGING = new Version("1.0.0-alpha3");
+    public static final Version PAGING = new Version("1.0.0-alpha4-1");
 
     private static final Version LIFECYCLES = new Version("1.0.3");
 

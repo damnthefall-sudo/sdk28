@@ -53,6 +53,7 @@ import android.hardware.radio.V1_0.SimApdu;
 import android.hardware.radio.V1_0.SmsWriteArgs;
 import android.hardware.radio.V1_0.UusInfo;
 import android.net.ConnectivityManager;
+import android.net.NetworkUtils;
 import android.os.AsyncResult;
 import android.os.Build;
 import android.os.Handler;
@@ -81,7 +82,9 @@ import android.telephony.SignalStrength;
 import android.telephony.SmsManager;
 import android.telephony.TelephonyHistogram;
 import android.telephony.TelephonyManager;
+import android.telephony.data.DataCallResponse;
 import android.telephony.data.DataProfile;
+import android.telephony.data.InterfaceAddress;
 import android.text.TextUtils;
 import android.util.Log;
 import android.util.SparseArray;
@@ -91,10 +94,10 @@ import com.android.internal.telephony.cat.ComprehensionTlv;
 import com.android.internal.telephony.cat.ComprehensionTlvTag;
 import com.android.internal.telephony.cdma.CdmaInformationRecords;
 import com.android.internal.telephony.cdma.CdmaSmsBroadcastConfigInfo;
-import com.android.internal.telephony.dataconnection.DataCallResponse;
 import com.android.internal.telephony.gsm.SmsBroadcastConfigInfo;
 import com.android.internal.telephony.metrics.TelephonyMetrics;
 import com.android.internal.telephony.nano.TelephonyProto.SmsSession;
+import com.android.internal.telephony.uicc.IccSlotStatus;
 import com.android.internal.telephony.uicc.IccUtils;
 
 import java.io.ByteArrayInputStream;
@@ -102,6 +105,8 @@ import java.io.DataInputStream;
 import java.io.FileDescriptor;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -115,6 +120,7 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public class RIL extends BaseCommands implements CommandsInterface {
     static final String RILJ_LOG_TAG = "RILJ";
+    static final String RILJ_WAKELOCK_TAG = "*telephony-radio*";
     // Have a separate wakelock instance for Ack
     static final String RILJ_ACK_WAKELOCK_NAME = "RILJ_ACK_WL";
     static final boolean RILJ_LOGD = true;
@@ -419,7 +425,7 @@ public class RIL extends BaseCommands implements CommandsInterface {
         mRadioProxyDeathRecipient = new RadioProxyDeathRecipient();
 
         PowerManager pm = (PowerManager)context.getSystemService(Context.POWER_SERVICE);
-        mWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, RILJ_LOG_TAG);
+        mWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, RILJ_WAKELOCK_TAG);
         mWakeLock.setReferenceCounted(false);
         mAckWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, RILJ_ACK_WAKELOCK_NAME);
         mAckWakeLock.setReferenceCounted(false);
@@ -494,6 +500,69 @@ public class RIL extends BaseCommands implements CommandsInterface {
                 radioProxy.getIccCardStatus(rr.mSerial);
             } catch (RemoteException | RuntimeException e) {
                 handleRadioProxyExceptionForRR(rr, "getIccCardStatus", e);
+            }
+        }
+    }
+
+    @Override
+    public void getIccSlotsStatus(Message result) {
+        IRadio radioProxy = getRadioProxy(result);
+        if (radioProxy != null) {
+            android.hardware.radio.V1_2.IRadio radioProxy12 =
+                    android.hardware.radio.V1_2.IRadio.castFrom(radioProxy);
+            if (radioProxy12 == null) {
+                if (result != null) {
+                    AsyncResult.forMessage(result, null,
+                            CommandException.fromRilErrno(REQUEST_NOT_SUPPORTED));
+                    result.sendToTarget();
+                }
+            } else {
+                RILRequest rr = obtainRequest(RIL_REQUEST_GET_SLOT_STATUS, result,
+                        mRILDefaultWorkSource);
+
+                if (RILJ_LOGD) {
+                    riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
+                }
+
+                try {
+                    radioProxy12.getSimSlotsStatus(rr.mSerial);
+                } catch (RemoteException | RuntimeException e) {
+                    handleRadioProxyExceptionForRR(rr, "getIccSlotStatus", e);
+                }
+            }
+        }
+    }
+
+    @Override
+    public void setLogicalToPhysicalSlotMapping(int[] physicalSlots, Message result) {
+        IRadio radioProxy = getRadioProxy(result);
+        if (radioProxy != null) {
+            android.hardware.radio.V1_2.IRadio radioProxy12 =
+                    android.hardware.radio.V1_2.IRadio.castFrom(radioProxy);
+            if (radioProxy12 == null) {
+                if (result != null) {
+                    AsyncResult.forMessage(result, null,
+                            CommandException.fromRilErrno(REQUEST_NOT_SUPPORTED));
+                    result.sendToTarget();
+                }
+            } else {
+                ArrayList<Integer> mapping = new ArrayList<>();
+                for (int slot : physicalSlots) {
+                    mapping.add(new Integer(slot));
+                }
+
+                RILRequest rr = obtainRequest(RIL_REQUEST_SET_LOGICAL_TO_PHYSICAL_SLOT_MAPPING,
+                        result, mRILDefaultWorkSource);
+
+                if (RILJ_LOGD) {
+                    riljLog(rr.serialString() + "> " + requestToString(rr.mRequest));
+                }
+
+                try {
+                    radioProxy12.setSimSlotsMapping(rr.mSerial, mapping);
+                } catch (RemoteException | RuntimeException e) {
+                    handleRadioProxyExceptionForRR(rr, "setLogicalToPhysicalSlotMapping", e);
+                }
             }
         }
     }
@@ -1114,16 +1183,84 @@ public class RIL extends BaseCommands implements CommandsInterface {
      * @return converted DataCallResponse object
      */
     static DataCallResponse convertDataCallResult(SetupDataCallResult dcResult) {
+
+        // Process address
+        String[] addresses = null;
+        if (!TextUtils.isEmpty(dcResult.addresses)) {
+            addresses = dcResult.addresses.split(" ");
+        }
+
+        List<InterfaceAddress> iaList = new ArrayList<>();
+        if (addresses != null) {
+            for (String address : addresses) {
+                address = address.trim();
+                if (address.isEmpty()) continue;
+
+                String[] ap = address.split("/");
+                int addrPrefixLen = 0;
+                if (ap.length == 2) {
+                    addrPrefixLen = Integer.parseInt(ap[1]);
+                }
+
+                try {
+                    InterfaceAddress ia = new InterfaceAddress(ap[0], addrPrefixLen);
+                    iaList.add(ia);
+                } catch (UnknownHostException e) {
+                    Rlog.e(RILJ_LOG_TAG, "Unknown host exception: " + e);
+                }
+            }
+        }
+
+        // Process dns
+        String[] dnses = null;
+        if (!TextUtils.isEmpty(dcResult.dnses)) {
+            dnses = dcResult.dnses.split(" ");
+        }
+
+        List<InetAddress> dnsList = new ArrayList<>();
+        if (dnses != null) {
+            for (String dns : dnses) {
+                dns = dns.trim();
+                InetAddress ia;
+                try {
+                    ia = NetworkUtils.numericToInetAddress(dns);
+                    dnsList.add(ia);
+                } catch (IllegalArgumentException e) {
+                    Rlog.e(RILJ_LOG_TAG, "Unknown dns: " + dns + ", exception = " + e);
+                }
+            }
+        }
+
+        // Process gateway
+        String[] gateways = null;
+        if (!TextUtils.isEmpty(dcResult.gateways)) {
+            gateways = dcResult.gateways.split(" ");
+        }
+
+        List<InetAddress> gatewayList = new ArrayList<>();
+        if (gateways != null) {
+            for (String gateway : gateways) {
+                gateway = gateway.trim();
+                InetAddress ia;
+                try {
+                    ia = NetworkUtils.numericToInetAddress(gateway);
+                    gatewayList.add(ia);
+                } catch (IllegalArgumentException e) {
+                    Rlog.e(RILJ_LOG_TAG, "Unknown gateway: " + gateway + ", exception = " + e);
+                }
+            }
+        }
+
         return new DataCallResponse(dcResult.status,
                 dcResult.suggestedRetryTime,
                 dcResult.cid,
                 dcResult.active,
                 dcResult.type,
                 dcResult.ifname,
-                dcResult.addresses,
-                dcResult.dnses,
-                dcResult.gateways,
-                dcResult.pcscf,
+                iaList,
+                dnsList,
+                gatewayList,
+                new ArrayList<>(Arrays.asList(dcResult.pcscf.trim().split("\\s*,\\s*"))),
                 dcResult.mtu
         );
     }
@@ -1611,9 +1748,9 @@ public class RIL extends BaseCommands implements CommandsInterface {
             RadioAccessSpecifier ras) {
         android.hardware.radio.V1_1.RadioAccessSpecifier rasInHalFormat =
                 new android.hardware.radio.V1_1.RadioAccessSpecifier();
-        rasInHalFormat.radioAccessNetwork = ras.radioAccessNetwork;
+        rasInHalFormat.radioAccessNetwork = ras.getRadioAccessNetwork();
         List<Integer> bands = null;
-        switch (ras.radioAccessNetwork) {
+        switch (ras.getRadioAccessNetwork()) {
             case RadioAccessNetworks.GERAN:
                 bands = rasInHalFormat.geranBands;
                 break;
@@ -1624,18 +1761,18 @@ public class RIL extends BaseCommands implements CommandsInterface {
                 bands = rasInHalFormat.eutranBands;
                 break;
             default:
-                Log.wtf(RILJ_LOG_TAG, "radioAccessNetwork " + ras.radioAccessNetwork
+                Log.wtf(RILJ_LOG_TAG, "radioAccessNetwork " + ras.getRadioAccessNetwork()
                         + " not supported!");
                 return null;
         }
 
-        if (ras.bands != null) {
-            for (int band : ras.bands) {
+        if (ras.getBands() != null) {
+            for (int band : ras.getBands()) {
                 bands.add(band);
             }
         }
-        if (ras.channels != null) {
-            for (int channel : ras.channels) {
+        if (ras.getChannels() != null) {
+            for (int channel : ras.getChannels()) {
                 rasInHalFormat.channels.add(channel);
             }
         }
@@ -1652,13 +1789,13 @@ public class RIL extends BaseCommands implements CommandsInterface {
             if (radioProxy12 != null) {
                 android.hardware.radio.V1_2.NetworkScanRequest request =
                         new android.hardware.radio.V1_2.NetworkScanRequest();
-                request.type = nsr.scanType;
-                request.interval = nsr.searchPeriodicity;
-                request.maxSearchTime = nsr.maxSearchTime;
-                request.incrementalResultsPeriodicity = nsr.incrementalResultsPeriodicity;
-                request.incrementalResults = nsr.incrementalResults;
+                request.type = nsr.getScanType();
+                request.interval = nsr.getSearchPeriodicity();
+                request.maxSearchTime = nsr.getMaxSearchTime();
+                request.incrementalResultsPeriodicity = nsr.getIncrementalResultsPeriodicity();
+                request.incrementalResults = nsr.getIncrementalResults();
 
-                for (RadioAccessSpecifier ras : nsr.specifiers) {
+                for (RadioAccessSpecifier ras : nsr.getSpecifiers()) {
 
                     android.hardware.radio.V1_1.RadioAccessSpecifier rasInHalFormat =
                             convertRadioAccessSpecifierToRadioHAL(ras);
@@ -1669,7 +1806,7 @@ public class RIL extends BaseCommands implements CommandsInterface {
                     request.specifiers.add(rasInHalFormat);
                 }
 
-                request.mccMncs.addAll(nsr.mccMncs);
+                request.mccMncs.addAll(nsr.getPlmns());
                 RILRequest rr = obtainRequest(RIL_REQUEST_START_NETWORK_SCAN, result,
                         mRILDefaultWorkSource);
 
@@ -1694,9 +1831,9 @@ public class RIL extends BaseCommands implements CommandsInterface {
                 } else {
                     android.hardware.radio.V1_1.NetworkScanRequest request =
                             new android.hardware.radio.V1_1.NetworkScanRequest();
-                    request.type = nsr.scanType;
-                    request.interval = nsr.searchPeriodicity;
-                    for (RadioAccessSpecifier ras : nsr.specifiers) {
+                    request.type = nsr.getScanType();
+                    request.interval = nsr.getSearchPeriodicity();
+                    for (RadioAccessSpecifier ras : nsr.getSpecifiers()) {
                         android.hardware.radio.V1_1.RadioAccessSpecifier rasInHalFormat =
                                 convertRadioAccessSpecifierToRadioHAL(ras);
                         if (rasInHalFormat == null) {
@@ -4589,6 +4726,10 @@ public class RIL extends BaseCommands implements CommandsInterface {
                 return "RIL_REQUEST_START_NETWORK_SCAN";
             case RIL_REQUEST_STOP_NETWORK_SCAN:
                 return "RIL_REQUEST_STOP_NETWORK_SCAN";
+            case RIL_REQUEST_GET_SLOT_STATUS:
+                return "RIL_REQUEST_GET_SLOT_STATUS";
+            case RIL_REQUEST_SET_LOGICAL_TO_PHYSICAL_SLOT_MAPPING:
+                return "RIL_REQUEST_SET_LOGICAL_TO_PHYSICAL_SLOT_MAPPING";
             default: return "<unknown request>";
         }
     }
@@ -4691,6 +4832,8 @@ public class RIL extends BaseCommands implements CommandsInterface {
                 return "RIL_UNSOL_CARRIER_INFO_IMSI_ENCRYPTION";
             case RIL_UNSOL_NETWORK_SCAN_RESULT:
                 return "RIL_UNSOL_NETWORK_SCAN_RESULT";
+            case RIL_UNSOL_ICC_SLOT_STATUS:
+                return "RIL_UNSOL_ICC_SLOT_STATUS";
             default:
                 return "<unknown response>";
         }
@@ -4927,6 +5070,28 @@ public class RIL extends BaseCommands implements CommandsInterface {
         p.writeString(as);
         p.writeInt(ss);
         p.writeInt(ber);
+    }
+
+    /**
+     * Convert SlotsStatus defined in 1.2/types.hal to IccSlotStatus type.
+     * @param slotsStatus SlotsStatus defined in 1.2/types.hal
+     * @return Converted IccSlotStatus object
+     */
+    @VisibleForTesting
+    public static ArrayList<IccSlotStatus> convertHalSlotsStatus(
+            ArrayList<android.hardware.radio.V1_2.SimSlotStatus> slotsStatus) {
+        ArrayList<IccSlotStatus> iccSlotStatus = new ArrayList<IccSlotStatus>(slotsStatus.size());
+
+        for (android.hardware.radio.V1_2.SimSlotStatus slotStatus : slotsStatus) {
+            IccSlotStatus iss = new IccSlotStatus();
+            iss.setCardState(slotStatus.cardState);
+            iss.setSlotState(slotStatus.slotState);
+            iss.logicalSlotIndex = slotStatus.logicalSlotId;
+            iss.atr = slotStatus.atr;
+            iss.iccid = slotStatus.iccid;
+            iccSlotStatus.add(iss);
+        }
+        return iccSlotStatus;
     }
 
     /**

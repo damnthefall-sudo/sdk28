@@ -117,8 +117,14 @@ public class Build {
     public static final String SERIAL = getString("no.such.thing");
 
     /**
-     * Gets the hardware serial, if available.
-     * @return The serial if specified.
+     * Gets the hardware serial number, if available.
+     *
+     * <p class="note"><b>Note:</b> Root access may allow you to modify device identifiers, such as
+     * the hardware serial number. If you change these identifiers, you can use
+     * <a href="/training/articles/security-key-attestation.html">key attestation</a> to obtain
+     * proof of the device's original identifiers.
+     *
+     * @return The serial number if specified.
      */
     @RequiresPermission(Manifest.permission.READ_PHONE_STATE)
     public static String getSerial() {
@@ -215,11 +221,29 @@ public class Build {
         public static final String SDK = getString("ro.build.version.sdk");
 
         /**
-         * The user-visible SDK version of the framework; its possible
-         * values are defined in {@link Build.VERSION_CODES}.
+         * The SDK version of the software currently running on this hardware
+         * device. This value never changes while a device is booted, but it may
+         * increase when the hardware manufacturer provides an OTA update.
+         * <p>
+         * Possible values are defined in {@link Build.VERSION_CODES}.
+         *
+         * @see #FIRST_SDK_INT
          */
         public static final int SDK_INT = SystemProperties.getInt(
                 "ro.build.version.sdk", 0);
+
+        /**
+         * The SDK version of the software that <em>initially</em> shipped on
+         * this hardware device. It <em>never</em> changes during the lifetime
+         * of the device, even when {@link #SDK_INT} increases due to an OTA
+         * update.
+         * <p>
+         * Possible values are defined in {@link Build.VERSION_CODES}.
+         *
+         * @see #SDK_INT
+         */
+        public static final int FIRST_SDK_INT = SystemProperties
+                .getInt("ro.product.first_api_level", 0);
 
         /**
          * The developer preview revision of a prerelease SDK. This value will always
@@ -264,6 +288,14 @@ public class Build {
          * @hide
          */
         public static final int RESOURCES_SDK_INT = SDK_INT + ACTIVE_CODENAMES.length;
+
+        /**
+         * The current lowest supported value of app target SDK. Applications targeting
+         * lower values will fail to install and run. Its possible values are defined
+         * in {@link Build.VERSION_CODES}.
+         */
+        public static final int MIN_SUPPORTED_TARGET_SDK_INT = SystemProperties.getInt(
+                "ro.build.version.min_supported_target_sdk", 0);
     }
 
     /**
@@ -937,7 +969,9 @@ public class Build {
         if (IS_ENG) return true;
 
         if (IS_TREBLE_ENABLED) {
-            int result = VintfObject.verify(new String[0]);
+            // If we can run this code, the device should already pass AVB.
+            // So, we don't need to check AVB here.
+            int result = VintfObject.verifyWithoutAvb();
 
             if (result != 0) {
                 Slog.e(TAG, "Vendor interface is incompatible, error="

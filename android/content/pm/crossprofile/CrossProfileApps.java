@@ -16,14 +16,18 @@
 package android.content.pm.crossprofile;
 
 import android.annotation.NonNull;
-import android.annotation.Nullable;
 import android.content.ComponentName;
 import android.content.Context;
+import android.content.res.Resources;
 import android.graphics.Rect;
+import android.graphics.drawable.Drawable;
 import android.os.Bundle;
 import android.os.RemoteException;
 import android.os.UserHandle;
 import android.os.UserManager;
+
+import com.android.internal.R;
+import com.android.internal.util.UserIcons;
 
 import java.util.List;
 
@@ -35,11 +39,15 @@ import java.util.List;
 public class CrossProfileApps {
     private final Context mContext;
     private final ICrossProfileApps mService;
+    private final UserManager mUserManager;
+    private final Resources mResources;
 
     /** @hide */
     public CrossProfileApps(Context context, ICrossProfileApps service) {
         mContext = context;
         mService = service;
+        mUserManager = context.getSystemService(UserManager.class);
+        mResources = context.getResources();
     }
 
     /**
@@ -52,15 +60,10 @@ public class CrossProfileApps {
      * @param user The UserHandle of the profile, must be one of the users returned by
      *        {@link #getTargetUserProfiles()}, otherwise a {@link SecurityException} will
      *        be thrown.
-     * @param sourceBounds The Rect containing the source bounds of the clicked icon, see
-     *                     {@link android.content.Intent#setSourceBounds(Rect)}.
-     * @param startActivityOptions Options to pass to startActivity
      */
-    public void startMainActivity(@NonNull ComponentName component, @NonNull UserHandle user,
-            @Nullable Rect sourceBounds, @Nullable Bundle startActivityOptions) {
+    public void startMainActivity(@NonNull ComponentName component, @NonNull UserHandle user) {
         try {
-            mService.startActivityAsUser(mContext.getPackageName(),
-                    component, sourceBounds, startActivityOptions, user);
+            mService.startActivityAsUser(mContext.getPackageName(), component, user);
         } catch (RemoteException ex) {
             throw ex.rethrowFromSystemServer();
         }
@@ -85,6 +88,60 @@ public class CrossProfileApps {
             return mService.getTargetUserProfiles(mContext.getPackageName());
         } catch (RemoteException ex) {
             throw ex.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Return a label that calling app can show to user for the semantic of profile switching --
+     * launching its own activity in specified user profile. For example, it may return
+     * "Switch to work" if the given user handle is the managed profile one.
+     *
+     * @param userHandle The UserHandle of the target profile, must be one of the users returned by
+     *        {@link #getTargetUserProfiles()}, otherwise a {@link SecurityException} will
+     *        be thrown.
+     * @return a label that calling app can show user for the semantic of launching its own
+     *         activity in the specified user profile.
+     *
+     * @see #startMainActivity(ComponentName, UserHandle, Rect, Bundle)
+     */
+    public @NonNull CharSequence getProfileSwitchingLabel(@NonNull UserHandle userHandle) {
+        verifyCanAccessUser(userHandle);
+
+        final int stringRes = mUserManager.isManagedProfile(userHandle.getIdentifier())
+                ? R.string.managed_profile_label
+                : R.string.user_owner_label;
+        return mResources.getString(stringRes);
+    }
+
+    /**
+     * Return an icon that calling app can show to user for the semantic of profile switching --
+     * launching its own activity in specified user profile. For example, it may return a briefcase
+     * icon if the given user handle is the managed profile one.
+     *
+     * @param userHandle The UserHandle of the target profile, must be one of the users returned by
+     *        {@link #getTargetUserProfiles()}, otherwise a {@link SecurityException} will
+     *        be thrown.
+     * @return an icon that calling app can show user for the semantic of launching its own
+     *         activity in specified user profile.
+     *
+     * @see #startMainActivity(ComponentName, UserHandle, Rect, Bundle)
+     */
+    public @NonNull Drawable getProfileSwitchingIcon(@NonNull UserHandle userHandle) {
+        verifyCanAccessUser(userHandle);
+
+        final boolean isManagedProfile =
+                mUserManager.isManagedProfile(userHandle.getIdentifier());
+        if (isManagedProfile) {
+            return mResources.getDrawable(R.drawable.ic_corp_badge, null);
+        } else {
+            return UserIcons.getDefaultUserIcon(
+                    mResources, UserHandle.USER_SYSTEM, true /* light */);
+        }
+    }
+
+    private void verifyCanAccessUser(UserHandle userHandle) {
+        if (!getTargetUserProfiles().contains(userHandle)) {
+            throw new SecurityException("Not allowed to access " + userHandle);
         }
     }
 }

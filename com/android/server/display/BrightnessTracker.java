@@ -196,9 +196,10 @@ public class BrightnessTracker {
 
     /**
      * @param userId userId to fetch data for.
+     * @param includePackage if false we will null out BrightnessChangeEvent.packageName
      * @return List of recent {@link BrightnessChangeEvent}s
      */
-    public ParceledListSlice<BrightnessChangeEvent> getEvents(int userId) {
+    public ParceledListSlice<BrightnessChangeEvent> getEvents(int userId, boolean includePackage) {
         // TODO include apps from any managed profiles in the brightness information.
         BrightnessChangeEvent[] events;
         synchronized (mEventsLock) {
@@ -207,7 +208,13 @@ public class BrightnessTracker {
         ArrayList<BrightnessChangeEvent> out = new ArrayList<>(events.length);
         for (int i = 0; i < events.length; ++i) {
             if (events[i].userId == userId) {
-                out.add(events[i]);
+                if (includePackage) {
+                    out.add(events[i]);
+                } else {
+                    BrightnessChangeEvent event = new BrightnessChangeEvent((events[i]));
+                    event.packageName = null;
+                    out.add(event);
+                }
             }
         }
         return new ParceledListSlice<>(out);
@@ -493,13 +500,30 @@ public class BrightnessTracker {
     }
 
     public void dump(PrintWriter pw) {
-        synchronized (mEventsLock) {
-            pw.println("BrightnessTracker state:");
-            pw.println("  mEvents.size=" + mEvents.size());
-            pw.println("  mEventsDirty=" + mEventsDirty);
-        }
+        pw.println("BrightnessTracker state:");
         synchronized (mDataCollectionLock) {
             pw.println("  mLastSensorReadings.size=" + mLastSensorReadings.size());
+            if (!mLastSensorReadings.isEmpty()) {
+                pw.println("  mLastSensorReadings time span "
+                        + mLastSensorReadings.peekFirst().timestamp + "->"
+                        + mLastSensorReadings.peekLast().timestamp);
+            }
+        }
+        synchronized (mEventsLock) {
+            pw.println("  mEventsDirty=" + mEventsDirty);
+            pw.println("  mEvents.size=" + mEvents.size());
+            BrightnessChangeEvent[] events = mEvents.toArray();
+            for (int i = 0; i < events.length; ++i) {
+                pw.print("    " + events[i].timeStamp + ", " + events[i].userId);
+                pw.print(", " + events[i].lastBrightness + "->" + events[i].brightness + ", {");
+                for (int j = 0; j < events[i].luxValues.length; ++j){
+                    if (j != 0) {
+                        pw.print(", ");
+                    }
+                    pw.print("(" + events[i].luxValues[j] + "," + events[i].luxTimestamps[j] + ")");
+                }
+                pw.println("}");
+            }
         }
     }
 

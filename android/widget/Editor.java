@@ -41,7 +41,6 @@ import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
-import android.metrics.LogMaker;
 import android.os.Bundle;
 import android.os.LocaleList;
 import android.os.Parcel;
@@ -108,6 +107,7 @@ import android.view.inputmethod.ExtractedTextRequest;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
 import android.view.textclassifier.TextClassification;
+import android.view.textclassifier.TextLinks;
 import android.widget.AdapterView.OnItemClickListener;
 import android.widget.TextView.Drawables;
 import android.widget.TextView.OnEditorActionListener;
@@ -173,6 +173,13 @@ public class Editor {
         int INSERTION = 0;
         int SELECTION_START = 1;
         int SELECTION_END = 2;
+    }
+
+    @IntDef({TextActionMode.SELECTION, TextActionMode.INSERTION, TextActionMode.TEXT_LINK})
+    @interface TextActionMode {
+        int SELECTION = 0;
+        int INSERTION = 1;
+        int TEXT_LINK = 2;
     }
 
     // Each Editor manages its own undo stack.
@@ -545,7 +552,8 @@ public class Editor {
         chooseSize(mErrorPopup, mError, tv);
         tv.setText(mError);
 
-        mErrorPopup.showAsDropDown(mTextView, getErrorX(), getErrorY());
+        mErrorPopup.showAsDropDown(mTextView, getErrorX(), getErrorY(),
+                Gravity.TOP | Gravity.LEFT);
         mErrorPopup.fixDirection(mErrorPopup.isAboveAnchor());
     }
 
@@ -2053,7 +2061,7 @@ public class Editor {
         stopTextActionMode();
 
         ActionMode.Callback actionModeCallback =
-                new TextActionModeCallback(false /* hasSelection */);
+                new TextActionModeCallback(TextActionMode.INSERTION);
         mTextActionMode = mTextView.startActionMode(
                 actionModeCallback, ActionMode.TYPE_FLOATING);
         if (mTextActionMode != null && getInsertionController() != null) {
@@ -2079,7 +2087,23 @@ public class Editor {
      * Asynchronously starts a selection action mode using the TextClassifier.
      */
     void startSelectionActionModeAsync(boolean adjustSelection) {
-        getSelectionActionModeHelper().startActionModeAsync(adjustSelection);
+        getSelectionActionModeHelper().startSelectionActionModeAsync(adjustSelection);
+    }
+
+    void startLinkActionModeAsync(TextLinks.TextLink link) {
+        Preconditions.checkNotNull(link);
+        if (!(mTextView.getText() instanceof Spannable)) {
+            return;
+        }
+        Spannable text = (Spannable) mTextView.getText();
+        stopTextActionMode();
+        if (mTextView.isTextSelectable()) {
+            Selection.setSelection((Spannable) text, link.getStart(), link.getEnd());
+        } else {
+            //TODO: Nonselectable text
+        }
+
+        getSelectionActionModeHelper().startLinkActionModeAsync(link);
     }
 
     /**
@@ -2145,7 +2169,7 @@ public class Editor {
         return true;
     }
 
-    boolean startSelectionActionModeInternal() {
+    boolean startActionModeInternal(@TextActionMode int actionMode) {
         if (extractedTextModeWillBeStarted()) {
             return false;
         }
@@ -2159,8 +2183,7 @@ public class Editor {
             return false;
         }
 
-        ActionMode.Callback actionModeCallback =
-                new TextActionModeCallback(true /* hasSelection */);
+        ActionMode.Callback actionModeCallback = new TextActionModeCallback(actionMode);
         mTextActionMode = mTextView.startActionMode(actionModeCallback, ActionMode.TYPE_FLOATING);
 
         final boolean selectionStarted = mTextActionMode != null;
@@ -3828,8 +3851,9 @@ public class Editor {
         private final int mHandleHeight;
         private final Map<MenuItem, OnClickListener> mAssistClickHandlers = new HashMap<>();
 
-        public TextActionModeCallback(boolean hasSelection) {
-            mHasSelection = hasSelection;
+        TextActionModeCallback(@TextActionMode int mode) {
+            mHasSelection = mode == TextActionMode.SELECTION
+                    || (mTextIsSelectable && mode == TextActionMode.TEXT_LINK);
             if (mHasSelection) {
                 SelectionModifierCursorController selectionController = getSelectionController();
                 if (selectionController.mStartHandle == null) {
@@ -3982,31 +4006,39 @@ public class Editor {
             }
             final TextClassification textClassification =
                     getSelectionActionModeHelper().getTextClassification();
-            final int count = textClassification != null ? textClassification.getActionCount() : 0;
+            if (textClassification == null) {
+                return;
+            }
+            if (isValidAssistMenuItem(
+                    textClassification.getIcon(),
+                    textClassification.getLabel(),
+                    textClassification.getOnClickListener(),
+                    textClassification.getIntent())) {
+                final MenuItem item = menu.add(
+                        TextView.ID_ASSIST, TextView.ID_ASSIST, MENU_ITEM_ORDER_ASSIST,
+                        textClassification.getLabel())
+                        .setIcon(textClassification.getIcon())
+                        .setIntent(textClassification.getIntent());
+                item.setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS);
+                mAssistClickHandlers.put(item, textClassification.getOnClickListener());
+            }
+            final int count = textClassification.getSecondaryActionsCount();
             for (int i = 0; i < count; i++) {
-                if (!isValidAssistMenuItem(i)) {
+                if (!isValidAssistMenuItem(
+                        textClassification.getSecondaryIcon(i),
+                        textClassification.getSecondaryLabel(i),
+                        textClassification.getSecondaryOnClickListener(i),
+                        textClassification.getSecondaryIntent(i))) {
                     continue;
                 }
-                final int groupId = TextView.ID_ASSIST;
-                final int order = (i == 0)
-                        ? MENU_ITEM_ORDER_ASSIST
-                        : MENU_ITEM_ORDER_SECONDARY_ASSIST_ACTIONS_START + i;
-                final int id = (i == 0) ? TextView.ID_ASSIST : Menu.NONE;
-                final int showAsFlag = (i == 0)
-                        ? MenuItem.SHOW_AS_ACTION_ALWAYS
-                        : MenuItem.SHOW_AS_ACTION_NEVER;
+                final int order = MENU_ITEM_ORDER_SECONDARY_ASSIST_ACTIONS_START + i;
                 final MenuItem item = menu.add(
-                        groupId, id, order, textClassification.getLabel(i))
-                        .setIcon(textClassification.getIcon(i))
-                        .setIntent(textClassification.getIntent(i));
-                item.setShowAsAction(showAsFlag);
-                mAssistClickHandlers.put(item, textClassification.getOnClickListener(i));
-                if (id == TextView.ID_ASSIST) {
-                    mMetricsLogger.write(
-                            new LogMaker(MetricsEvent.TEXT_SELECTION_MENU_ITEM_ASSIST)
-                                    .setType(MetricsEvent.TYPE_OPEN)
-                                    .setSubtype(textClassification.getLogType()));
-                }
+                        TextView.ID_ASSIST, Menu.NONE, order,
+                        textClassification.getSecondaryLabel(i))
+                        .setIcon(textClassification.getSecondaryIcon(i))
+                        .setIntent(textClassification.getSecondaryIntent(i));
+                item.setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER);
+                mAssistClickHandlers.put(item, textClassification.getSecondaryOnClickListener(i));
             }
         }
 
@@ -4022,18 +4054,9 @@ public class Editor {
             }
         }
 
-        private boolean isValidAssistMenuItem(int index) {
-            final TextClassification textClassification =
-                    getSelectionActionModeHelper().getTextClassification();
-            if (!mTextView.isDeviceProvisioned() || textClassification == null
-                    || index < 0 || index >= textClassification.getActionCount()) {
-                return false;
-            }
-            final Drawable icon = textClassification.getIcon(index);
-            final CharSequence label = textClassification.getLabel(index);
+        private boolean isValidAssistMenuItem(
+                Drawable icon, CharSequence label, OnClickListener onClick, Intent intent) {
             final boolean hasUi = icon != null || !TextUtils.isEmpty(label);
-            final OnClickListener onClick = textClassification.getOnClickListener(index);
-            final Intent intent = textClassification.getIntent(index);
             final boolean hasAction = onClick != null || isSupportedIntent(intent);
             return hasUi && hasAction;
         }
@@ -4079,11 +4102,6 @@ public class Editor {
             if (onClickListener != null) {
                 onClickListener.onClick(mTextView);
                 stopTextActionMode();
-                if (assistMenuItem.getItemId() == TextView.ID_ASSIST) {
-                    mMetricsLogger.action(
-                            MetricsEvent.ACTION_TEXT_SELECTION_MENU_ITEM_ASSIST,
-                            textClassification.getLogType());
-                }
             }
             // We tried our best.
             return true;
@@ -4930,7 +4948,10 @@ public class Editor {
     }
 
     @Retention(RetentionPolicy.SOURCE)
-    @IntDef({HANDLE_TYPE_SELECTION_START, HANDLE_TYPE_SELECTION_END})
+    @IntDef(prefix = { "HANDLE_TYPE_" }, value = {
+            HANDLE_TYPE_SELECTION_START,
+            HANDLE_TYPE_SELECTION_END
+    })
     public @interface HandleType {}
     public static final int HANDLE_TYPE_SELECTION_START = 0;
     public static final int HANDLE_TYPE_SELECTION_END = 1;
@@ -6135,7 +6156,11 @@ public class Editor {
         }
 
         @Retention(RetentionPolicy.SOURCE)
-        @IntDef({MERGE_EDIT_MODE_FORCE_MERGE, MERGE_EDIT_MODE_NEVER_MERGE, MERGE_EDIT_MODE_NORMAL})
+        @IntDef(prefix = { "MERGE_EDIT_MODE_" }, value = {
+                MERGE_EDIT_MODE_FORCE_MERGE,
+                MERGE_EDIT_MODE_NEVER_MERGE,
+                MERGE_EDIT_MODE_NORMAL
+        })
         private @interface MergeMode {}
         private static final int MERGE_EDIT_MODE_FORCE_MERGE = 0;
         private static final int MERGE_EDIT_MODE_NEVER_MERGE = 1;
@@ -6594,7 +6619,7 @@ public class Editor {
                         Editor.MENU_ITEM_ORDER_PROCESS_TEXT_INTENT_ACTIONS_START + i,
                         getLabel(resolveInfo))
                         .setIntent(createProcessTextIntentForResolveInfo(resolveInfo))
-                        .setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM);
+                        .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER);
             }
         }
 

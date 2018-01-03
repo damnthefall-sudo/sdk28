@@ -1115,12 +1115,14 @@ public class StorageManager {
     /** {@hide} */
     public static Pair<String, Long> getPrimaryStoragePathAndSize() {
         return Pair.create(null,
-                FileUtils.roundStorageSize(Environment.getDataDirectory().getTotalSpace()));
+                FileUtils.roundStorageSize(Environment.getDataDirectory().getTotalSpace()
+                    + Environment.getRootDirectory().getTotalSpace()));
     }
 
     /** {@hide} */
     public long getPrimaryStorageSize() {
-        return FileUtils.roundStorageSize(Environment.getDataDirectory().getTotalSpace());
+        return FileUtils.roundStorageSize(Environment.getDataDirectory().getTotalSpace()
+                + Environment.getRootDirectory().getTotalSpace());
     }
 
     /** {@hide} */
@@ -1690,7 +1692,7 @@ public class StorageManager {
     public static final int FLAG_ALLOCATE_DEFY_HALF_RESERVED = 1 << 2;
 
     /** @hide */
-    @IntDef(flag = true, value = {
+    @IntDef(flag = true, prefix = { "FLAG_ALLOCATE_" }, value = {
             FLAG_ALLOCATE_AGGRESSIVE,
             FLAG_ALLOCATE_DEFY_ALL_RESERVED,
             FLAG_ALLOCATE_DEFY_HALF_RESERVED,

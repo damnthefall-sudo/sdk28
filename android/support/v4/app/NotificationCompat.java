@@ -32,6 +32,7 @@ import android.graphics.Color;
 import android.graphics.PorterDuff;
 import android.graphics.PorterDuffColorFilter;
 import android.graphics.drawable.Drawable;
+import android.media.AudioAttributes;
 import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Build;
@@ -116,7 +117,6 @@ public class NotificationCompat {
      * default stream type is {@link AudioManager#STREAM_NOTIFICATION}.
      */
     public static final int STREAM_DEFAULT = -1;
-
     /**
      * Bit set in the Notification flags field when LEDs should be turned on
      * for this notification.
@@ -404,6 +404,12 @@ public class NotificationCompat {
     public static final String EXTRA_MESSAGES = "android.messages";
 
     /**
+     * Notification key: whether the {@link NotificationCompat.MessagingStyle} notification
+     * represents a group conversation.
+     */
+    public static final String EXTRA_IS_GROUP_CONVERSATION = "android.isGroupConversation";
+
+    /**
      * Keys into the {@link #getExtras} Bundle: the audio contents of this notification.
      *
      * This is for use when rendering the notification on an audio-focused interface;
@@ -437,6 +443,14 @@ public class NotificationCompat {
      */
     @ColorInt
     public static final int COLOR_DEFAULT = Color.TRANSPARENT;
+
+    /** @hide */
+    @RestrictTo(LIBRARY_GROUP)
+    @IntDef({AudioManager.STREAM_VOICE_CALL, AudioManager.STREAM_SYSTEM, AudioManager.STREAM_RING,
+            AudioManager.STREAM_MUSIC, AudioManager.STREAM_ALARM, AudioManager.STREAM_NOTIFICATION,
+            AudioManager.STREAM_DTMF, AudioManager.STREAM_ACCESSIBILITY})
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface StreamType {}
 
     /** @hide */
     @Retention(SOURCE)
@@ -957,6 +971,12 @@ public class NotificationCompat {
         public Builder setSound(Uri sound) {
             mNotification.sound = sound;
             mNotification.audioStreamType = Notification.STREAM_DEFAULT;
+            if (Build.VERSION.SDK_INT >= 21) {
+                mNotification.audioAttributes = new AudioAttributes.Builder()
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                        .build();
+            }
             return this;
         }
 
@@ -971,9 +991,15 @@ public class NotificationCompat {
          * @see Notification#STREAM_DEFAULT
          * @see AudioManager for the <code>STREAM_</code> constants.
          */
-        public Builder setSound(Uri sound, int streamType) {
+        public Builder setSound(Uri sound, @StreamType int streamType) {
             mNotification.sound = sound;
             mNotification.audioStreamType = streamType;
+            if (Build.VERSION.SDK_INT >= 21) {
+                mNotification.audioAttributes = new AudioAttributes.Builder()
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .setLegacyStreamType(streamType)
+                        .build();
+            }
             return this;
         }
 
@@ -2062,8 +2088,9 @@ public class NotificationCompat {
         public static final int MAXIMUM_RETAINED_MESSAGES = 25;
 
         CharSequence mUserDisplayName;
-        CharSequence mConversationTitle;
+        @Nullable CharSequence mConversationTitle;
         List<Message> mMessages = new ArrayList<>();
+        boolean mIsGroupConversation;
 
         MessagingStyle() {
         }
@@ -2086,20 +2113,19 @@ public class NotificationCompat {
         }
 
         /**
-         * Sets the title to be displayed on this conversation. This should only be used for
-         * group messaging and left unset for one-on-one conversations.
+         * Sets the title to be displayed on this conversation. May be set to {@code null}.
          * @param conversationTitle Title displayed for this conversation.
          * @return this object for method chaining.
          */
-        public MessagingStyle setConversationTitle(CharSequence conversationTitle) {
+        public MessagingStyle setConversationTitle(@Nullable CharSequence conversationTitle) {
             mConversationTitle = conversationTitle;
             return this;
         }
 
         /**
-         * Return the title to be displayed on this conversation. Can be <code>null</code> and
-         * should be for one-on-one conversations
+         * Return the title to be displayed on this conversation. Can be {@code null}.
          */
+        @Nullable
         public CharSequence getConversationTitle() {
             return mConversationTitle;
         }
@@ -2145,6 +2171,24 @@ public class NotificationCompat {
          */
         public List<Message> getMessages() {
             return mMessages;
+        }
+
+        /**
+         * Sets whether this conversation notification represents a group.
+         * @param isGroupConversation {@code true} if the conversation represents a group,
+         * {@code false} otherwise.
+         * @return this object for method chaining
+         */
+        public MessagingStyle setGroupConversation(boolean isGroupConversation) {
+            mIsGroupConversation = isGroupConversation;
+            return this;
+        }
+
+        /**
+         * Returns {@code true} if this notification represents a group conversation.
+         */
+        public boolean isGroupConversation() {
+            return mIsGroupConversation;
         }
 
         /**
@@ -2295,6 +2339,7 @@ public class NotificationCompat {
             if (!mMessages.isEmpty()) { extras.putParcelableArray(EXTRA_MESSAGES,
                     Message.getBundleArrayForMessages(mMessages));
             }
+            extras.putBoolean(EXTRA_IS_GROUP_CONVERSATION, mIsGroupConversation);
         }
 
         /**
@@ -2310,6 +2355,7 @@ public class NotificationCompat {
             if (parcelables != null) {
                 mMessages = Message.getMessagesFromBundleArray(parcelables);
             }
+            mIsGroupConversation = extras.getBoolean(EXTRA_IS_GROUP_CONVERSATION);
         }
 
         public static final class Message {

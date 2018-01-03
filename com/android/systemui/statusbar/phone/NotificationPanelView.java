@@ -455,7 +455,7 @@ public class NotificationPanelView extends PanelView implements
             mTopPaddingAdjustment = 0;
         } else {
             mClockPositionAlgorithm.setup(
-                    mStatusBar.getMaxKeyguardNotifications(),
+                    mStatusBar.getMaxNotificationsWhileLocked(),
                     getMaxPanelHeight(),
                     getExpandedHeight(),
                     mNotificationStackScroller.getNotGoneChildCount(),
@@ -506,7 +506,8 @@ public class NotificationPanelView extends PanelView implements
             if (suppressedSummary) {
                 continue;
             }
-            if (!mStatusBar.shouldShowOnKeyguard(row.getStatusBarNotification())) {
+            if (!mStatusBar.getNotificationLockscreenUserManager().shouldShowOnKeyguard(
+                    row.getStatusBarNotification())) {
                 continue;
             }
             if (row.isRemoved()) {

@@ -881,6 +881,9 @@ class SettingsProtoDumpUtil {
         dumpSetting(s, p,
                 Settings.Global.GPU_DEBUG_LAYERS,
                 GlobalSettingsProto.GPU_DEBUG_LAYERS);
+        dumpSetting(s, p,
+                Settings.Global.ENABLE_GNSS_RAW_MEAS_FULL_TRACKING,
+                GlobalSettingsProto.ENABLE_GNSS_RAW_MEAS_FULL_TRACKING);
         // Settings.Global.SHOW_PROCESSES intentionally excluded since it's deprecated.
         dumpSetting(s, p,
                 Settings.Global.LOW_POWER_MODE,
@@ -1056,9 +1059,6 @@ class SettingsProtoDumpUtil {
         dumpSetting(s, p,
                 Settings.Global.LOCATION_SETTINGS_LINK_TO_PERMISSIONS_ENABLED,
                 GlobalSettingsProto.LOCATION_SETTINGS_LINK_TO_PERMISSIONS_ENABLED);
-        dumpSetting(s, p,
-                Settings.Global.BACKUP_REFACTORED_SERVICE_DISABLED,
-                GlobalSettingsProto.BACKUP_REFACTORED_SERVICE_DISABLED);
         dumpSetting(s, p,
                 Settings.Global.EUICC_FACTORY_RESET_TIMEOUT_MILLIS,
                 GlobalSettingsProto.EUICC_FACTORY_RESET_TIMEOUT_MILLIS);

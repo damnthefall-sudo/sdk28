@@ -16,12 +16,9 @@
 
 package androidx.app.slice.core;
 
-import static android.app.slice.Slice.HINT_ACTIONS;
-import static android.app.slice.Slice.HINT_LIST;
-import static android.app.slice.Slice.HINT_LIST_ITEM;
 import static android.app.slice.SliceItem.FORMAT_ACTION;
-import static android.app.slice.SliceItem.FORMAT_COLOR;
 import static android.app.slice.SliceItem.FORMAT_IMAGE;
+import static android.app.slice.SliceItem.FORMAT_INT;
 import static android.app.slice.SliceItem.FORMAT_SLICE;
 import static android.app.slice.SliceItem.FORMAT_TIMESTAMP;
 
@@ -29,8 +26,8 @@ import android.annotation.TargetApi;
 import android.support.annotation.RestrictTo;
 import android.text.TextUtils;
 
+import java.util.ArrayDeque;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Queue;
 import java.util.Spliterators;
@@ -53,11 +50,11 @@ public class SliceQuery {
 
     /**
      * @return Whether this item is appropriate to be considered a "start" item, i.e. go in the
-     *         front slot of a small slice.
+     *         front slot of a row.
      */
     public static boolean isStartType(SliceItem item) {
         final String type = item.getFormat();
-        return (!item.hasHint(SliceHints.HINT_TOGGLE)
+        return (!item.hasHint(SliceHints.SUBTYPE_TOGGLE)
                 && (FORMAT_ACTION.equals(type) && (find(item, FORMAT_IMAGE) != null)))
                 || FORMAT_IMAGE.equals(type)
                 || FORMAT_TIMESTAMP.equals(type);
@@ -95,12 +92,13 @@ public class SliceQuery {
                 SliceItem child = items.get(i);
                 if (FORMAT_IMAGE.equals(child.getFormat()) && !hasImage) {
                     hasImage = true;
-                } else if (FORMAT_COLOR.equals(child.getFormat())) {
+                } else if (FORMAT_INT.equals(child.getFormat())) {
                     continue;
                 } else {
                     return false;
                 }
             }
+            return hasImage;
         }
         return false;
     }
@@ -144,25 +142,6 @@ public class SliceQuery {
         return true;
     }
 
-    /**
-     */
-    public static SliceItem getPrimaryIcon(Slice slice) {
-        for (SliceItem item : slice.getItems()) {
-            if (FORMAT_IMAGE.equals(item.getFormat())) {
-                return item;
-            }
-            if (!(FORMAT_SLICE.equals(item.getFormat()) && item.hasHint(HINT_LIST))
-                    && !item.hasHint(HINT_ACTIONS)
-                    && !item.hasHint(HINT_LIST_ITEM)
-                    && !FORMAT_ACTION.equals(item.getFormat())) {
-                SliceItem icon = SliceQuery.find(item, FORMAT_IMAGE);
-                if (icon != null) {
-                    return icon;
-                }
-            }
-        }
-        return null;
-    }
 
     /**
      */
@@ -273,6 +252,17 @@ public class SliceQuery {
 
     /**
      */
+    public static SliceItem findSubtype(Slice s, final String format, final String subtype) {
+        return stream(s).filter(new Predicate<SliceItem>() {
+            @Override
+            public boolean test(SliceItem item) {
+                return checkFormat(item, format) && checkSubtype(item, subtype);
+            }
+        }).findFirst().orElse(null);
+    }
+
+    /**
+     */
     public static SliceItem findSubtype(SliceItem s, final String format, final String subtype) {
         return stream(s).filter(new Predicate<SliceItem>() {
             @Override
@@ -282,8 +272,8 @@ public class SliceQuery {
         }).findFirst().orElse(null);
     }
 
-        /**
-         */
+    /**
+     */
     public static SliceItem find(SliceItem s, final String format, final String[] hints,
             final String[] nonHints) {
         return stream(s).filter(new Predicate<SliceItem>() {
@@ -306,7 +296,7 @@ public class SliceQuery {
     /**
      */
     public static Stream<SliceItem> stream(SliceItem slice) {
-        Queue<SliceItem> items = new LinkedList();
+        Queue<SliceItem> items = new ArrayDeque<>();
         items.add(slice);
         return getSliceItemStream(items);
     }
@@ -314,7 +304,7 @@ public class SliceQuery {
     /**
      */
     public static Stream<SliceItem> stream(Slice slice) {
-        Queue<SliceItem> items = new LinkedList();
+        Queue<SliceItem> items = new ArrayDeque<>();
         items.addAll(slice.getItems());
         return getSliceItemStream(items);
     }

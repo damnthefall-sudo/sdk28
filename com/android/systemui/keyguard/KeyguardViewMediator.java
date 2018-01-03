@@ -25,7 +25,7 @@ import static com.android.internal.widget.LockPatternUtils.StrongAuthTracker.STR
 import static com.android.internal.widget.LockPatternUtils.StrongAuthTracker.STRONG_AUTH_REQUIRED_AFTER_LOCKOUT;
 import static com.android.internal.widget.LockPatternUtils.StrongAuthTracker.STRONG_AUTH_REQUIRED_AFTER_TIMEOUT;
 
-import android.app.Activity;
+
 import android.app.ActivityManager;
 import android.app.AlarmManager;
 import android.app.NotificationManager;
@@ -53,7 +53,6 @@ import android.os.Trace;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.provider.Settings;
-import android.provider.Settings.System;
 import android.telephony.SubscriptionManager;
 import android.telephony.TelephonyManager;
 import android.util.EventLog;
@@ -77,20 +76,16 @@ import com.android.keyguard.KeyguardDisplayManager;
 import com.android.keyguard.KeyguardSecurityView;
 import com.android.keyguard.KeyguardUpdateMonitor;
 import com.android.keyguard.KeyguardUpdateMonitorCallback;
-import com.android.keyguard.LatencyTracker;
+import com.android.internal.util.LatencyTracker;
 import com.android.keyguard.ViewMediatorCallback;
 import com.android.systemui.Dependency;
 import com.android.systemui.SystemUI;
 import com.android.systemui.SystemUIFactory;
 import com.android.systemui.UiOffloadThread;
 import com.android.systemui.classifier.FalsingManager;
-import com.android.systemui.recents.Recents;
-import com.android.systemui.recents.misc.SystemServicesProxy;
 import com.android.systemui.statusbar.phone.FingerprintUnlockController;
 import com.android.systemui.statusbar.phone.StatusBar;
-import com.android.systemui.statusbar.phone.ScrimController;
 import com.android.systemui.statusbar.phone.StatusBarKeyguardViewManager;
-import com.android.systemui.statusbar.phone.StatusBarWindowManager;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
@@ -169,7 +164,6 @@ public class KeyguardViewMediator extends SystemUI {
     private static final int NOTIFY_SCREEN_TURNED_ON = 15;
     private static final int NOTIFY_SCREEN_TURNED_OFF = 16;
     private static final int NOTIFY_STARTED_GOING_TO_SLEEP = 17;
-    private static final int SET_SWITCHING_USER = 18;
 
     /**
      * The default amount of time we stay awake (used for all key input)
@@ -619,6 +613,13 @@ public class KeyguardViewMediator extends SystemUI {
         }
 
         @Override
+        public void onBouncerVisiblityChanged(boolean shown) {
+            synchronized (KeyguardViewMediator.this) {
+                adjustStatusBarLocked(shown);
+            }
+        }
+
+        @Override
         public void playTrustedSound() {
             KeyguardViewMediator.this.playTrustedSound();
         }
@@ -871,7 +872,7 @@ public class KeyguardViewMediator extends SystemUI {
 
         // From DevicePolicyAdmin
         final long policyTimeout = mLockPatternUtils.getDevicePolicyManager()
-                .getMaximumTimeToLockForUserAndProfiles(userId);
+                .getMaximumTimeToLock(null, userId);
 
         long timeout;
 
@@ -1424,11 +1425,7 @@ public class KeyguardViewMediator extends SystemUI {
     }
 
     public void setSwitchingUser(boolean switching) {
-        Trace.beginSection("KeyguardViewMediator#setSwitchingUser");
-        mHandler.removeMessages(SET_SWITCHING_USER);
-        Message msg = mHandler.obtainMessage(SET_SWITCHING_USER, switching ? 1 : 0, 0);
-        mHandler.sendMessage(msg);
-        Trace.endSection();
+        KeyguardUpdateMonitor.getInstance(mContext).setSwitchingUser(switching);
     }
 
     /**
@@ -1566,11 +1563,6 @@ public class KeyguardViewMediator extends SystemUI {
                 case KEYGUARD_DONE_PENDING_TIMEOUT:
                     Trace.beginSection("KeyguardViewMediator#handleMessage KEYGUARD_DONE_PENDING_TIMEOUT");
                     Log.w(TAG, "Timeout while waiting for activity drawn!");
-                    Trace.endSection();
-                    break;
-                case SET_SWITCHING_USER:
-                    Trace.beginSection("KeyguardViewMediator#handleMessage SET_SWITCHING_USER");
-                    KeyguardUpdateMonitor.getInstance(mContext).setSwitchingUser(msg.arg1 != 0);
                     Trace.endSection();
                     break;
             }
@@ -1877,6 +1869,10 @@ public class KeyguardViewMediator extends SystemUI {
     }
 
     private void adjustStatusBarLocked() {
+        adjustStatusBarLocked(false /* forceHideHomeRecentsButtons */);
+    }
+
+    private void adjustStatusBarLocked(boolean forceHideHomeRecentsButtons) {
         if (mStatusBarManager == null) {
             mStatusBarManager = (StatusBarManager)
                     mContext.getSystemService(Context.STATUS_BAR_SERVICE);
@@ -1887,19 +1883,14 @@ public class KeyguardViewMediator extends SystemUI {
             // Disable aspects of the system/status/navigation bars that must not be re-enabled by
             // windows that appear on top, ever
             int flags = StatusBarManager.DISABLE_NONE;
-            if (mShowing) {
-                // Permanently disable components not available when keyguard is enabled
-                // (like recents). Temporary enable/disable (e.g. the "back" button) are
-                // done in KeyguardHostView.
-                flags |= StatusBarManager.DISABLE_RECENT;
-            }
-            if (isShowingAndNotOccluded()) {
-                flags |= StatusBarManager.DISABLE_HOME;
+            if (forceHideHomeRecentsButtons || isShowingAndNotOccluded()) {
+                flags |= StatusBarManager.DISABLE_HOME | StatusBarManager.DISABLE_RECENT;
             }
 
             if (DEBUG) {
                 Log.d(TAG, "adjustStatusBarLocked: mShowing=" + mShowing + " mOccluded=" + mOccluded
-                        + " isSecure=" + isSecure() + " --> flags=0x" + Integer.toHexString(flags));
+                        + " isSecure=" + isSecure() + " force=" + forceHideHomeRecentsButtons
+                        +  " --> flags=0x" + Integer.toHexString(flags));
             }
 
             mStatusBarManager.disable(flags);

@@ -26,7 +26,7 @@ import java.util.Arrays;
  * @hide
  */
 @SystemApi
-public class ContextHubInfo {
+public class ContextHubInfo implements Parcelable {
     private int mId;
     private String mName;
     private String mVendor;
@@ -262,7 +262,7 @@ public class ContextHubInfo {
     @Override
     public String toString() {
         String retVal = "";
-        retVal += "Id : " + mId;
+        retVal += "ID/handle : " + mId;
         retVal += ", Name : " + mName;
         retVal += "\n\tVendor : " + mVendor;
         retVal += ", Toolchain : " + mToolchain;
@@ -275,8 +275,6 @@ public class ContextHubInfo {
         retVal += ", StoppedPowerDraw : " + mStoppedPowerDrawMw + " mW";
         retVal += ", PeakPowerDraw : " + mPeakPowerDrawMw + " mW";
         retVal += ", MaxPacketLength : " + mMaxPacketLengthBytes + " Bytes";
-        retVal += "\n\tSupported sensors : " + Arrays.toString(mSupportedSensors);
-        retVal += "\n\tMemory Regions : " + Arrays.toString(mMemoryRegions);
 
         return retVal;
     }

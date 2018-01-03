@@ -93,6 +93,8 @@ class TaskSnapshotController {
     private final ArraySet<Task> mTmpTasks = new ArraySet<>();
     private final Handler mHandler = new Handler();
 
+    private final Rect mTmpRect = new Rect();
+
     /**
      * Flag indicating whether we are running on an Android TV device.
      */
@@ -223,11 +225,11 @@ class TaskSnapshotController {
 
         final boolean isLowRamDevice = ActivityManager.isLowRamDeviceStatic();
         final float scaleFraction = isLowRamDevice ? REDUCED_SCALE : 1f;
-        final Rect taskFrame = new Rect();
-        task.getBounds(taskFrame);
+        task.getBounds(mTmpRect);
+        mTmpRect.offsetTo(0, 0);
 
-        final GraphicBuffer buffer = SurfaceControl.captureLayersToBuffer(
-                task.getSurfaceControl().getHandle(), taskFrame, scaleFraction);
+        final GraphicBuffer buffer = SurfaceControl.captureLayers(
+                task.getSurfaceControl().getHandle(), mTmpRect, scaleFraction);
 
         if (buffer == null || buffer.getWidth() <= 1 || buffer.getHeight() <= 1) {
             if (DEBUG_SCREENSHOT) {
@@ -236,7 +238,7 @@ class TaskSnapshotController {
             return null;
         }
         return new TaskSnapshot(buffer, top.getConfiguration().orientation,
-                minRect(mainWindow.mContentInsets, mainWindow.mStableInsets),
+                getInsetsFromTaskBounds(mainWindow, task),
                 isLowRamDevice /* reduced */, scaleFraction /* scale */);
     }
 
@@ -244,11 +246,18 @@ class TaskSnapshotController {
         return mIsRunningOnWear || mIsRunningOnTv || mIsRunningOnIoT;
     }
 
-    private Rect minRect(Rect rect1, Rect rect2) {
-        return new Rect(Math.min(rect1.left, rect2.left),
-                Math.min(rect1.top, rect2.top),
-                Math.min(rect1.right, rect2.right),
-                Math.min(rect1.bottom, rect2.bottom));
+    private Rect getInsetsFromTaskBounds(WindowState state, Task task) {
+        final Rect r = new Rect();
+        r.set(state.getContentFrameLw());
+        r.intersectUnchecked(state.getStableFrameLw());
+
+        final Rect taskBounds = task.getBounds();
+
+        r.set(Math.max(0, r.left - taskBounds.left),
+                Math.max(0, r.top - taskBounds.top),
+                Math.max(0, taskBounds.right - r.right),
+                Math.max(0, taskBounds.bottom - r.bottom));
+        return r;
     }
 
     /**

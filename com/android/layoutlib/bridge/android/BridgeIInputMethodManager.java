@@ -154,12 +154,6 @@ public class BridgeIInputMethodManager implements IInputMethodManager {
     }
 
     @Override
-    public boolean setInputMethodEnabled(String arg0, boolean arg1) throws RemoteException {
-        // TODO Auto-generated method stub
-        return false;
-    }
-
-    @Override
     public void showInputMethodAndSubtypeEnablerFromClient(IInputMethodClient arg0, String arg1)
             throws RemoteException {
         // TODO Auto-generated method stub
@@ -232,7 +226,8 @@ public class BridgeIInputMethodManager implements IInputMethodManager {
             IInputMethodClient client, IBinder windowToken, int controlFlags,
             /* @android.view.WindowManager.LayoutParams.SoftInputModeFlags */ int softInputMode,
             int windowFlags, EditorInfo attribute, IInputContext inputContext,
-            /* @InputConnectionInspector.MissingMethodFlags */ int missingMethodFlags)
+            /* @InputConnectionInspector.MissingMethodFlags */ int missingMethodFlags,
+            int unverifiedTargetSdkVersion)
             throws RemoteException {
         // TODO Auto-generated method stub
         return null;
@@ -254,5 +249,11 @@ public class BridgeIInputMethodManager implements IInputMethodManager {
     @Override
     public void reportFullscreenMode(IBinder token, boolean fullscreen) {
         // TODO Auto-generated method stub
+    }
+
+    @Override
+    public List<InputMethodInfo> getVrInputMethodList() {
+        // TODO Auto-generated method stub.
+        return null;
     }
 }

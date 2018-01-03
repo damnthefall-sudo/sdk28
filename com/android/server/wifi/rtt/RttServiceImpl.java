@@ -22,17 +22,19 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.database.ContentObserver;
 import android.hardware.wifi.V1_0.RttResult;
 import android.hardware.wifi.V1_0.RttStatus;
-import android.net.wifi.ScanResult;
+import android.location.LocationManager;
+import android.net.MacAddress;
 import android.net.wifi.aware.IWifiAwareMacAddressProvider;
 import android.net.wifi.aware.IWifiAwareManager;
-import android.net.wifi.aware.PeerHandle;
 import android.net.wifi.rtt.IRttCallback;
 import android.net.wifi.rtt.IWifiRttManager;
 import android.net.wifi.rtt.RangingRequest;
 import android.net.wifi.rtt.RangingResult;
 import android.net.wifi.rtt.RangingResultCallback;
+import android.net.wifi.rtt.ResponderConfig;
 import android.net.wifi.rtt.WifiRttManager;
 import android.os.Binder;
 import android.os.Handler;
@@ -42,15 +44,14 @@ import android.os.PowerManager;
 import android.os.RemoteException;
 import android.os.UserHandle;
 import android.os.WorkSource;
+import android.provider.Settings;
 import android.util.Log;
+import android.util.SparseIntArray;
 
-import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.WakeupMessage;
 import com.android.server.wifi.Clock;
-import com.android.server.wifi.util.NativeUtil;
+import com.android.server.wifi.FrameworkFacade;
 import com.android.server.wifi.util.WifiPermissionsUtil;
-
-import libcore.util.HexEncoding;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
@@ -68,6 +69,7 @@ import java.util.Map;
 public class RttServiceImpl extends IWifiRttManager.Stub {
     private static final String TAG = "RttServiceImpl";
     private static final boolean VDBG = false; // STOPSHIP if true
+    private boolean mDbg = false;
 
     private final Context mContext;
     private Clock mClock;
@@ -76,16 +78,19 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
     private WifiPermissionsUtil mWifiPermissionsUtil;
     private ActivityManager mActivityManager;
     private PowerManager mPowerManager;
+    private FrameworkFacade mFrameworkFacade;
 
     private RttServiceSynchronized mRttServiceSynchronized;
 
-    @VisibleForTesting
-    public static final String HAL_RANGING_TIMEOUT_TAG = TAG + " HAL Ranging Timeout";
+    /* package */ static final String HAL_RANGING_TIMEOUT_TAG = TAG + " HAL Ranging Timeout";
 
     private static final long HAL_RANGING_TIMEOUT_MS = 5_000; // 5 sec
 
     // TODO: b/69323456 convert to a settable value
     /* package */ static final long BACKGROUND_PROCESS_EXEC_GAP_MS = 1_800_000; // 30 min
+
+    // arbitrary, larger than anything reasonable
+    /* package */ static final int MAX_QUEUED_PER_UID = 20;
 
     public RttServiceImpl(Context context) {
         mContext = context;
@@ -103,14 +108,16 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
      * @param awareBinder The Wi-Fi Aware service (binder) if supported on the system.
      * @param rttNative The Native interface to the HAL.
      * @param wifiPermissionsUtil Utility for permission checks.
+     * @param frameworkFacade Facade for framework classes, allows mocking.
      */
     public void start(Looper looper, Clock clock, IWifiAwareManager awareBinder,
-            RttNative rttNative,
-            WifiPermissionsUtil wifiPermissionsUtil) {
+            RttNative rttNative, WifiPermissionsUtil wifiPermissionsUtil,
+            FrameworkFacade frameworkFacade) {
         mClock = clock;
         mAwareBinder = awareBinder;
         mRttNative = rttNative;
         mWifiPermissionsUtil = wifiPermissionsUtil;
+        mFrameworkFacade = frameworkFacade;
         mRttServiceSynchronized = new RttServiceSynchronized(looper, rttNative);
 
         mActivityManager = (ActivityManager) mContext.getSystemService(Context.ACTIVITY_SERVICE);
@@ -121,14 +128,43 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
             @Override
             public void onReceive(Context context, Intent intent) {
                 String action = intent.getAction();
-                if (VDBG) Log.v(TAG, "BroadcastReceiver: action=" + action);
+                if (mDbg) Log.v(TAG, "BroadcastReceiver: action=" + action);
 
                 if (PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED.equals(action)) {
                     if (mPowerManager.isDeviceIdleMode()) {
                         disable();
                     } else {
-                        enable();
+                        enableIfPossible();
                     }
+                }
+            }
+        }, intentFilter);
+
+        frameworkFacade.registerContentObserver(mContext,
+                Settings.Global.getUriFor(Settings.Global.WIFI_VERBOSE_LOGGING_ENABLED), true,
+                new ContentObserver(mRttServiceSynchronized.mHandler) {
+                    @Override
+                    public void onChange(boolean selfChange) {
+                        enableVerboseLogging(frameworkFacade.getIntegerSetting(mContext,
+                                Settings.Global.WIFI_VERBOSE_LOGGING_ENABLED, 0));
+                    }
+                });
+        enableVerboseLogging(frameworkFacade.getIntegerSetting(mContext,
+                Settings.Global.WIFI_VERBOSE_LOGGING_ENABLED, 0));
+
+        intentFilter = new IntentFilter();
+        intentFilter.addAction(LocationManager.MODE_CHANGED_ACTION);
+        mContext.registerReceiver(new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (mDbg) Log.v(TAG, "onReceive: MODE_CHANGED_ACTION: intent=" + intent);
+                int locationMode = mFrameworkFacade.getSecureIntegerSetting(mContext,
+                        Settings.Secure.LOCATION_MODE, Settings.Secure.LOCATION_MODE_OFF);
+                if (locationMode == Settings.Secure.LOCATION_MODE_HIGH_ACCURACY
+                        || locationMode == Settings.Secure.LOCATION_MODE_BATTERY_SAVING) {
+                    enableIfPossible();
+                } else {
+                    disable();
                 }
             }
         }, intentFilter);
@@ -136,6 +172,18 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
         mRttServiceSynchronized.mHandler.post(() -> {
             rttNative.start();
         });
+    }
+
+    private void enableVerboseLogging(int verbose) {
+        if (verbose > 0) {
+            mDbg = true;
+        } else {
+            mDbg = false;
+        }
+        if (VDBG) {
+            mDbg = true; // just override
+        }
+        mRttNative.mDbg = mDbg;
     }
 
     /*
@@ -151,10 +199,19 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
     }
 
     /**
-     * Enable the API: broadcast notification
+     * Enable the API if possible: broadcast notification & start launching any queued requests
+     *
+     * If possible:
+     * - RTT HAL is available
+     * - Not in Idle mode
+     * - Location Mode allows Wi-Fi based locationing
      */
-    public void enable() {
-        if (VDBG) Log.v(TAG, "enable");
+    public void enableIfPossible() {
+        boolean isAvailable = isAvailable();
+        if (VDBG) Log.v(TAG, "enableIfPossible: isAvailable=" + isAvailable);
+        if (!isAvailable) {
+            return;
+        }
         sendRttStateChangedBroadcast(true);
         mRttServiceSynchronized.mHandler.post(() -> {
             // queue should be empty at this point (but this call allows validation)
@@ -181,7 +238,11 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
      */
     @Override
     public boolean isAvailable() {
-        return mRttNative.isReady() && !mPowerManager.isDeviceIdleMode();
+        int locationMode = mFrameworkFacade.getSecureIntegerSetting(mContext,
+                Settings.Secure.LOCATION_MODE, Settings.Secure.LOCATION_MODE_OFF);
+        return mRttNative.isReady() && !mPowerManager.isDeviceIdleMode() && (
+                locationMode == Settings.Secure.LOCATION_MODE_HIGH_ACCURACY
+                        || locationMode == Settings.Secure.LOCATION_MODE_BATTERY_SAVING);
     }
 
     /**
@@ -222,7 +283,7 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
         // permission checks
         enforceAccessPermission();
         enforceChangePermission();
-        enforceLocationPermission(callingPackage, uid);
+        mWifiPermissionsUtil.enforceLocationPermission(callingPackage, uid);
         if (workSource != null) {
             enforceLocationHardware();
         }
@@ -231,7 +292,7 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
         IBinder.DeathRecipient dr = new IBinder.DeathRecipient() {
             @Override
             public void binderDied() {
-                if (VDBG) Log.v(TAG, "binderDied: uid=" + uid);
+                if (mDbg) Log.v(TAG, "binderDied: uid=" + uid);
                 binder.unlinkToDeath(this, 0);
 
                 mRttServiceSynchronized.mHandler.post(() -> {
@@ -291,11 +352,6 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
         mContext.enforceCallingOrSelfPermission(android.Manifest.permission.CHANGE_WIFI_STATE, TAG);
     }
 
-    private void enforceLocationPermission(String callingPackage, int uid) {
-        mContext.enforceCallingOrSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION,
-                TAG);
-    }
-
     private void enforceLocationHardware() {
         mContext.enforceCallingOrSelfPermission(android.Manifest.permission.LOCATION_HARDWARE,
                 TAG);
@@ -349,24 +405,8 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
 
         private void cancelRanging(RttRequestInfo rri) {
             ArrayList<byte[]> macAddresses = new ArrayList<>();
-            for (RangingRequest.RttPeer peer : rri.request.mRttPeers) {
-                if (peer instanceof RangingRequest.RttPeerAp) {
-                    ScanResult scanResult =
-                            ((RangingRequest.RttPeerAp) peer).scanResult;
-
-                    byte[] addr = NativeUtil.macAddressToByteArray(scanResult.BSSID);
-                    if (addr.length != 6) {
-                        Log.e(TAG, "Invalid configuration: unexpected BSSID length -- "
-                                + peer);
-                        continue;
-                    }
-                    macAddresses.add(addr);
-                } else if (peer instanceof RangingRequest.RttPeerAware) {
-                    if (((RangingRequest.RttPeerAware) peer).peerMacAddress != null) {
-                        macAddresses.add(
-                                ((RangingRequest.RttPeerAware) peer).peerMacAddress);
-                    }
-                }
+            for (ResponderConfig peer : rri.request.mRttPeers) {
+                macAddresses.add(peer.macAddress.toByteArray());
             }
 
             mRttNative.rangeCancel(rri.cmdId, macAddresses);
@@ -477,6 +517,19 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
         private void queueRangingRequest(int uid, WorkSource workSource, IBinder binder,
                 IBinder.DeathRecipient dr, String callingPackage, RangingRequest request,
                 IRttCallback callback) {
+            if (isRequestorSpamming(workSource)) {
+                Log.w(TAG,
+                        "Work source " + workSource + " is spamming, dropping request: " + request);
+                binder.unlinkToDeath(dr, 0);
+                try {
+                    callback.onRangingFailure(RangingResultCallback.STATUS_CODE_FAIL);
+                } catch (RemoteException e) {
+                    Log.e(TAG, "RttServiceSynchronized.queueRangingRequest: spamming, callback "
+                            + "failed -- " + e);
+                }
+                return;
+            }
+
             RttRequestInfo newRequest = new RttRequestInfo();
             newRequest.uid = uid;
             newRequest.workSource = workSource;
@@ -492,6 +545,30 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
             }
 
             executeNextRangingRequestIfPossible(false);
+        }
+
+        private boolean isRequestorSpamming(WorkSource ws) {
+            if (VDBG) Log.v(TAG, "isRequestorSpamming: ws" + ws);
+
+            SparseIntArray counts = new SparseIntArray();
+
+            for (RttRequestInfo rri : mRttRequestQueue) {
+                for (int i = 0; i < rri.workSource.size(); ++i) {
+                    int uid = rri.workSource.get(i);
+                    counts.put(uid, counts.get(uid) + 1);
+                }
+            }
+
+            for (int i = 0; i < ws.size(); ++i) {
+                if (counts.get(ws.get(i)) < MAX_QUEUED_PER_UID) {
+                    return false;
+                }
+            }
+
+            if (mDbg) {
+                Log.v(TAG, "isRequestorSpamming: ws=" + ws + ", someone is spamming: " + counts);
+            }
+            return true;
         }
 
         private void executeNextRangingRequestIfPossible(boolean popFirst) {
@@ -584,7 +661,7 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
         /**
          * Perform pre-execution throttling checks:
          * - If all uids in ws are in background then check last execution and block if request is
-         *   more frequent than permitted
+         * more frequent than permitted
          * - If executing (i.e. permitted) then update execution time
          *
          * Returns true to permit execution, false to abort it.
@@ -652,12 +729,9 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
          */
         private boolean processAwarePeerHandles(RttRequestInfo request) {
             List<Integer> peerIdsNeedingTranslation = new ArrayList<>();
-            for (RangingRequest.RttPeer rttPeer: request.request.mRttPeers) {
-                if (rttPeer instanceof RangingRequest.RttPeerAware) {
-                    RangingRequest.RttPeerAware awarePeer = (RangingRequest.RttPeerAware) rttPeer;
-                    if (awarePeer.peerHandle != null && awarePeer.peerMacAddress == null) {
-                        peerIdsNeedingTranslation.add(awarePeer.peerHandle.peerId);
-                    }
+            for (ResponderConfig rttPeer : request.request.mRttPeers) {
+                if (rttPeer.peerHandle != null && rttPeer.macAddress == null) {
+                    peerIdsNeedingTranslation.add(rttPeer.peerHandle.peerId);
                 }
             }
 
@@ -713,14 +787,19 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
                         + ", peerIdToMacMap=" + peerIdToMacMap);
             }
 
-            for (RangingRequest.RttPeer rttPeer: request.request.mRttPeers) {
-                if (rttPeer instanceof RangingRequest.RttPeerAware) {
-                    RangingRequest.RttPeerAware awarePeer = (RangingRequest.RttPeerAware) rttPeer;
-                    if (awarePeer.peerHandle != null && awarePeer.peerMacAddress == null) {
-                        awarePeer.peerMacAddress = peerIdToMacMap.get(awarePeer.peerHandle.peerId);
-                    }
+            RangingRequest.Builder newRequestBuilder = new RangingRequest.Builder();
+            for (ResponderConfig rttPeer : request.request.mRttPeers) {
+                if (rttPeer.peerHandle != null && rttPeer.macAddress == null) {
+                    newRequestBuilder.addResponder(new ResponderConfig(
+                            MacAddress.fromBytes(peerIdToMacMap.get(rttPeer.peerHandle.peerId)),
+                            rttPeer.peerHandle, rttPeer.responderType, rttPeer.supports80211mc,
+                            rttPeer.channelWidth, rttPeer.frequency, rttPeer.centerFreq0,
+                            rttPeer.centerFreq1, rttPeer.preamble));
+                } else {
+                    newRequestBuilder.addResponder(rttPeer);
                 }
             }
+            request.request = newRequestBuilder.build();
 
             // run request again
             startRanging(request);
@@ -749,6 +828,12 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
 
             boolean permissionGranted = mWifiPermissionsUtil.checkCallersLocationPermission(
                     topOfQueueRequest.callingPackage, topOfQueueRequest.uid);
+            int locationMode = mFrameworkFacade.getSecureIntegerSetting(mContext,
+                    Settings.Secure.LOCATION_MODE, Settings.Secure.LOCATION_MODE_OFF);
+            if (locationMode != Settings.Secure.LOCATION_MODE_HIGH_ACCURACY
+                            && locationMode != Settings.Secure.LOCATION_MODE_BATTERY_SAVING) {
+                permissionGranted = false;
+            }
             try {
                 if (permissionGranted) {
                     List<RangingResult> finalResults = postProcessResults(topOfQueueRequest.request,
@@ -780,52 +865,43 @@ public class RttServiceImpl extends IWifiRttManager.Stub {
          */
         private List<RangingResult> postProcessResults(RangingRequest request,
                 List<RttResult> results) {
-            Map<String, RttResult> resultEntries = new HashMap<>();
-            for (RttResult result: results) {
-                resultEntries.put(new String(HexEncoding.encode(result.addr)), result);
+            Map<MacAddress, RttResult> resultEntries = new HashMap<>();
+            for (RttResult result : results) {
+                resultEntries.put(MacAddress.fromBytes(result.addr), result);
             }
 
             List<RangingResult> finalResults = new ArrayList<>(request.mRttPeers.size());
 
-            for (RangingRequest.RttPeer peer: request.mRttPeers) {
-                byte[] addr;
-                if (peer instanceof RangingRequest.RttPeerAp) {
-                    addr = NativeUtil.macAddressToByteArray(
-                            ((RangingRequest.RttPeerAp) peer).scanResult.BSSID);
-                } else if (peer instanceof RangingRequest.RttPeerAware) {
-                    addr = ((RangingRequest.RttPeerAware) peer).peerMacAddress;
-                } else {
-                    Log.w(TAG, "postProcessResults: unknown peer type -- " + peer.getClass());
-                    continue;
-                }
-
-                RttResult resultForRequest = resultEntries.get(
-                        new String(HexEncoding.encode(addr)));
+            for (ResponderConfig peer : request.mRttPeers) {
+                RttResult resultForRequest = resultEntries.get(peer.macAddress);
                 if (resultForRequest == null) {
-                    if (VDBG) {
-                        Log.v(TAG, "postProcessResults: missing=" + new String(
-                                HexEncoding.encode(addr)));
+                    if (mDbg) {
+                        Log.v(TAG, "postProcessResults: missing=" + peer.macAddress);
                     }
-                    finalResults.add(
-                            new RangingResult(RangingResult.STATUS_FAIL, addr, 0, 0, 0, 0));
+                    if (peer.peerHandle == null) {
+                        finalResults.add(
+                                new RangingResult(RangingResult.STATUS_FAIL, peer.macAddress, 0, 0,
+                                        0, 0));
+                    } else {
+                        finalResults.add(
+                                new RangingResult(RangingResult.STATUS_FAIL, peer.peerHandle, 0, 0,
+                                        0, 0));
+                    }
                 } else {
                     int status = resultForRequest.status == RttStatus.SUCCESS
                             ? RangingResult.STATUS_SUCCESS : RangingResult.STATUS_FAIL;
-                    PeerHandle peerHandle = null;
-                    if (peer instanceof RangingRequest.RttPeerAware) {
-                        peerHandle = ((RangingRequest.RttPeerAware) peer).peerHandle;
-                    }
-
-                    if (peerHandle == null) {
+                    if (peer.peerHandle == null) {
                         finalResults.add(
-                                new RangingResult(status, addr, resultForRequest.distanceInMm,
-                                        resultForRequest.distanceSdInMm, resultForRequest.rssi,
-                                        resultForRequest.timeStampInUs));
+                                new RangingResult(status, peer.macAddress,
+                                        resultForRequest.distanceInMm,
+                                        resultForRequest.distanceSdInMm,
+                                        resultForRequest.rssi, resultForRequest.timeStampInUs));
                     } else {
                         finalResults.add(
-                                new RangingResult(status, peerHandle, resultForRequest.distanceInMm,
-                                        resultForRequest.distanceSdInMm, resultForRequest.rssi,
-                                        resultForRequest.timeStampInUs));
+                                new RangingResult(status, peer.peerHandle,
+                                        resultForRequest.distanceInMm,
+                                        resultForRequest.distanceSdInMm,
+                                        resultForRequest.rssi, resultForRequest.timeStampInUs));
                     }
                 }
             }

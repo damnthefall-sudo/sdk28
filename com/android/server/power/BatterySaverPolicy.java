@@ -49,11 +49,21 @@ public class BatterySaverPolicy extends ContentObserver {
 
     public static final boolean DEBUG = false; // DO NOT SUBMIT WITH TRUE.
 
-    // Value of batterySaverGpsMode such that GPS isn't affected by battery saver mode.
+    /** Value of batterySaverGpsMode such that GPS isn't affected by battery saver mode. */
     public static final int GPS_MODE_NO_CHANGE = 0;
-    // Value of batterySaverGpsMode such that GPS is disabled when battery saver mode
-    // is enabled and the screen is off.
+
+    /**
+     * Value of batterySaverGpsMode such that GPS is disabled when battery saver mode
+     * is enabled and the screen is off.
+     */
     public static final int GPS_MODE_DISABLED_WHEN_SCREEN_OFF = 1;
+
+    /**
+     * Value of batterySaverGpsMode such that location should be disabled altogether
+     * when battery saver mode is enabled and the screen is off.
+     */
+    public static final int GPS_MODE_ALL_DISABLED_WHEN_SCREEN_OFF = 2;
+
     // Secure setting for GPS behavior when battery saver mode is on.
     public static final String SECURE_KEY_GPS_MODE = "batterySaverGpsMode";
 
@@ -85,6 +95,12 @@ public class BatterySaverPolicy extends ContentObserver {
 
     @GuardedBy("mLock")
     private String mDeviceSpecificSettingsSource; // For dump() only.
+
+    /**
+     * A short string describing which battery saver is now enabled, which we dump in the eventlog.
+     */
+    @GuardedBy("mLock")
+    private String mEventLogKeys;
 
     /**
      * {@code true} if vibration is disabled in battery saver mode.
@@ -323,12 +339,12 @@ public class BatterySaverPolicy extends ContentObserver {
         }
 
         mVibrationDisabled = parser.getBoolean(KEY_VIBRATION_DISABLED, true);
-        mAnimationDisabled = parser.getBoolean(KEY_ANIMATION_DISABLED, true);
+        mAnimationDisabled = parser.getBoolean(KEY_ANIMATION_DISABLED, false);
         mSoundTriggerDisabled = parser.getBoolean(KEY_SOUNDTRIGGER_DISABLED, true);
         mFullBackupDeferred = parser.getBoolean(KEY_FULLBACKUP_DEFERRED, true);
         mKeyValueBackupDeferred = parser.getBoolean(KEY_KEYVALUE_DEFERRED, true);
         mFireWallDisabled = parser.getBoolean(KEY_FIREWALL_DISABLED, false);
-        mAdjustBrightnessDisabled = parser.getBoolean(KEY_ADJUST_BRIGHTNESS_DISABLED, false);
+        mAdjustBrightnessDisabled = parser.getBoolean(KEY_ADJUST_BRIGHTNESS_DISABLED, true);
         mAdjustBrightnessFactor = parser.getFloat(KEY_ADJUST_BRIGHTNESS_FACTOR, 0.5f);
         mDataSaverDisabled = parser.getBoolean(KEY_DATASAVER_DISABLED, true);
         mLaunchBoostDisabled = parser.getBoolean(KEY_LAUNCH_BOOST_DISABLED, true);
@@ -338,7 +354,7 @@ public class BatterySaverPolicy extends ContentObserver {
 
         // Get default value from Settings.Secure
         final int defaultGpsMode = Settings.Secure.getInt(mContentResolver, SECURE_KEY_GPS_MODE,
-                GPS_MODE_NO_CHANGE);
+                GPS_MODE_ALL_DISABLED_WHEN_SCREEN_OFF);
         mGpsMode = parser.getInt(KEY_GPS_MODE, defaultGpsMode);
 
         // Non-device-specific parameters.
@@ -354,6 +370,27 @@ public class BatterySaverPolicy extends ContentObserver {
 
         mFilesForNoninteractive = (new CpuFrequencies()).parseString(
                 parser.getString(KEY_CPU_FREQ_NONINTERACTIVE, "")).toSysFileMap();
+
+        final StringBuilder sb = new StringBuilder();
+
+        if (mForceAllAppsStandby) sb.append("A");
+        if (mForceBackgroundCheck) sb.append("B");
+
+        if (mVibrationDisabled) sb.append("v");
+        if (mAnimationDisabled) sb.append("a");
+        if (mSoundTriggerDisabled) sb.append("s");
+        if (mFullBackupDeferred) sb.append("F");
+        if (mKeyValueBackupDeferred) sb.append("K");
+        if (!mFireWallDisabled) sb.append("f");
+        if (!mDataSaverDisabled) sb.append("d");
+        if (!mAdjustBrightnessDisabled) sb.append("b");
+
+        if (mLaunchBoostDisabled) sb.append("l");
+        if (mOptionalSensorsDisabled) sb.append("S");
+
+        sb.append(mGpsMode);
+
+        mEventLogKeys = sb.toString();
     }
 
     /**
@@ -419,6 +456,12 @@ public class BatterySaverPolicy extends ContentObserver {
         }
     }
 
+    public int getGpsMode() {
+        synchronized (mLock) {
+            return mGpsMode;
+        }
+    }
+
     public ArrayMap<String, String> getFileValues(boolean interactive) {
         synchronized (mLock) {
             return interactive ? mFilesForInteractive : mFilesForNoninteractive;
@@ -428,6 +471,12 @@ public class BatterySaverPolicy extends ContentObserver {
     public boolean isLaunchBoostDisabled() {
         synchronized (mLock) {
             return mLaunchBoostDisabled;
+        }
+    }
+
+    public String toEventLogString() {
+        synchronized (mLock) {
+            return mEventLogKeys;
         }
     }
 

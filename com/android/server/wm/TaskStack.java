@@ -31,9 +31,8 @@ import static android.view.WindowManager.DOCKED_INVALID;
 import static android.view.WindowManager.DOCKED_LEFT;
 import static android.view.WindowManager.DOCKED_RIGHT;
 import static android.view.WindowManager.DOCKED_TOP;
-import static com.android.server.policy.WindowManagerPolicy.FINISH_LAYOUT_REDO_WALLPAPER;
+
 import static com.android.server.wm.DragResizeMode.DRAG_RESIZE_MODE_DOCKED_DIVIDER;
-import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_ANIM;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_TASK_MOVEMENT;
 import static com.android.server.wm.WindowManagerDebugConfig.TAG_WM;
 import static com.android.server.wm.proto.StackProto.ANIMATION_BACKGROUND_SURFACE_IS_DIMMING;
@@ -74,9 +73,6 @@ public class TaskStack extends WindowContainer<Task> implements
 
     /** Unique identifier */
     final int mStackId;
-
-    /** The service */
-    private final WindowManagerService mService;
 
     /** The display this stack sits under. */
     // TODO: Track parent marks like this in WindowContainer.
@@ -151,7 +147,7 @@ public class TaskStack extends WindowContainer<Task> implements
     final Rect mTmpDimBoundsRect = new Rect();
 
     TaskStack(WindowManagerService service, int stackId, StackWindowController controller) {
-        mService = service;
+        super(service);
         mStackId = stackId;
         setController(controller);
         mDockedStackMinimizeThickness = service.mContext.getResources().getDimensionPixelSize(
@@ -223,6 +219,8 @@ public class TaskStack extends WindowContainer<Task> implements
         }
         alignTasksToAdjustedBounds(adjusted ? mAdjustedBounds : getRawBounds(), insetBounds);
         mDisplayContent.setLayoutNeeded();
+
+        updateSurfaceBounds();
     }
 
     private void alignTasksToAdjustedBounds(Rect adjustedBounds, Rect tempInsetBounds) {
@@ -244,10 +242,11 @@ public class TaskStack extends WindowContainer<Task> implements
             return;
         }
         getRawBounds(mTmpRect);
-        // TODO: Should be in relative coordinates.
-        getPendingTransaction().setSize(mAnimationBackgroundSurface, mTmpRect.width(),
-                mTmpRect.height()).setPosition(mAnimationBackgroundSurface, mTmpRect.left,
-                mTmpRect.top);
+        final Rect stackBounds = getBounds();
+        getPendingTransaction()
+                .setSize(mAnimationBackgroundSurface, mTmpRect.width(), mTmpRect.height())
+                .setPosition(mAnimationBackgroundSurface, mTmpRect.left - stackBounds.left,
+                        mTmpRect.top - stackBounds.top);
         scheduleAnimation();
     }
 
@@ -300,6 +299,7 @@ public class TaskStack extends WindowContainer<Task> implements
 
         updateAdjustedBounds();
 
+        updateSurfaceBounds();
         return result;
     }
 
@@ -320,7 +320,7 @@ public class TaskStack extends WindowContainer<Task> implements
         if (matchParentBounds()
                 || !inSplitScreenSecondaryWindowingMode()
                 || mDisplayContent == null
-                || mDisplayContent.getSplitScreenPrimaryStack() != null) {
+                || mDisplayContent.getSplitScreenPrimaryStackIgnoringVisibility() != null) {
             return true;
         }
         return false;
@@ -714,13 +714,36 @@ public class TaskStack extends WindowContainer<Task> implements
     @Override
     public void onConfigurationChanged(Configuration newParentConfig) {
         final int prevWindowingMode = getWindowingMode();
+        // Only need to update surface size here since the super method will handle updating
+        // surface position.
+        updateSurfaceSize(getPendingTransaction());
         super.onConfigurationChanged(newParentConfig);
         final int windowingMode = getWindowingMode();
+
         if (mDisplayContent == null || prevWindowingMode == windowingMode) {
             return;
         }
         mDisplayContent.onStackWindowingModeChanged(this);
         updateBoundsForWindowModeChange();
+    }
+
+    private void updateSurfaceBounds() {
+        updateSurfaceBounds(getPendingTransaction());
+        scheduleAnimation();
+    }
+
+    void updateSurfaceBounds(SurfaceControl.Transaction transaction) {
+        updateSurfaceSize(transaction);
+        updateSurfacePosition(transaction);
+    }
+
+    private void updateSurfaceSize(SurfaceControl.Transaction transaction) {
+        if (mSurfaceControl == null) {
+            return;
+        }
+
+        final Rect stackBounds = getBounds();
+        transaction.setSize(mSurfaceControl, stackBounds.width(), stackBounds.height());
     }
 
     @Override
@@ -938,7 +961,7 @@ public class TaskStack extends WindowContainer<Task> implements
 
     @Override
     void removeIfPossible() {
-        if (isAnimating()) {
+        if (isSelfOrChildAnimating()) {
             mDeferRemoval = true;
             return;
         }
@@ -1117,12 +1140,12 @@ public class TaskStack extends WindowContainer<Task> implements
             return false;
         }
 
-        final Rect displayContentRect = mTmpRect;
+        final Rect displayStableRect = mTmpRect;
         final Rect contentBounds = mTmpRect2;
 
         // Calculate the content bounds excluding the area occupied by IME
-        getDisplayContent().getContentRect(displayContentRect);
-        contentBounds.set(displayContentRect);
+        getDisplayContent().getStableRect(displayStableRect);
+        contentBounds.set(displayStableRect);
         int imeTop = Math.max(imeWin.getFrameLw().top, contentBounds.top);
 
         imeTop += imeWin.getGivenContentInsetsLw().top;
@@ -1130,7 +1153,7 @@ public class TaskStack extends WindowContainer<Task> implements
             contentBounds.bottom = imeTop;
         }
 
-        final int yOffset = displayContentRect.bottom - contentBounds.bottom;
+        final int yOffset = displayStableRect.bottom - contentBounds.bottom;
 
         final int dividerWidth =
                 getDisplayContent().mDividerControllerLocked.getContentWidth();
@@ -1142,7 +1165,7 @@ public class TaskStack extends WindowContainer<Task> implements
             // occluded by IME. We shift its bottom up by the height of the IME, but
             // leaves at least 30% of the top stack visible.
             final int minTopStackBottom =
-                    getMinTopStackBottom(displayContentRect, getRawBounds().bottom);
+                    getMinTopStackBottom(displayStableRect, getRawBounds().bottom);
             final int bottom = Math.max(
                     getRawBounds().bottom - yOffset + dividerWidth - dividerWidthInactive,
                     minTopStackBottom);
@@ -1162,7 +1185,7 @@ public class TaskStack extends WindowContainer<Task> implements
             final int topBeforeImeAdjust =
                     getRawBounds().top - dividerWidth + dividerWidthInactive;
             final int minTopStackBottom =
-                    getMinTopStackBottom(displayContentRect,
+                    getMinTopStackBottom(displayStableRect,
                             getRawBounds().top - dividerWidth);
             final int top = Math.max(
                     getRawBounds().top - yOffset, minTopStackBottom + dividerWidthInactive);
@@ -1287,7 +1310,8 @@ public class TaskStack extends WindowContainer<Task> implements
         proto.end(token);
     }
 
-    public void dump(String prefix, PrintWriter pw) {
+    @Override
+     void dump(PrintWriter pw, String prefix, boolean dumpAll) {
         pw.println(prefix + "mStackId=" + mStackId);
         pw.println(prefix + "mDeferRemoval=" + mDeferRemoval);
         pw.println(prefix + "mBounds=" + getRawBounds().toShortString());
@@ -1303,7 +1327,7 @@ public class TaskStack extends WindowContainer<Task> implements
             pw.println(prefix + "mAdjustedBounds=" + mAdjustedBounds.toShortString());
         }
         for (int taskNdx = mChildren.size() - 1; taskNdx >= 0; taskNdx--) {
-            mChildren.get(taskNdx).dump(prefix + "  ", pw);
+            mChildren.get(taskNdx).dump(pw, prefix + "  ", dumpAll);
         }
         if (mAnimationBackgroundSurfaceIsShown) {
             pw.println(prefix + "mWindowAnimationBackgroundSurface is shown");
@@ -1316,7 +1340,7 @@ public class TaskStack extends WindowContainer<Task> implements
                 pw.print("  Exiting App #"); pw.print(i);
                 pw.print(' '); pw.print(token);
                 pw.println(':');
-                token.dump(pw, "    ");
+                token.dump(pw, "    ", dumpAll);
             }
         }
     }
@@ -1646,7 +1670,7 @@ public class TaskStack extends WindowContainer<Task> implements
 
     /** Returns true if a removal action is still being deferred. */
     boolean checkCompleteDeferredRemoval() {
-        if (isAnimating()) {
+        if (isSelfOrChildAnimating()) {
             return true;
         }
         if (mDeferRemoval) {
@@ -1654,35 +1678,6 @@ public class TaskStack extends WindowContainer<Task> implements
         }
 
         return super.checkCompleteDeferredRemoval();
-    }
-
-    void stepAppWindowsAnimation(long currentTime) {
-        super.stepAppWindowsAnimation(currentTime);
-
-        // TODO: Why aren't we just using the loop above for this? mAppAnimator.animating isn't set
-        // below but is set in the loop above. See if it really matters...
-
-        // Clear before using.
-        mTmpAppTokens.clear();
-        // We copy the list as things can be removed from the exiting token list while we are
-        // processing.
-        mTmpAppTokens.addAll(mExitingAppTokens);
-        for (int i = 0; i < mTmpAppTokens.size(); i++) {
-            final AppWindowAnimator appAnimator = mTmpAppTokens.get(i).mAppAnimator;
-            appAnimator.wasAnimating = appAnimator.animating;
-            if (appAnimator.stepAnimationLocked(currentTime)) {
-                mService.mAnimator.setAnimating(true);
-                mService.mAnimator.mAppWindowAnimating = true;
-            } else if (appAnimator.wasAnimating) {
-                // stopped animating, do one more pass through the layout
-                appAnimator.mAppToken.setAppLayoutChanges(FINISH_LAYOUT_REDO_WALLPAPER,
-                        "exiting appToken " + appAnimator.mAppToken + " done");
-                if (DEBUG_ANIM) Slog.v(TAG_WM,
-                        "updateWindowsApps...: done animating exiting " + appAnimator.mAppToken);
-            }
-        }
-        // Clear to avoid holding reference to tokens.
-        mTmpAppTokens.clear();
     }
 
     @Override
@@ -1708,6 +1703,9 @@ public class TaskStack extends WindowContainer<Task> implements
         mDimmer.resetDimStates();
         super.prepareSurfaces();
         getDimBounds(mTmpDimBoundsRect);
+
+        // Bounds need to be relative, as the dim layer is a child.
+        mTmpDimBoundsRect.offsetTo(0, 0);
         if (mDimmer.updateDims(getPendingTransaction(), mTmpDimBoundsRect)) {
             scheduleAnimation();
         }

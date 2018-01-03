@@ -2325,7 +2325,7 @@ public class AccessibilityNodeInfo implements Parcelable {
     /**
      * Returns whether the node is explicitly marked as a focusable unit by a screen reader. Note
      * that {@code false} indicates that it is not explicitly marked, not that the node is not
-     * a focusable unit. Screen readers should generally used other signals, such as
+     * a focusable unit. Screen readers should generally use other signals, such as
      * {@link #isFocusable()}, or the presence of text in a node, to determine what should receive
      * focus.
      *
@@ -3695,8 +3695,9 @@ public class AccessibilityNodeInfo implements Parcelable {
 
         if (DEBUG) {
             builder.append("; sourceNodeId: " + mSourceNodeId);
-            builder.append("; accessibilityViewId: " + getAccessibilityViewId(mSourceNodeId));
-            builder.append("; virtualDescendantId: " + getVirtualDescendantId(mSourceNodeId));
+            builder.append("; windowId: " + mWindowId);
+            builder.append("; accessibilityViewId: ").append(getAccessibilityViewId(mSourceNodeId));
+            builder.append("; virtualDescendantId: ").append(getVirtualDescendantId(mSourceNodeId));
             builder.append("; mParentNodeId: " + mParentNodeId);
             builder.append("; traversalBefore: ").append(mTraversalBefore);
             builder.append("; traversalAfter: ").append(mTraversalAfter);
@@ -3726,8 +3727,8 @@ public class AccessibilityNodeInfo implements Parcelable {
             builder.append("]");
         }
 
-        builder.append("; boundsInParent: " + mBoundsInParent);
-        builder.append("; boundsInScreen: " + mBoundsInScreen);
+        builder.append("; boundsInParent: ").append(mBoundsInParent);
+        builder.append("; boundsInScreen: ").append(mBoundsInScreen);
 
         builder.append("; packageName: ").append(mPackageName);
         builder.append("; className: ").append(mClassName);

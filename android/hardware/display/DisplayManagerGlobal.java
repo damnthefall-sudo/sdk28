@@ -462,9 +462,10 @@ public final class DisplayManagerGlobal {
     /**
      * Retrieves brightness change events.
      */
-    public List<BrightnessChangeEvent> getBrightnessEvents() {
+    public List<BrightnessChangeEvent> getBrightnessEvents(String callingPackage) {
         try {
-            ParceledListSlice<BrightnessChangeEvent> events = mDm.getBrightnessEvents();
+            ParceledListSlice<BrightnessChangeEvent> events =
+                    mDm.getBrightnessEvents(callingPackage);
             if (events == null) {
                 return Collections.emptyList();
             }
@@ -481,6 +482,19 @@ public final class DisplayManagerGlobal {
     public void setBrightness(int brightness) {
         try {
             mDm.setBrightness(brightness);
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Sets the global brightness configuration for a given user.
+     *
+     * @hide
+     */
+    public void setBrightnessConfigurationForUser(BrightnessConfiguration c, int userId) {
+        try {
+            mDm.setBrightnessConfigurationForUser(c, userId);
         } catch (RemoteException ex) {
             throw ex.rethrowFromSystemServer();
         }

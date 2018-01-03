@@ -18,10 +18,11 @@ package androidx.app.slice.widget;
 
 import static android.app.slice.Slice.HINT_LARGE;
 import static android.app.slice.Slice.HINT_TITLE;
+import static android.app.slice.Slice.SUBTYPE_COLOR;
 import static android.app.slice.Slice.SUBTYPE_SOURCE;
 import static android.app.slice.SliceItem.FORMAT_ACTION;
-import static android.app.slice.SliceItem.FORMAT_COLOR;
 import static android.app.slice.SliceItem.FORMAT_IMAGE;
+import static android.app.slice.SliceItem.FORMAT_INT;
 import static android.app.slice.SliceItem.FORMAT_TEXT;
 
 import android.annotation.TargetApi;
@@ -39,6 +40,8 @@ import android.graphics.drawable.ShapeDrawable;
 import android.graphics.drawable.shapes.OvalShape;
 import android.net.Uri;
 import android.support.annotation.RestrictTo;
+import android.view.View;
+import android.widget.FrameLayout;
 
 import androidx.app.slice.Slice;
 import androidx.app.slice.SliceItem;
@@ -50,7 +53,7 @@ import androidx.app.slice.view.R;
  */
 @RestrictTo(RestrictTo.Scope.LIBRARY)
 @TargetApi(23)
-public class ShortcutView extends androidx.app.slice.widget.SliceView.SliceModeView {
+public class ShortcutView extends FrameLayout implements SliceView.SliceModeView {
 
     private static final String TAG = "ShortcutView";
 
@@ -70,18 +73,23 @@ public class ShortcutView extends androidx.app.slice.widget.SliceView.SliceModeV
     }
 
     @Override
+    public View getView() {
+        return this;
+    }
+
+    @Override
     public void setSlice(Slice slice) {
         mLabel = null;
         mIcon = null;
         mAction = null;
         removeAllViews();
         determineShortcutItems(getContext(), slice);
-        SliceItem colorItem = SliceQuery.find(slice, FORMAT_COLOR);
+        SliceItem colorItem = SliceQuery.findSubtype(slice, FORMAT_INT, SUBTYPE_COLOR);
         if (colorItem == null) {
-            colorItem = SliceQuery.find(slice, FORMAT_COLOR);
+            colorItem = SliceQuery.findSubtype(slice, FORMAT_INT, SUBTYPE_COLOR);
         }
         // TODO: pick better default colour
-        final int color = colorItem != null ? colorItem.getColor() : Color.GRAY;
+        final int color = colorItem != null ? colorItem.getInt() : Color.GRAY;
         ShapeDrawable circle = new ShapeDrawable(new OvalShape());
         circle.setTint(color);
         setBackground(circle);

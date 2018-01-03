@@ -22,6 +22,7 @@ import android.app.admin.DevicePolicyManager;
 import android.app.admin.IDevicePolicyManager;
 import android.app.job.IJobScheduler;
 import android.app.job.JobScheduler;
+import android.app.slice.SliceManager;
 import android.app.timezone.RulesManager;
 import android.app.trust.TrustManager;
 import android.app.usage.IStorageStatsManager;
@@ -551,8 +552,16 @@ final class SystemServiceRegistry {
         registerService(Context.WALLPAPER_SERVICE, WallpaperManager.class,
                 new CachedServiceFetcher<WallpaperManager>() {
             @Override
-            public WallpaperManager createService(ContextImpl ctx) {
-                return new WallpaperManager(ctx.getOuterContext(),
+            public WallpaperManager createService(ContextImpl ctx)
+                    throws ServiceNotFoundException {
+                final IBinder b;
+                if (ctx.getApplicationInfo().targetSdkVersion >= Build.VERSION_CODES.P) {
+                    b = ServiceManager.getServiceOrThrow(Context.WALLPAPER_SERVICE);
+                } else {
+                    b = ServiceManager.getService(Context.WALLPAPER_SERVICE);
+                }
+                IWallpaperManager service = IWallpaperManager.Stub.asInterface(b);
+                return new WallpaperManager(service, ctx.getOuterContext(),
                         ctx.mMainThread.getHandler());
             }});
 
@@ -617,12 +626,13 @@ final class SystemServiceRegistry {
                         ConnectivityThread.getInstanceLooper());
             }});
 
-        registerService(Context.WIFI_RTT2_SERVICE, WifiRttManager.class,
+        registerService(Context.WIFI_RTT_RANGING_SERVICE, WifiRttManager.class,
                 new CachedServiceFetcher<WifiRttManager>() {
                     @Override
                     public WifiRttManager createService(ContextImpl ctx)
                             throws ServiceNotFoundException {
-                        IBinder b = ServiceManager.getServiceOrThrow(Context.WIFI_RTT2_SERVICE);
+                        IBinder b = ServiceManager.getServiceOrThrow(
+                                Context.WIFI_RTT_RANGING_SERVICE);
                         IWifiRttManager service = IWifiRttManager.Stub.asInterface(b);
                         return new WifiRttManager(ctx.getOuterContext(), service);
                     }});
@@ -944,6 +954,16 @@ final class SystemServiceRegistry {
                                 ICrossProfileApps.Stub.asInterface(b));
                     }
                 });
+
+        registerService(Context.SLICE_SERVICE, SliceManager.class,
+                new CachedServiceFetcher<SliceManager>() {
+                    @Override
+                    public SliceManager createService(ContextImpl ctx)
+                            throws ServiceNotFoundException {
+                        return new SliceManager(ctx.getOuterContext(),
+                                ctx.mMainThread.getHandler());
+                    }
+            });
     }
 
     /**

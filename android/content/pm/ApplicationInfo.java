@@ -26,6 +26,7 @@ import android.content.Context;
 import android.content.pm.PackageManager.NameNotFoundException;
 import android.content.res.Resources;
 import android.graphics.drawable.Drawable;
+import android.os.Build;
 import android.os.Environment;
 import android.os.Parcel;
 import android.os.Parcelable;
@@ -594,6 +595,13 @@ public class ApplicationInfo extends PackageItemInfo implements Parcelable {
      */
     public static final int PRIVATE_FLAG_OEM = 1 << 17;
 
+    /**
+     * Value for {@linl #privateFlags}: whether this app is pre-installed on the
+     * vendor partition of the system image.
+     * @hide
+     */
+    public static final int PRIVATE_FLAG_VENDOR = 1 << 18;
+
     /** @hide */
     @IntDef(flag = true, prefix = { "PRIVATE_FLAG_" }, value = {
             PRIVATE_FLAG_ACTIVITIES_RESIZE_MODE_RESIZEABLE,
@@ -613,6 +621,7 @@ public class ApplicationInfo extends PackageItemInfo implements Parcelable {
             PRIVATE_FLAG_PRIVILEGED,
             PRIVATE_FLAG_REQUIRED_FOR_SYSTEM_USER,
             PRIVATE_FLAG_STATIC_SHARED_LIBRARY,
+            PRIVATE_FLAG_VENDOR,
             PRIVATE_FLAG_VIRTUAL_PRELOAD,
     })
     @Retention(RetentionPolicy.SOURCE)
@@ -888,7 +897,7 @@ public class ApplicationInfo extends PackageItemInfo implements Parcelable {
      * The app's declared version code.
      * @hide
      */
-    public int versionCode;
+    public long versionCode;
 
     /**
      * The user-visible SDK version (ex. 26) of the framework against which the application claims
@@ -942,6 +951,13 @@ public class ApplicationInfo extends PackageItemInfo implements Parcelable {
      * @hide
      */
     public int targetSandboxVersion;
+
+    /**
+     * The factory of this package, as specified by the &lt;manifest&gt;
+     * tag's {@link android.R.styleable#AndroidManifestApplication_appComponentFactory}
+     * attribute.
+     */
+    public String appComponentFactory;
 
     /**
      * The category of this app. Categories are used to cluster multiple apps
@@ -1259,6 +1275,7 @@ public class ApplicationInfo extends PackageItemInfo implements Parcelable {
         targetSandboxVersion = orig.targetSandboxVersion;
         classLoaderName = orig.classLoaderName;
         splitClassLoaderNames = orig.splitClassLoaderNames;
+        appComponentFactory = orig.appComponentFactory;
     }
 
     public String toString() {
@@ -1315,7 +1332,7 @@ public class ApplicationInfo extends PackageItemInfo implements Parcelable {
         dest.writeInt(uid);
         dest.writeInt(minSdkVersion);
         dest.writeInt(targetSdkVersion);
-        dest.writeInt(versionCode);
+        dest.writeLong(versionCode);
         dest.writeInt(enabled ? 1 : 0);
         dest.writeInt(enabledSetting);
         dest.writeInt(installLocation);
@@ -1331,6 +1348,7 @@ public class ApplicationInfo extends PackageItemInfo implements Parcelable {
         dest.writeStringArray(splitClassLoaderNames);
         dest.writeInt(compileSdkVersion);
         dest.writeString(compileSdkVersionCodename);
+        dest.writeString(appComponentFactory);
     }
 
     public static final Parcelable.Creator<ApplicationInfo> CREATOR
@@ -1384,7 +1402,7 @@ public class ApplicationInfo extends PackageItemInfo implements Parcelable {
         uid = source.readInt();
         minSdkVersion = source.readInt();
         targetSdkVersion = source.readInt();
-        versionCode = source.readInt();
+        versionCode = source.readLong();
         enabled = source.readInt() != 0;
         enabledSetting = source.readInt();
         installLocation = source.readInt();
@@ -1400,6 +1418,7 @@ public class ApplicationInfo extends PackageItemInfo implements Parcelable {
         splitClassLoaderNames = source.readStringArray();
         compileSdkVersion = source.readInt();
         compileSdkVersionCodename = source.readString();
+        appComponentFactory = source.readString();
     }
 
     /**
@@ -1567,6 +1586,16 @@ public class ApplicationInfo extends PackageItemInfo implements Parcelable {
     /** @hide */
     public boolean isUpdatedSystemApp() {
         return (flags & ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0;
+    }
+
+    /** @hide */
+    public boolean isVendor() {
+        return (privateFlags & ApplicationInfo.PRIVATE_FLAG_VENDOR) != 0;
+    }
+
+    /** @hide */
+    public boolean isTargetingDeprecatedSdkVersion() {
+        return targetSdkVersion < Build.VERSION.MIN_SUPPORTED_TARGET_SDK_INT;
     }
 
     /**

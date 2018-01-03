@@ -23,6 +23,7 @@ import static android.app.ActivityOptions.ANIM_CLIP_REVEAL;
 import static android.app.ActivityOptions.ANIM_CUSTOM;
 import static android.app.ActivityOptions.ANIM_SCALE_UP;
 import static android.app.ActivityOptions.ANIM_SCENE_TRANSITION;
+import static android.app.ActivityOptions.ANIM_OPEN_CROSS_PROFILE_APPS;
 import static android.app.ActivityOptions.ANIM_THUMBNAIL_ASPECT_SCALE_DOWN;
 import static android.app.ActivityOptions.ANIM_THUMBNAIL_ASPECT_SCALE_UP;
 import static android.app.ActivityOptions.ANIM_THUMBNAIL_SCALE_DOWN;
@@ -618,7 +619,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
                             + ", displayId=" + displayId + ", config=" + config);
 
             service.mLifecycleManager.scheduleTransaction(app.thread, appToken,
-                    new MoveToDisplayItem(displayId, config));
+                    MoveToDisplayItem.obtain(displayId, config));
         } catch (RemoteException e) {
             // If process died, whatever.
         }
@@ -636,7 +637,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
                     + config);
 
             service.mLifecycleManager.scheduleTransaction(app.thread, appToken,
-                    new ActivityConfigurationChangeItem(config));
+                    ActivityConfigurationChangeItem.obtain(config));
         } catch (RemoteException e) {
             // If process died, whatever.
         }
@@ -663,7 +664,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
     private void scheduleMultiWindowModeChanged(Configuration overrideConfig) {
         try {
             service.mLifecycleManager.scheduleTransaction(app.thread, appToken,
-                    new MultiWindowModeChangeItem(mLastReportedMultiWindowMode,
+                    MultiWindowModeChangeItem.obtain(mLastReportedMultiWindowMode,
                             overrideConfig));
         } catch (Exception e) {
             // If process died, I don't care.
@@ -691,7 +692,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
     private void schedulePictureInPictureModeChanged(Configuration overrideConfig) {
         try {
             service.mLifecycleManager.scheduleTransaction(app.thread, appToken,
-                    new PipModeChangeItem(mLastReportedPictureInPictureMode,
+                    PipModeChangeItem.obtain(mLastReportedPictureInPictureMode,
                             overrideConfig));
         } catch (Exception e) {
             // If process died, no one cares.
@@ -1050,11 +1051,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
      * @return whether the given package name can launch an assist activity.
      */
     private boolean canLaunchAssistActivity(String packageName) {
-        if (service.mAssistUtils == null) {
-            return false;
-        }
-
-        final ComponentName assistComponent = service.mAssistUtils.getActiveServiceComponentName();
+        final ComponentName assistComponent = service.mActiveVoiceInteractionServiceComponent;
         if (assistComponent != null) {
             return assistComponent.getPackageName().equals(packageName);
         }
@@ -1380,7 +1377,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
                 ArrayList<ReferrerIntent> ar = new ArrayList<>(1);
                 ar.add(rintent);
                 service.mLifecycleManager.scheduleTransaction(app.thread, appToken,
-                        new NewIntentItem(ar, state == PAUSED));
+                        NewIntentItem.obtain(ar, state == PAUSED));
                 unsent = false;
             } catch (RemoteException e) {
                 Slog.w(TAG, "Exception thrown sending new intent to " + this, e);
@@ -1479,6 +1476,9 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
                                     pendingOptions.getStartY() + pendingOptions.getHeight()));
                         }
                     }
+                    break;
+                case ANIM_OPEN_CROSS_PROFILE_APPS:
+                    service.mWindowManager.overridePendingAppTransitionStartCrossProfileApps();
                     break;
                 default:
                     Slog.e(TAG, "applyOptionsLocked: Unknown animationType=" + animationType);
@@ -1603,7 +1603,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
             sleeping = false;
             app.pendingUiClean = true;
             service.mLifecycleManager.scheduleTransaction(app.thread, appToken,
-                    new WindowVisibilityItem(true /* showWindow */));
+                    WindowVisibilityItem.obtain(true /* showWindow */));
             // The activity may be waiting for stop, but that is no longer appropriate for it.
             mStackSupervisor.mStoppingActivities.remove(this);
             mStackSupervisor.mGoingToSleepActivities.remove(this);
@@ -2735,7 +2735,8 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
      *         {@link #mShowWhenLocked}.
      */
     boolean canShowWhenLocked() {
-        return mShowWhenLocked || service.mWindowManager.containsShowWhenLockedWindow(appToken);
+        return !inMultiWindowMode() && (mShowWhenLocked
+                || service.mWindowManager.containsShowWhenLockedWindow(appToken));
     }
 
     void setTurnScreenOn(boolean turnScreenOn) {

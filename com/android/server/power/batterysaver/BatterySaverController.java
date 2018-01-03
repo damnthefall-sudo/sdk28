@@ -16,12 +16,18 @@
 package com.android.server.power.batterysaver;
 
 import android.Manifest;
+import android.app.ActivityManager;
 import android.app.ActivityManagerInternal;
+import android.app.Notification;
+import android.app.Notification.BigTextStyle;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.hardware.power.V1_0.PowerHint;
+import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
@@ -32,11 +38,14 @@ import android.os.PowerSaveState;
 import android.os.UserHandle;
 import android.util.ArrayMap;
 import android.util.Slog;
-import android.widget.Toast;
 
+import com.android.internal.R;
 import com.android.internal.annotations.GuardedBy;
+import com.android.internal.messages.nano.SystemMessageProto.SystemMessage;
+import com.android.internal.notification.SystemNotificationChannels;
 import com.android.internal.util.ArrayUtils;
 import com.android.internal.util.Preconditions;
+import com.android.server.EventLogTags;
 import com.android.server.LocalServices;
 import com.android.server.power.BatterySaverPolicy;
 import com.android.server.power.BatterySaverPolicy.BatterySaverPolicyListener;
@@ -61,11 +70,36 @@ public class BatterySaverController implements BatterySaverPolicyListener {
 
     private final BatterySaverPolicy mBatterySaverPolicy;
 
+    private static final String WARNING_LINK_URL = "http://goto.google.com/extreme-battery-saver";
+
     @GuardedBy("mLock")
     private final ArrayList<LowPowerModeListener> mListeners = new ArrayList<>();
 
     @GuardedBy("mLock")
     private boolean mEnabled;
+
+    /**
+     * Previously enabled or not; only for the event logging. Only use it from
+     * {@link #handleBatterySaverStateChanged}.
+     */
+    private boolean mPreviouslyEnabled;
+
+    @GuardedBy("mLock")
+    private boolean mIsInteractive;
+
+    /**
+     * Read-only list of plugins. No need for synchronization.
+     */
+    private final Plugin[] mPlugins;
+
+    /**
+     * Plugin interface. All methods are guaranteed to be called on the same (handler) thread.
+     */
+    public interface Plugin {
+        void onSystemReady(BatterySaverController caller);
+
+        void onBatterySaverChanged(BatterySaverController caller);
+    }
 
     private final BroadcastReceiver mReceiver = new BroadcastReceiver() {
         @Override
@@ -92,6 +126,12 @@ public class BatterySaverController implements BatterySaverPolicyListener {
         mBatterySaverPolicy = policy;
         mBatterySaverPolicy.addListener(this);
         mFileUpdater = new FileUpdater(context);
+
+        // Initialize plugins.
+        final ArrayList<Plugin> plugins = new ArrayList<>();
+        plugins.add(new BatterySaverLocationPlugin(mContext));
+
+        mPlugins = plugins.toArray(new Plugin[plugins.size()]);
     }
 
     /**
@@ -104,7 +144,7 @@ public class BatterySaverController implements BatterySaverPolicyListener {
     }
 
     /**
-     * Called by {@link PowerManagerService} on system ready..
+     * Called by {@link PowerManagerService} on system ready.
      */
     public void systemReady() {
         final IntentFilter filter = new IntentFilter(Intent.ACTION_SCREEN_ON);
@@ -113,6 +153,7 @@ public class BatterySaverController implements BatterySaverPolicyListener {
 
         mFileUpdater.systemReady(LocalServices.getService(ActivityManagerInternal.class)
                 .isRuntimeRestarted());
+        mHandler.postSystemReady();
     }
 
     private PowerManager getPowerManager() {
@@ -137,6 +178,8 @@ public class BatterySaverController implements BatterySaverPolicyListener {
         private static final int ARG_DONT_SEND_BROADCAST = 0;
         private static final int ARG_SEND_BROADCAST = 1;
 
+        private static final int MSG_SYSTEM_READY = 2;
+
         public MyHandler(Looper looper) {
             super(looper);
         }
@@ -146,11 +189,21 @@ public class BatterySaverController implements BatterySaverPolicyListener {
                     ARG_SEND_BROADCAST : ARG_DONT_SEND_BROADCAST, 0).sendToTarget();
         }
 
+        public void postSystemReady() {
+            obtainMessage(MSG_SYSTEM_READY, 0, 0).sendToTarget();
+        }
+
         @Override
         public void dispatchMessage(Message msg) {
             switch (msg.what) {
                 case MSG_STATE_CHANGED:
                     handleBatterySaverStateChanged(msg.arg1 == ARG_SEND_BROADCAST);
+                    break;
+
+                case MSG_SYSTEM_READY:
+                    for (Plugin p : mPlugins) {
+                        p.onSystemReady(BatterySaverController.this);
+                    }
                     break;
             }
         }
@@ -171,10 +224,22 @@ public class BatterySaverController implements BatterySaverPolicyListener {
     }
 
     /** @return whether battery saver is enabled or not. */
-    boolean isEnabled() {
+    public boolean isEnabled() {
         synchronized (mLock) {
             return mEnabled;
         }
+    }
+
+    /** @return whether device is in interactive state. */
+    public boolean isInteractive() {
+        synchronized (mLock) {
+            return mIsInteractive;
+        }
+    }
+
+    /** @return Battery saver policy. */
+    public BatterySaverPolicy getBatterySaverPolicy() {
+        return mBatterySaverPolicy;
     }
 
     /**
@@ -203,11 +268,18 @@ public class BatterySaverController implements BatterySaverPolicyListener {
         final ArrayMap<String, String> fileValues;
 
         synchronized (mLock) {
-            Slog.i(TAG, "Battery saver " + (mEnabled ? "enabled" : "disabled")
-                    + ": isInteractive=" + isInteractive);
+            EventLogTags.writeBatterySaverMode(
+                    mPreviouslyEnabled ? 1 : 0, // Previously off or on.
+                    mEnabled ? 1 : 0, // Now off or on.
+                    isInteractive ?  1 : 0, // Device interactive state.
+                    mEnabled ? mBatterySaverPolicy.toEventLogString() : "");
+            mPreviouslyEnabled = mEnabled;
 
             listeners = mListeners.toArray(new LowPowerModeListener[mListeners.size()]);
+
             enabled = mEnabled;
+            mIsInteractive = isInteractive;
+
 
             if (enabled) {
                 fileValues = mBatterySaverPolicy.getFileValues(isInteractive);
@@ -227,12 +299,16 @@ public class BatterySaverController implements BatterySaverPolicyListener {
             mFileUpdater.writeFiles(fileValues);
         }
 
+        for (Plugin p : mPlugins) {
+            p.onBatterySaverChanged(this);
+        }
+
         if (sendBroadcast) {
             if (enabled) {
                 // STOPSHIP Remove the toast.
-                Toast.makeText(mContext,
-                        com.android.internal.R.string.battery_saver_warning,
-                        Toast.LENGTH_LONG).show();
+                postWarningNotification();
+            } else {
+                cancelWarningNotification();
             }
 
             if (DEBUG) {
@@ -263,6 +339,53 @@ public class BatterySaverController implements BatterySaverPolicyListener {
                                 listener.getServiceType(), enabled);
                 listener.onLowPowerModeChanged(result);
             }
+        }
+    }
+
+    private void postWarningNotification() {
+        final UserHandle foregroundUser = UserHandle.of(ActivityManager.getCurrentUser());
+
+        final PendingIntent pendingIntent = PendingIntent
+                .getActivityAsUser(mContext, 0,
+                        new Intent(Intent.ACTION_VIEW, Uri.parse(WARNING_LINK_URL)),
+                        PendingIntent.FLAG_CANCEL_CURRENT, null,
+                       foregroundUser);
+
+        final CharSequence title = mContext.getString
+                (com.android.internal.R.string.battery_saver_warning_title);
+        final CharSequence text = mContext.getString
+                (com.android.internal.R.string.battery_saver_warning);
+
+        final Notification notification =
+                new Notification.Builder(mContext, SystemNotificationChannels.ALERTS)
+                .setSmallIcon(R.drawable.stat_notify_error)
+                .setTicker(title)
+                .setWhen(System.currentTimeMillis())
+                .setContentTitle(title)
+                .setContentText(text)
+                .setContentIntent(pendingIntent)
+                .setStyle(new BigTextStyle().bigText(text))
+                .build();
+
+        final NotificationManager nm = mContext.getSystemService(NotificationManager.class);
+
+        if (nm != null) {
+            nm.notifyAsUser(title.toString(),
+                    SystemMessage.NOTE_BATTERY_SAVER_WARNING,
+                    notification,
+                    foregroundUser);
+        }
+    }
+
+    private void cancelWarningNotification() {
+        final UserHandle foregroundUser = UserHandle.of(ActivityManager.getCurrentUser());
+        final CharSequence title = mContext.getString
+                (com.android.internal.R.string.battery_saver_warning_title);
+
+        final NotificationManager nm = mContext.getSystemService(NotificationManager.class);
+        if (nm != null) {
+            nm.cancelAsUser(title.toString(), SystemMessage.NOTE_BATTERY_SAVER_WARNING,
+                    foregroundUser);
         }
     }
 }

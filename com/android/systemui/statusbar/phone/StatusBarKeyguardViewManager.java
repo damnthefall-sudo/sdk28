@@ -33,7 +33,7 @@ import android.view.WindowManagerGlobal;
 import com.android.internal.widget.LockPatternUtils;
 import com.android.keyguard.KeyguardUpdateMonitor;
 import com.android.keyguard.KeyguardUpdateMonitorCallback;
-import com.android.keyguard.LatencyTracker;
+import com.android.internal.util.LatencyTracker;
 import com.android.keyguard.ViewMediatorCallback;
 import com.android.systemui.DejankUtils;
 import com.android.systemui.Dependency;
@@ -380,8 +380,6 @@ public class StatusBarKeyguardViewManager implements RemoteInputController.Callb
                 mStatusBar.fadeKeyguardWhilePulsing();
                 wakeAndUnlockDejank();
             } else {
-                mFingerprintUnlockController.startKeyguardFadingAway();
-                mStatusBar.setKeyguardFadingAway(startTime, delay, fadeoutDuration);
                 boolean staying = mStatusBar.hideKeyguard();
                 if (!staying) {
                     mStatusBarWindowManager.setKeyguardFadingAway(true);

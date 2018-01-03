@@ -36,6 +36,7 @@ import android.os.Parcelable;
 import android.os.RemoteException;
 import android.service.autofill.AutofillService;
 import android.service.autofill.FillEventHistory;
+import android.service.autofill.UserData;
 import android.util.ArrayMap;
 import android.util.ArraySet;
 import android.util.Log;
@@ -45,6 +46,7 @@ import android.view.View;
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.logging.MetricsLogger;
 import com.android.internal.logging.nano.MetricsProto.MetricsEvent;
+import com.android.internal.util.Preconditions;
 
 import java.io.PrintWriter;
 import java.lang.annotation.Retention;
@@ -426,7 +428,7 @@ public final class AutofillManager {
      * @hide
      */
     public AutofillManager(Context context, IAutoFillManager service) {
-        mContext = context;
+        mContext = Preconditions.checkNotNull(context, "context cannot be null");
         mService = service;
     }
 
@@ -455,7 +457,7 @@ public final class AutofillManager {
             if (mSessionId != NO_SESSION) {
                 ensureServiceClientAddedIfNeededLocked();
 
-                final AutofillClient client = getClientLocked();
+                final AutofillClient client = getClient();
                 if (client != null) {
                     try {
                         final boolean sessionWasRestored = mService.restoreSession(mSessionId,
@@ -528,10 +530,13 @@ public final class AutofillManager {
      * @return whether autofill is enabled for the current user.
      */
     public boolean isEnabled() {
-        if (!hasAutofillFeature() || isDisabledByService()) {
+        if (!hasAutofillFeature()) {
             return false;
         }
         synchronized (mLock) {
+            if (isDisabledByServiceLocked()) {
+                return false;
+            }
             ensureServiceClientAddedIfNeededLocked();
             return mEnabled;
         }
@@ -603,19 +608,16 @@ public final class AutofillManager {
     }
 
     private boolean shouldIgnoreViewEnteredLocked(@NonNull View view, int flags) {
-        if (isDisabledByService()) {
+        if (isDisabledByServiceLocked()) {
             if (sVerbose) {
                 Log.v(TAG, "ignoring notifyViewEntered(flags=" + flags + ", view=" + view
                         + ") on state " + getStateAsStringLocked());
             }
             return true;
         }
-        if (mState == STATE_FINISHED && (flags & FLAG_MANUAL_REQUEST) == 0) {
-            if (sVerbose) {
-                Log.v(TAG, "ignoring notifyViewEntered(flags=" + flags + ", view=" + view
-                        + ") on state " + getStateAsStringLocked());
-            }
-            return true;
+        if (sVerbose && isFinishedLocked()) {
+            Log.v(TAG, "not ignoring notifyViewEntered(flags=" + flags + ", view=" + view
+                    + ") on state " + getStateAsStringLocked());
         }
         return false;
     }
@@ -1007,6 +1009,76 @@ public final class AutofillManager {
     }
 
     /**
+     * Returns the component name of the {@link AutofillService} that is enabled for the current
+     * user.
+     */
+    @Nullable
+    public ComponentName getAutofillServiceComponentName() {
+        if (mService == null) return null;
+
+        try {
+            return mService.getAutofillServiceComponentName();
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Gets the user data used for
+     * <a href="AutofillService.html#FieldClassification">field classification</a>.
+     *
+     * <p><b>Note:</b> This method should only be called by an app providing an autofill service.
+     *
+     * @return value previously set by {@link #setUserData(UserData)} or {@code null} if it was
+     * reset or if the caller currently does not have an enabled autofill service for the user.
+     */
+    @Nullable public UserData getUserData() {
+        try {
+            return mService.getUserData();
+        } catch (RemoteException e) {
+            e.rethrowFromSystemServer();
+            return null;
+        }
+    }
+
+    /**
+     * Sets the user data used for
+     * <a href="AutofillService.html#FieldClassification">field classification</a>
+     *
+     * <p><b>Note:</b> This method should only be called by an app providing an autofill service,
+     * and it's ignored if the caller currently doesn't have an enabled autofill service for
+     * the user.
+     */
+    public void setUserData(@Nullable UserData userData) {
+        try {
+            mService.setUserData(userData);
+        } catch (RemoteException e) {
+            e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Checks if <a href="AutofillService.html#FieldClassification">field classification</a> is
+     * enabled.
+     *
+     * <p>As field classification is an expensive operation, it could be disabled, either
+     * temporarily (for example, because the service exceeded a rate-limit threshold) or
+     * permanently (for example, because the device is a low-level device).
+     *
+     * <p><b>Note:</b> This method should only be called by an app providing an autofill service,
+     * and it's ignored if the caller currently doesn't have an enabled autofill service for
+     * the user.
+     */
+    public boolean isFieldClassificationEnabled() {
+        try {
+            return mService.isFieldClassificationEnabled();
+        } catch (RemoteException e) {
+            e.rethrowFromSystemServer();
+            return false;
+        }
+    }
+
+    /**
      * Returns {@code true} if autofill is supported by the current device and
      * is supported for this user.
      *
@@ -1026,7 +1098,8 @@ public final class AutofillManager {
         }
     }
 
-    private AutofillClient getClientLocked() {
+    // Note: don't need to use locked suffix because mContext is final.
+    private AutofillClient getClient() {
         final AutofillClient client = mContext.getAutofillClient();
         if (client == null && sDebug) {
             Log.d(TAG, "No AutofillClient for " + mContext.getPackageName() + " on context "
@@ -1081,24 +1154,24 @@ public final class AutofillManager {
             Log.v(TAG, "startSessionLocked(): id=" + id + ", bounds=" + bounds + ", value=" + value
                     + ", flags=" + flags + ", state=" + getStateAsStringLocked());
         }
-        if (mState != STATE_UNKNOWN && (flags & FLAG_MANUAL_REQUEST) == 0) {
+        if (mState != STATE_UNKNOWN && !isFinishedLocked() && (flags & FLAG_MANUAL_REQUEST) == 0) {
             if (sVerbose) {
                 Log.v(TAG, "not automatically starting session for " + id
-                        + " on state " + getStateAsStringLocked());
+                        + " on state " + getStateAsStringLocked() + " and flags " + flags);
             }
             return;
         }
         try {
-            final AutofillClient client = getClientLocked();
+            final AutofillClient client = getClient();
+            if (client == null) return; // NOTE: getClient() already logd it..
+
             mSessionId = mService.startSession(mContext.getActivityToken(),
                     mServiceClient.asBinder(), id, bounds, value, mContext.getUserId(),
                     mCallback != null, flags, client.getComponentName());
             if (mSessionId != NO_SESSION) {
                 mState = STATE_ACTIVE;
             }
-            if (client != null) {
-                client.autofillCallbackResetableStateAvailable();
-            }
+            client.autofillCallbackResetableStateAvailable();
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -1150,7 +1223,9 @@ public final class AutofillManager {
 
         try {
             if (restartIfNecessary) {
-                final AutofillClient client = getClientLocked();
+                final AutofillClient client = getClient();
+                if (client == null) return; // NOTE: getClient() already logd it..
+
                 final int newId = mService.updateOrRestartSession(mContext.getActivityToken(),
                         mServiceClient.asBinder(), id, bounds, value, mContext.getUserId(),
                         mCallback != null, flags, client.getComponentName(), mSessionId, action);
@@ -1158,9 +1233,7 @@ public final class AutofillManager {
                     if (sDebug) Log.d(TAG, "Session restarted: " + mSessionId + "=>" + newId);
                     mSessionId = newId;
                     mState = (mSessionId == NO_SESSION) ? STATE_UNKNOWN : STATE_ACTIVE;
-                    if (client != null) {
-                        client.autofillCallbackResetableStateAvailable();
-                    }
+                    client.autofillCallbackResetableStateAvailable();
                 }
             } else {
                 mService.updateSession(mSessionId, id, bounds, value, action, flags,
@@ -1173,7 +1246,7 @@ public final class AutofillManager {
     }
 
     private void ensureServiceClientAddedIfNeededLocked() {
-        if (getClientLocked() == null) {
+        if (getClient() == null) {
             return;
         }
 
@@ -1256,7 +1329,7 @@ public final class AutofillManager {
         AutofillCallback callback = null;
         synchronized (mLock) {
             if (mSessionId == sessionId) {
-                AutofillClient client = getClientLocked();
+                AutofillClient client = getClient();
 
                 if (client != null) {
                     if (client.autofillCallbackRequestShowFillUi(anchor, width, height,
@@ -1281,7 +1354,7 @@ public final class AutofillManager {
             Intent fillInIntent) {
         synchronized (mLock) {
             if (sessionId == mSessionId) {
-                AutofillClient client = getClientLocked();
+                final AutofillClient client = getClient();
                 if (client != null) {
                     client.autofillCallbackAuthenticate(authenticationId, intent, fillInIntent);
                 }
@@ -1346,7 +1419,7 @@ public final class AutofillManager {
                 return;
             }
 
-            final AutofillClient client = getClientLocked();
+            final AutofillClient client = getClient();
             if (client == null) {
                 return;
             }
@@ -1523,7 +1596,7 @@ public final class AutofillManager {
             // 1. If local and remote session id are off sync the UI would be stuck shown
             // 2. There is a race between the user state being destroyed due the fill
             //    service being uninstalled and the UI being dismissed.
-            AutofillClient client = getClientLocked();
+            AutofillClient client = getClient();
             if (client != null) {
                 if (client.autofillCallbackRequestHideFillUi() && mCallback != null) {
                     callback = mCallback;
@@ -1553,7 +1626,7 @@ public final class AutofillManager {
 
         AutofillCallback callback = null;
         synchronized (mLock) {
-            if (mSessionId == sessionId && getClientLocked() != null) {
+            if (mSessionId == sessionId && getClient() != null) {
                 callback = mCallback;
             }
         }
@@ -1610,7 +1683,7 @@ public final class AutofillManager {
      * @return The view or {@code null} if view was not found
      */
     private View findView(@NonNull AutofillId autofillId) {
-        final AutofillClient client = getClientLocked();
+        final AutofillClient client = getClient();
 
         if (client == null) {
             return null;
@@ -1644,7 +1717,7 @@ public final class AutofillManager {
         pw.print(pfx); pw.print("sessionId: "); pw.println(mSessionId);
         pw.print(pfx); pw.print("state: "); pw.println(getStateAsStringLocked());
         pw.print(pfx); pw.print("context: "); pw.println(mContext);
-        pw.print(pfx); pw.print("client: "); pw.println(getClientLocked());
+        pw.print(pfx); pw.print("client: "); pw.println(getClient());
         pw.print(pfx); pw.print("enabled: "); pw.println(mEnabled);
         pw.print(pfx); pw.print("hasService: "); pw.println(mService != null);
         pw.print(pfx); pw.print("hasCallback: "); pw.println(mCallback != null);
@@ -1686,12 +1759,16 @@ public final class AutofillManager {
         return mState == STATE_ACTIVE;
     }
 
-    private boolean isDisabledByService() {
+    private boolean isDisabledByServiceLocked() {
         return mState == STATE_DISABLED_BY_SERVICE;
     }
 
+    private boolean isFinishedLocked() {
+        return mState == STATE_FINISHED;
+    }
+
     private void post(Runnable runnable) {
-        final AutofillClient client = getClientLocked();
+        final AutofillClient client = getClient();
         if (client == null) {
             if (sVerbose) Log.v(TAG, "ignoring post() because client is null");
             return;
@@ -1774,7 +1851,7 @@ public final class AutofillManager {
          * @param trackedIds The views to be tracked
          */
         TrackedViews(@Nullable AutofillId[] trackedIds) {
-            final AutofillClient client = getClientLocked();
+            final AutofillClient client = getClient();
             if (trackedIds != null && client != null) {
                 final boolean[] isVisible;
 
@@ -1815,7 +1892,7 @@ public final class AutofillManager {
          * @param isVisible visible if the view is visible in the view hierarchy.
          */
         void notifyViewVisibilityChanged(@NonNull AutofillId id, boolean isVisible) {
-            AutofillClient client = getClientLocked();
+            AutofillClient client = getClient();
 
             if (sDebug) {
                 Log.d(TAG, "notifyViewVisibilityChanged(): id=" + id + " isVisible="
@@ -1852,7 +1929,7 @@ public final class AutofillManager {
         void onVisibleForAutofillLocked() {
             // The visibility of the views might have changed while the client was not be visible,
             // hence update the visibility state for all views.
-            AutofillClient client = getClientLocked();
+            AutofillClient client = getClient();
             ArraySet<AutofillId> updatedVisibleTrackedIds = null;
             ArraySet<AutofillId> updatedInvisibleTrackedIds = null;
             if (client != null) {
@@ -1918,7 +1995,11 @@ public final class AutofillManager {
     public abstract static class AutofillCallback {
 
         /** @hide */
-        @IntDef({EVENT_INPUT_SHOWN, EVENT_INPUT_HIDDEN, EVENT_INPUT_UNAVAILABLE})
+        @IntDef(prefix = { "EVENT_INPUT_" }, value = {
+                EVENT_INPUT_SHOWN,
+                EVENT_INPUT_HIDDEN,
+                EVENT_INPUT_UNAVAILABLE
+        })
         @Retention(RetentionPolicy.SOURCE)
         public @interface AutofillEventType {}
 

@@ -1689,7 +1689,7 @@ public final class Settings {
 
     /** @hide */
     @Retention(RetentionPolicy.SOURCE)
-    @IntDef({
+    @IntDef(prefix = { "RESET_MODE_" }, value = {
             RESET_MODE_PACKAGE_DEFAULTS,
             RESET_MODE_UNTRUSTED_DEFAULTS,
             RESET_MODE_UNTRUSTED_CHANGES,
@@ -3123,6 +3123,10 @@ public final class Settings {
          * to dream after a period of inactivity.  This value is also known as the
          * user activity timeout period since the screen isn't necessarily turned off
          * when it expires.
+         *
+         * <p>
+         * This value is bounded by maximum timeout set by
+         * {@link android.app.admin.DevicePolicyManager#setMaximumTimeToLock(ComponentName, long)}.
          */
         public static final String SCREEN_OFF_TIMEOUT = "screen_off_timeout";
 
@@ -5324,13 +5328,57 @@ public final class Settings {
         public static final String AUTOFILL_SERVICE = "autofill_service";
 
         /**
-         * Experimental autofill feature.
+         * Boolean indicating if Autofill supports field classification.
          *
-         * <p>TODO(b/67867469): remove once feature is finished
+         * @see android.service.autofill.AutofillService
+         *
          * @hide
          */
+        @SystemApi
         @TestApi
-        public static final String AUTOFILL_FEATURE_FIELD_DETECTION = "autofill_field_detection";
+        public static final String AUTOFILL_FEATURE_FIELD_CLASSIFICATION =
+                "autofill_field_classification";
+
+        /**
+         * Defines value returned by {@link android.service.autofill.UserData#getMaxUserDataSize()}.
+         *
+         * @hide
+         */
+        @SystemApi
+        @TestApi
+        public static final String AUTOFILL_USER_DATA_MAX_USER_DATA_SIZE =
+                "autofill_user_data_max_user_data_size";
+
+        /**
+         * Defines value returned by
+         * {@link android.service.autofill.UserData#getMaxFieldClassificationIdsSize()}.
+         *
+         * @hide
+         */
+        @SystemApi
+        @TestApi
+        public static final String AUTOFILL_USER_DATA_MAX_FIELD_CLASSIFICATION_IDS_SIZE =
+                "autofill_user_data_max_field_classification_size";
+
+        /**
+         * Defines value returned by {@link android.service.autofill.UserData#getMaxValueLength()}.
+         *
+         * @hide
+         */
+        @SystemApi
+        @TestApi
+        public static final String AUTOFILL_USER_DATA_MAX_VALUE_LENGTH =
+                "autofill_user_data_max_value_length";
+
+        /**
+         * Defines value returned by {@link android.service.autofill.UserData#getMinValueLength()}.
+         *
+         * @hide
+         */
+        @SystemApi
+        @TestApi
+        public static final String AUTOFILL_USER_DATA_MIN_VALUE_LENGTH =
+                "autofill_user_data_min_value_length";
 
         /**
          * @deprecated Use {@link android.provider.Settings.Global#DEVICE_PROVISIONED} instead
@@ -5728,6 +5776,14 @@ public final class Settings {
          */
         public static final String TOUCH_EXPLORATION_GRANTED_ACCESSIBILITY_SERVICES =
             "touch_exploration_granted_accessibility_services";
+
+        /**
+         * Uri of the slice that's presented on the keyguard.
+         * Defaults to a slice with the date and next alarm.
+         *
+         * @hide
+         */
+        public static final String KEYGUARD_SLICE_URI = "keyguard_slice_uri";
 
         /**
          * Whether to speak passwords while in accessibility mode.
@@ -7204,7 +7260,10 @@ public final class Settings {
          * full_backup_interval_milliseconds       (long)
          * full_backup_require_charging            (boolean)
          * full_backup_required_network_type       (int)
+         * backup_finished_notification_receivers  (String[])
          * </pre>
+         *
+         * backup_finished_notification_receivers uses ":" as delimeter for values.
          *
          * <p>
          * Type: string
@@ -8651,6 +8710,12 @@ public final class Settings {
                 "wifi_scan_always_enabled";
 
         /**
+         * Whether soft AP will shut down after a timeout period when no devices are connected.
+         * @hide
+         */
+        public static final String SOFT_AP_TIMEOUT_ENABLED = "soft_ap_timeout_enabled";
+
+        /**
          * Value to specify if Wi-Fi Wakeup feature is enabled.
          *
          * Type: int (0 for false, 1 for true)
@@ -9416,6 +9481,7 @@ public final class Settings {
          * service_min_restart_time_between     (long)
          * service_max_inactivity               (long)
          * service_bg_start_timeout             (long)
+         * process_start_async                  (boolean)
          * </pre>
          *
          * <p>
@@ -9516,6 +9582,31 @@ public final class Settings {
         public static final String ANOMALY_DETECTION_CONSTANTS = "anomaly_detection_constants";
 
         /**
+         * Battery tip specific settings
+         * This is encoded as a key=value list, separated by commas. Ex:
+         *
+         * "battery_tip_enabled=true,summary_enabled=true,high_usage_enabled=true,"
+         * "high_usage_app_count=3,reduced_battery_enabled=false,reduced_battery_percent=50"
+         *
+         * The following keys are supported:
+         *
+         * <pre>
+         * battery_tip_enabled              (boolean)
+         * summary_enabled                  (boolean)
+         * battery_saver_tip_enabled        (boolean)
+         * high_usage_enabled               (boolean)
+         * high_usage_app_count             (int)
+         * app_restriction_enabled          (boolean)
+         * reduced_battery_enabled          (boolean)
+         * reduced_battery_percent          (int)
+         * low_battery_enabled              (boolean)
+         * low_battery_hour                 (int)
+         * </pre>
+         * @hide
+         */
+        public static final String BATTERY_TIP_CONSTANTS = "battery_tip_constants";
+
+        /**
          * Always on display(AOD) specific settings
          * This is encoded as a key=value list, separated by commas. Ex:
          *
@@ -9524,8 +9615,8 @@ public final class Settings {
          * The following keys are supported:
          *
          * <pre>
-         * screen_brightness_array         (string)
-         * dimming_scrim_array             (string)
+         * screen_brightness_array         (int[])
+         * dimming_scrim_array             (int[])
          * prox_screen_off_delay           (long)
          * prox_cooldown_trigger           (long)
          * prox_cooldown_period            (long)
@@ -9537,9 +9628,10 @@ public final class Settings {
         /**
          * App standby (app idle) specific settings.
          * This is encoded as a key=value list, separated by commas. Ex:
-         *
+         * <p>
          * "idle_duration=5000,parole_interval=4500"
-         *
+         * <p>
+         * All durations are in millis.
          * The following keys are supported:
          *
          * <pre>
@@ -9687,6 +9779,15 @@ public final class Settings {
          * see also android.view.textclassifier.TextClassifierConstants
          */
         public static final String TEXT_CLASSIFIER_CONSTANTS = "text_classifier_constants";
+
+        /**
+         * Whether or not App Standby feature is enabled. This controls throttling of apps
+         * based on usage patterns and predictions.
+         * Type: int (0 for false, 1 for true)
+         * Default: 1
+         * @hide
+         */
+        public static final java.lang.String APP_STANDBY_ENABLED = "app_standby_enabled";
 
         /**
          * Get the key that retrieves a bluetooth headset's priority.
@@ -10117,6 +10218,16 @@ public final class Settings {
         public static final String POLICY_CONTROL = "policy_control";
 
         /**
+         * {@link android.view.DisplayCutout DisplayCutout} emulation mode.
+         *
+         * @hide
+         */
+        public static final String EMULATE_DISPLAY_CUTOUT = "emulate_display_cutout";
+
+        /** @hide */ public static final int EMULATE_DISPLAY_CUTOUT_OFF = 0;
+        /** @hide */ public static final int EMULATE_DISPLAY_CUTOUT_ON = 1;
+
+        /**
          * Defines global zen mode.  ZEN_MODE_OFF, ZEN_MODE_IMPORTANT_INTERRUPTIONS,
          * or ZEN_MODE_NO_INTERRUPTIONS.
          *
@@ -10430,14 +10541,6 @@ public final class Settings {
                 "location_settings_link_to_permissions_enabled";
 
         /**
-         * Flag to enable use of RefactoredBackupManagerService.
-         *
-         * @hide
-         */
-        public static final String BACKUP_REFACTORED_SERVICE_DISABLED =
-            "backup_refactored_service_disabled";
-
-        /**
          * Flag to set the waiting time for euicc factory reset inside System > Settings
          * Type: long
          *
@@ -10501,7 +10604,17 @@ public final class Settings {
             LOW_POWER_MODE_TRIGGER_LEVEL,
             BLUETOOTH_ON,
             PRIVATE_DNS_MODE,
-            PRIVATE_DNS_SPECIFIER
+            PRIVATE_DNS_SPECIFIER,
+            SOFT_AP_TIMEOUT_ENABLED
+        };
+
+        /**
+         * Global settings that shouldn't be persisted.
+         *
+         * @hide
+         */
+        public static final String[] TRANSIENT_SETTINGS = {
+                LOCATION_GLOBAL_KILL_SWITCH,
         };
 
         /** @hide */
@@ -11031,6 +11144,7 @@ public final class Settings {
             INSTANT_APP_SETTINGS.add(DEBUG_VIEW_ATTRIBUTES);
             INSTANT_APP_SETTINGS.add(WTF_IS_FATAL);
             INSTANT_APP_SETTINGS.add(SEND_ACTION_APP_ERROR);
+            INSTANT_APP_SETTINGS.add(ZEN_MODE);
         }
 
         /**
@@ -11075,7 +11189,7 @@ public final class Settings {
          *
          * <pre>
          * default               (int)
-         * options_array         (string)
+         * options_array         (int[])
          * </pre>
          *
          * All delays in integer minutes. Array order is respected.
@@ -11084,6 +11198,28 @@ public final class Settings {
          */
         public static final String NOTIFICATION_SNOOZE_OPTIONS =
                 "notification_snooze_options";
+
+        /**
+         * Configuration flags for SQLite Compatibility WAL. Encoded as a key-value list, separated
+         * by commas. E.g.: compatibility_wal_supported=true, wal_syncmode=OFF
+         *
+         * Supported keys:
+         * compatibility_wal_supported      (boolean)
+         * wal_syncmode       (String)
+         *
+         * @hide
+         */
+        public static final String SQLITE_COMPATIBILITY_WAL_FLAGS =
+                "sqlite_compatibility_wal_flags";
+
+        /**
+         * Enable GNSS Raw Measurements Full Tracking?
+         * 0 = no
+         * 1 = yes
+         * @hide
+         */
+        public static final String ENABLE_GNSS_RAW_MEAS_FULL_TRACKING =
+                "enable_gnss_raw_meas_full_tracking";
     }
 
     /**

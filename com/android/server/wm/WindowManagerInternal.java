@@ -118,8 +118,11 @@ public abstract class WindowManagerInternal {
          *                of AppTransition.TRANSIT_* values
          * @param openToken the token for the opening app
          * @param closeToken the token for the closing app
-         * @param openAnimation the animation for the opening app
-         * @param closeAnimation the animation for the closing app
+         * @param duration the total duration of the transition
+         * @param statusBarAnimationStartTime the desired start time for all visual animations in
+         *        the status bar caused by this app transition in uptime millis
+         * @param statusBarAnimationDuration the duration for all visual animations in the status
+         *        bar caused by this app transition in millis
          *
          * @return Return any bit set of {@link WindowManagerPolicy#FINISH_LAYOUT_REDO_LAYOUT},
          * {@link WindowManagerPolicy#FINISH_LAYOUT_REDO_CONFIG},
@@ -127,7 +130,7 @@ public abstract class WindowManagerInternal {
          * or {@link WindowManagerPolicy#FINISH_LAYOUT_REDO_ANIM}.
          */
         public int onAppTransitionStartingLocked(int transit, IBinder openToken, IBinder closeToken,
-                Animation openAnimation, Animation closeAnimation) {
+                long duration, long statusBarAnimationStartTime, long statusBarAnimationDuration) {
             return 0;
         }
 
@@ -151,23 +154,38 @@ public abstract class WindowManagerInternal {
      */
     public interface IDragDropCallback {
         /**
-         * Called when drag operation is started.
+         * Called when drag operation is starting.
          */
-        default boolean performDrag(IWindow window, IBinder dragToken,
+        default boolean prePerformDrag(IWindow window, IBinder dragToken,
                 int touchSource, float touchX, float touchY, float thumbCenterX, float thumbCenterY,
                 ClipData data) {
             return true;
         }
 
         /**
-         * Called when drop result is reported.
+         * Called when drag operation is started.
          */
-        default void reportDropResult(IWindow window, boolean consumed) {}
+        default void postPerformDrag() {}
 
         /**
-         * Called when drag operation is cancelled.
+         * Called when drop result is being reported.
          */
-        default void cancelDragAndDrop(IBinder dragToken) {}
+        default void preReportDropResult(IWindow window, boolean consumed) {}
+
+        /**
+         * Called when drop result was reported.
+         */
+        default void postReportDropResult() {}
+
+        /**
+         * Called when drag operation is being cancelled.
+         */
+        default void preCancelDragAndDrop(IBinder dragToken) {}
+
+        /**
+         * Called when drag operation was cancelled.
+         */
+        default void postCancelDragAndDrop() {}
     }
 
     /**

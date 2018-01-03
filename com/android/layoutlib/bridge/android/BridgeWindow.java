@@ -24,6 +24,7 @@ import android.os.IBinder;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
 import android.util.MergedConfiguration;
+import android.view.DisplayCutout;
 import android.view.DragEvent;
 import android.view.IWindow;
 
@@ -50,8 +51,8 @@ public final class BridgeWindow implements IWindow {
 
     @Override
     public void resized(Rect rect, Rect rect2, Rect rect3, Rect rect4, Rect rect5, Rect rect6,
-            boolean b, MergedConfiguration mergedConfig, Rect rect7, boolean b2, boolean b3, int i0)
-            throws RemoteException {
+            boolean b, MergedConfiguration mergedConfig, Rect rect7, boolean b2, boolean b3, int i0,
+            DisplayCutout.ParcelableWrapper displayCutout) throws RemoteException {
         // pass for now.
     }
 

@@ -5,10 +5,6 @@ import com.android.tools.layoutlib.annotations.LayoutlibDelegate;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
-import android.graphics.BidiRenderer;
-import android.graphics.Paint;
-import android.graphics.Paint_Delegate;
-import android.graphics.RectF;
 import android.icu.text.BreakIterator;
 import android.text.Layout.BreakStrategy;
 import android.text.Layout.HyphenationFrequency;
@@ -17,7 +13,6 @@ import android.text.StaticLayout.LineBreaks;
 
 import java.text.CharacterIterator;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 import javax.swing.text.Segment;
@@ -59,31 +54,12 @@ public class StaticLayout_Delegate {
     }
 
     @LayoutlibDelegate
-    /*package*/ static void nAddStyleRun(long nativeBuilder, long nativePaint, int start,
-            int end, boolean isRtl) {
-        Builder builder = sBuilderManager.getDelegate(nativeBuilder);
-        if (builder == null) {
-            return;
-        }
-        builder.mRuns.add(new StyleRun(nativePaint, start, end, isRtl));
-    }
-
-    @LayoutlibDelegate
-    /*package*/ static void nAddReplacementRun(long nativeBuilder, long nativePaint, int start,
-            int end, float width) {
-        Builder builder = sBuilderManager.getDelegate(nativeBuilder);
-        if (builder == null) {
-            return;
-        }
-        builder.mRuns.add(new ReplacementRun(start, end, width));
-    }
-
-    @LayoutlibDelegate
     /*package*/ static int nComputeLineBreaks(
             /* non zero */ long nativePtr,
 
             // Inputs
             @NonNull char[] text,
+            long measuredTextPtr,
             int length,
             float firstWidth,
             int firstWidthLineCount,
@@ -111,9 +87,7 @@ public class StaticLayout_Delegate {
         builder.mLineWidth = new LineWidth(firstWidth, firstWidthLineCount, restWidth);
         builder.mTabStopCalculator = new TabStops(variableTabStops, defaultTabStop);
 
-        for (Run run: builder.mRuns) {
-            run.addTo(builder);
-        }
+        MeasuredText_Delegate.computeRuns(measuredTextPtr, builder);
 
         // compute all possible breakpoints.
         BreakIterator it = BreakIterator.getLineInstance();
@@ -192,29 +166,20 @@ public class StaticLayout_Delegate {
         return primitives;
     }
 
-    private static float measureText(long nativePaint, char []text, int index, int count,
-            float[] widths, int bidiFlags) {
-        Paint_Delegate paint = Paint_Delegate.getDelegate(nativePaint);
-        RectF bounds = new BidiRenderer(null, paint, text)
-            .renderText(index, index + count, bidiFlags, widths, 0, false);
-        return bounds.right - bounds.left;
-    }
-
     // TODO: Rename to LineBreakerRef and move everything other than LineBreaker to LineBreaker.
     /**
      * Java representation of the native Builder class.
      */
-    private static class Builder {
+    public static class Builder {
         char[] mText;
         float[] mWidths;
         private LineBreaker mLineBreaker;
         private int mBreakStrategy;
         private LineWidth mLineWidth;
         private TabStops mTabStopCalculator;
-        private ArrayList<Run> mRuns = new ArrayList<>();
     }
 
-    private abstract static class Run {
+    public abstract static class Run {
         int mStart;
         int mEnd;
 
@@ -224,38 +189,5 @@ public class StaticLayout_Delegate {
         }
 
         abstract void addTo(Builder builder);
-    }
-
-    private static class StyleRun extends Run {
-        private long mNativePaint;
-        private boolean mIsRtl;
-
-        private StyleRun(long nativePaint, int start, int end, boolean isRtl) {
-            super(start, end);
-            mNativePaint = nativePaint;
-            mIsRtl = isRtl;
-        }
-
-        @Override
-        void addTo(Builder builder) {
-            int bidiFlags = mIsRtl ? Paint.BIDI_FORCE_RTL : Paint.BIDI_FORCE_LTR;
-            measureText(mNativePaint, builder.mText, mStart, mEnd - mStart, builder.mWidths,
-                    bidiFlags);
-        }
-    }
-
-    private static class ReplacementRun extends Run {
-        private final float mWidth;
-
-        private ReplacementRun(int start, int end, float width) {
-            super(start, end);
-            mWidth = width;
-        }
-
-        @Override
-        void addTo(Builder builder) {
-            builder.mWidths[mStart] = mWidth;
-            Arrays.fill(builder.mWidths, mStart + 1, mEnd, 0.0f);
-        }
     }
 }

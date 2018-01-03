@@ -54,22 +54,14 @@ import java.util.concurrent.TimeUnit;
     abstract int onTransact();
 
     /**
-     * A function to invoke when a transaction times out.
-     *
-     * All instances of this class must implement this method by reporting the timeout to the
-     * client.
-     */
-    /* package */
-    abstract void onTimeout();
-
-    /**
      * A function to invoke when the transaction completes.
      *
-     * Only relevant for load, unload, enable, or disable transactions.
+     * For transactions with expected contents (such as a query), the class instance should
+     * implement the appropriate behavior (e.g. invoke onQueryResponse with an empty list).
      *
      * @param result the result of the transaction
      */
-    /* package */ void onTransactionComplete(int result) {
+    /* package */ void onTransactionComplete(@ContextHubTransaction.Result int result) {
     }
 
     /**
@@ -80,7 +72,8 @@ import java.util.concurrent.TimeUnit;
      * @param result           the result of the query
      * @param nanoAppStateList the list of nanoapps given by the query response
      */
-    /* package */ void onQueryResponse(int result, List<NanoAppState> nanoAppStateList) {
+    /* package */ void onQueryResponse(
+            @ContextHubTransaction.Result int result, List<NanoAppState> nanoAppStateList) {
     }
 
     /**
@@ -134,28 +127,9 @@ import java.util.concurrent.TimeUnit;
         return mIsComplete;
     }
 
-    /**
-     * @return the human-readable string of this transaction's type
-     */
-    private String getTransactionTypeString() {
-        switch (mTransactionType) {
-            case ContextHubTransaction.TYPE_LOAD_NANOAPP:
-                return "Load";
-            case ContextHubTransaction.TYPE_UNLOAD_NANOAPP:
-                return "Unload";
-            case ContextHubTransaction.TYPE_ENABLE_NANOAPP:
-                return "Enable";
-            case ContextHubTransaction.TYPE_DISABLE_NANOAPP:
-                return "Disable";
-            case ContextHubTransaction.TYPE_QUERY_NANOAPPS:
-                return "Query";
-            default:
-                return "Unknown";
-        }
-    }
-
     @Override
     public String toString() {
-        return getTransactionTypeString() + " transaction (ID = " + mTransactionId + ")";
+        return ContextHubTransaction.typeToString(mTransactionType, true /* upperCase */)
+                + " transaction (ID = " + mTransactionId + ")";
     }
 }

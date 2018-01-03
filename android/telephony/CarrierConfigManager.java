@@ -300,10 +300,10 @@ public class CarrierConfigManager {
      * If true all networks are considered as home network a.k.a non-roaming.  When false,
      * the 2 pairs of CMDA and GSM roaming/non-roaming arrays are consulted.
      *
-     * @see KEY_GSM_ROAMING_NETWORKS_STRING_ARRAY
-     * @see KEY_GSM_NONROAMING_NETWORKS_STRING_ARRAY
-     * @see KEY_CDMA_ROAMING_NETWORKS_STRING_ARRAY
-     * @see KEY_CDMA_NONROAMING_NETWORKS_STRING_ARRAY
+     * @see #KEY_GSM_ROAMING_NETWORKS_STRING_ARRAY
+     * @see #KEY_GSM_NONROAMING_NETWORKS_STRING_ARRAY
+     * @see #KEY_CDMA_ROAMING_NETWORKS_STRING_ARRAY
+     * @see #KEY_CDMA_NONROAMING_NETWORKS_STRING_ARRAY
      */
     public static final String
             KEY_FORCE_HOME_NETWORK_BOOL = "force_home_network_bool";
@@ -735,6 +735,13 @@ public class CarrierConfigManager {
     public static final String KEY_SHOW_ICCID_IN_SIM_STATUS_BOOL = "show_iccid_in_sim_status_bool";
 
     /**
+     * Flag specifying whether the {@link android.telephony.SignalStrength} is shown in the SIM
+     * Status screen. The default value is true.
+     */
+    public static final String KEY_SHOW_SIGNAL_STRENGTH_IN_SIM_STATUS_BOOL =
+        "show_signal_strength_in_sim_status_bool";
+
+    /**
      * Flag specifying whether an additional (client initiated) intent needs to be sent on System
      * update
      */
@@ -989,6 +996,12 @@ public class CarrierConfigManager {
     public static final String KEY_STK_DISABLE_LAUNCH_BROWSER_BOOL =
             "stk_disable_launch_browser_bool";
 
+    /**
+     * Boolean indicating if show data RAT icon on status bar even when data is disabled
+     * @hide
+     */
+    public static final String KEY_ALWAYS_SHOW_DATA_RAT_ICON_BOOL =
+            "always_show_data_rat_icon_bool";
 
     // These variables are used by the MMS service and exposed through another API, {@link
     // SmsManager}. The variable names and string values are copied from there.
@@ -1295,6 +1308,19 @@ public class CarrierConfigManager {
      * @hide
      */
     public static final String KEY_ALLOW_HOLD_IN_IMS_CALL_BOOL = "allow_hold_in_ims_call";
+
+
+    /**
+     * Flag indicating whether the carrier always wants to play an "on-hold" tone when a call has
+     * been remotely held.
+     * <p>
+     * When {@code true}, if the IMS stack indicates that the call session has been held, a signal
+     * will be sent from Telephony to play an audible "on-hold" tone played to the user.
+     * When {@code false}, a hold tone will only be played if the audio session becomes inactive.
+     * @hide
+     */
+    public static final String KEY_ALWAYS_PLAY_REMOTE_HOLD_TONE_BOOL =
+            "always_play_remote_hold_tone_bool";
 
     /**
      * When true, indicates that adding a call is disabled when there is an ongoing video call
@@ -1634,6 +1660,11 @@ public class CarrierConfigManager {
             "show_ims_registration_status_bool";
 
     /**
+     * Flag indicating whether the carrier supports RTT over IMS.
+     */
+    public static final String KEY_RTT_SUPPORTED_BOOL = "rtt_supported_bool";
+
+    /**
      * The flag to disable the popup dialog which warns the user of data charges.
      * @hide
      */
@@ -1686,12 +1717,20 @@ public class CarrierConfigManager {
     public static final String KEY_SPN_DISPLAY_RULE_USE_ROAMING_FROM_SERVICE_STATE_BOOL =
             "spn_display_rule_use_roaming_from_service_state_bool";
 
+    /**
+     * Determines whether any carrier has been identified and its specific config has been applied,
+     * default to false.
+     * @hide
+     */
+    public static final String KEY_CARRIER_CONFIG_APPLIED_BOOL = "carrier_config_applied_bool";
+
     /** The default value for every variable. */
     private final static PersistableBundle sDefaults;
 
     static {
         sDefaults = new PersistableBundle();
         sDefaults.putBoolean(KEY_ALLOW_HOLD_IN_IMS_CALL_BOOL, true);
+        sDefaults.putBoolean(KEY_ALWAYS_PLAY_REMOTE_HOLD_TONE_BOOL, false);
         sDefaults.putBoolean(KEY_ADDITIONAL_CALL_SETTING_BOOL, true);
         sDefaults.putBoolean(KEY_ALLOW_EMERGENCY_NUMBERS_IN_CALL_LOG_BOOL, false);
         sDefaults.putBoolean(KEY_ALLOW_LOCAL_DTMF_TONES_BOOL, true);
@@ -1768,6 +1807,7 @@ public class CarrierConfigManager {
         sDefaults.putString(KEY_CARRIER_VVM_PACKAGE_NAME_STRING, "");
         sDefaults.putStringArray(KEY_CARRIER_VVM_PACKAGE_NAME_STRING_ARRAY, null);
         sDefaults.putBoolean(KEY_SHOW_ICCID_IN_SIM_STATUS_BOOL, false);
+        sDefaults.putBoolean(KEY_SHOW_SIGNAL_STRENGTH_IN_SIM_STATUS_BOOL, true);
         sDefaults.putBoolean(KEY_CI_ACTION_ON_SYS_UPDATE_BOOL, false);
         sDefaults.putString(KEY_CI_ACTION_ON_SYS_UPDATE_INTENT_STRING, "");
         sDefaults.putString(KEY_CI_ACTION_ON_SYS_UPDATE_EXTRA_STRING, "");
@@ -1963,10 +2003,13 @@ public class CarrierConfigManager {
         sDefaults.putStringArray(KEY_NON_ROAMING_OPERATOR_STRING_ARRAY, null);
         sDefaults.putStringArray(KEY_ROAMING_OPERATOR_STRING_ARRAY, null);
         sDefaults.putBoolean(KEY_SHOW_IMS_REGISTRATION_STATUS_BOOL, false);
+        sDefaults.putBoolean(KEY_RTT_SUPPORTED_BOOL, false);
         sDefaults.putBoolean(KEY_DISABLE_CHARGE_INDICATION_BOOL, false);
         sDefaults.putStringArray(KEY_FEATURE_ACCESS_CODES_STRING_ARRAY, null);
         sDefaults.putBoolean(KEY_IDENTIFY_HIGH_DEFINITION_CALLS_IN_CALL_LOG_BOOL, false);
         sDefaults.putBoolean(KEY_SPN_DISPLAY_RULE_USE_ROAMING_FROM_SERVICE_STATE_BOOL, false);
+        sDefaults.putBoolean(KEY_ALWAYS_SHOW_DATA_RAT_ICON_BOOL, false);
+        sDefaults.putBoolean(KEY_CARRIER_CONFIG_APPLIED_BOOL, false);
     }
 
     /**
@@ -2012,6 +2055,33 @@ public class CarrierConfigManager {
     }
 
     /**
+     * Determines whether a configuration {@link PersistableBundle} obtained from
+     * {@link #getConfig()} or {@link #getConfigForSubId(int)} corresponds to an identified carrier.
+     * <p>
+     * When an app receives the {@link CarrierConfigManager#ACTION_CARRIER_CONFIG_CHANGED}
+     * broadcast which informs it that the carrier configuration has changed, it is possible
+     * that another reload of the carrier configuration has begun since the intent was sent.
+     * In this case, the carrier configuration the app fetches (e.g. via {@link #getConfig()})
+     * may not represent the configuration for the current carrier. It should be noted that it
+     * does not necessarily mean the configuration belongs to current carrier when this function
+     * return true because it may belong to another previous identified carrier. Users should
+     * always call {@link #getConfig()} or {@link #getConfigForSubId(int)} after receiving the
+     * broadcast {@link #ACTION_CARRIER_CONFIG_CHANGED}.
+     * </p>
+     * <p>
+     * After using {@link #getConfig()} or {@link #getConfigForSubId(int)} an app should always
+     * use this method to confirm whether any carrier specific configuration has been applied.
+     * </p>
+     *
+     * @param bundle the configuration bundle to be checked.
+     * @return boolean true if any carrier specific configuration bundle has been applied, false
+     * otherwise or the bundle is null.
+     */
+    public static boolean isConfigForIdentifiedCarrier(PersistableBundle bundle) {
+        return bundle != null && bundle.getBoolean(KEY_CARRIER_CONFIG_APPLIED_BOOL);
+    }
+
+    /**
      * Calling this method triggers telephony services to fetch the current carrier configuration.
      * <p>
      * Normally this does not need to be called because the platform reloads config on its own.
@@ -2024,7 +2094,7 @@ public class CarrierConfigManager {
      * {@link android.service.carrier.CarrierService#onLoadConfig} will be called from an
      * arbitrary thread.
      * </p>
-     * @see #hasCarrierPrivileges
+     * @see TelephonyManager#hasCarrierPrivileges
      */
     public void notifyConfigChangedForSubId(int subId) {
         try {

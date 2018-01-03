@@ -29,6 +29,8 @@ import android.arch.persistence.room.Transaction;
 import android.arch.persistence.room.Update;
 import android.arch.persistence.room.integration.testapp.TestDatabase;
 import android.arch.persistence.room.integration.testapp.vo.AvgWeightByAge;
+import android.arch.persistence.room.integration.testapp.vo.Day;
+import android.arch.persistence.room.integration.testapp.vo.NameAndLastName;
 import android.arch.persistence.room.integration.testapp.vo.User;
 import android.database.Cursor;
 
@@ -36,6 +38,7 @@ import org.reactivestreams.Publisher;
 
 import java.util.Date;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Callable;
 
 import io.reactivex.Flowable;
@@ -203,10 +206,16 @@ public abstract class UserDao {
     @Query("UPDATE User set mWeight = :weight WHERE mId IN (:ids) AND mAge == :age")
     public abstract int updateByAgeAndIds(float weight, int age, List<Integer> ids);
 
+    @Query("SELECT * FROM user WHERE (mWorkDays & :days) != 0")
+    public abstract List<User> findUsersByWorkDays(Set<Day> days);
+
     // QueryLoader
 
     @Query("SELECT COUNT(*) from user")
     public abstract Integer getUserCount();
+
+    @Query("SELECT u.mName, u.mLastName from user u where mId = :id")
+    public abstract NameAndLastName getNameAndLastName(int id);
 
     @Transaction
     public void insertBothByAnnotation(final User a, final User b) {

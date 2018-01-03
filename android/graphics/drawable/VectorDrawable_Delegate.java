@@ -135,6 +135,12 @@ public class VectorDrawable_Delegate {
     }
 
     @LayoutlibDelegate
+    static void nSetAntiAlias(long rendererPtr, boolean aa) {
+        VPathRenderer_Delegate nativePathRenderer = VNativeObject.getDelegate(rendererPtr);
+        nativePathRenderer.setAntiAlias(aa);
+    }
+
+    @LayoutlibDelegate
     static void nSetAllowCaching(long rendererPtr, boolean allowCaching) {
         // ignored
     }
@@ -1060,6 +1066,7 @@ public class VectorDrawable_Delegate {
         private Paint mStrokePaint;
         private Paint mFillPaint;
         private PathMeasure mPathMeasure;
+        private boolean mAntiAlias = true;
 
         private VPathRenderer_Delegate(long rootGroupPtr) {
             mRootGroupPtr = rootGroupPtr;
@@ -1169,7 +1176,7 @@ public class VectorDrawable_Delegate {
                     if (mFillPaint == null) {
                         mFillPaint = new Paint();
                         mFillPaint.setStyle(Style.FILL);
-                        mFillPaint.setAntiAlias(true);
+                        mFillPaint.setAntiAlias(mAntiAlias);
                     }
 
                     final Paint fillPaint = mFillPaint;
@@ -1203,7 +1210,7 @@ public class VectorDrawable_Delegate {
                     if (mStrokePaint == null) {
                         mStrokePaint = new Paint();
                         mStrokePaint.setStyle(Style.STROKE);
-                        mStrokePaint.setAntiAlias(true);
+                        mStrokePaint.setAntiAlias(mAntiAlias);
                     }
 
                     final Paint strokePaint = mStrokePaint;
@@ -1259,6 +1266,10 @@ public class VectorDrawable_Delegate {
                 Log.d(LOGTAG, "Scale x " + scaleX + " y " + scaleY + " final " + matrixScale);
             }
             return matrixScale;
+        }
+
+        private void setAntiAlias(boolean aa) {
+            mAntiAlias = aa;
         }
 
         @Override

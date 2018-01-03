@@ -32,7 +32,7 @@ import android.provider.ContactsContract;
 import android.provider.Settings;
 import android.text.util.Linkify;
 import android.util.Patterns;
-import android.widget.TextViewMetrics;
+import android.view.View.OnClickListener;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.logging.MetricsLogger;
@@ -42,6 +42,9 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -66,6 +69,18 @@ final class TextClassifierImpl implements TextClassifier {
     private static final String MODEL_FILE_REGEX = "textclassifier\\.smartselection\\.(.*)\\.model";
     private static final String UPDATED_MODEL_FILE_PATH =
             "/data/misc/textclassifier/textclassifier.smartselection.model";
+    private static final List<String> ENTITY_TYPES_ALL =
+            Collections.unmodifiableList(Arrays.asList(
+                    TextClassifier.TYPE_ADDRESS,
+                    TextClassifier.TYPE_EMAIL,
+                    TextClassifier.TYPE_PHONE,
+                    TextClassifier.TYPE_URL));
+    private static final List<String> ENTITY_TYPES_BASE =
+            Collections.unmodifiableList(Arrays.asList(
+                    TextClassifier.TYPE_ADDRESS,
+                    TextClassifier.TYPE_EMAIL,
+                    TextClassifier.TYPE_PHONE,
+                    TextClassifier.TYPE_URL));
 
     private final Context mContext;
 
@@ -121,8 +136,8 @@ final class TextClassifierImpl implements TextClassifier {
                         tsBuilder.setEntityType(results[i].mCollection, results[i].mScore);
                     }
                     return tsBuilder
-                            .setLogSource(LOG_TAG)
-                            .setVersionInfo(getVersionInfo())
+                            .setSignature(
+                                    getSignature(string, selectionStartIndex, selectionEndIndex))
                             .build();
                 } else {
                     // We can not trust the result. Log the issue and ignore the result.
@@ -154,8 +169,7 @@ final class TextClassifierImpl implements TextClassifier {
                                 getHintFlags(string, startIndex, endIndex));
                 if (results.length > 0) {
                     final TextClassification classificationResult =
-                            createClassificationResult(
-                                    results, string.subSequence(startIndex, endIndex));
+                            createClassificationResult(results, string, startIndex, endIndex);
                     return classificationResult;
                 }
             }
@@ -169,17 +183,23 @@ final class TextClassifierImpl implements TextClassifier {
 
     @Override
     public TextLinks generateLinks(
-            @NonNull CharSequence text, @NonNull TextLinks.Options options) {
+            @NonNull CharSequence text, @Nullable TextLinks.Options options) {
         Utils.validateInput(text);
         final String textString = text.toString();
         final TextLinks.Builder builder = new TextLinks.Builder(textString);
         try {
-            LocaleList defaultLocales = options != null ? options.getDefaultLocales() : null;
+            final LocaleList defaultLocales = options != null ? options.getDefaultLocales() : null;
+            final Collection<String> entitiesToIdentify =
+                    options != null && options.getEntityConfig() != null
+                            ? options.getEntityConfig().getEntities(this) : ENTITY_TYPES_ALL;
             final SmartSelection smartSelection = getSmartSelection(defaultLocales);
             final SmartSelection.AnnotatedSpan[] annotations = smartSelection.annotate(textString);
             for (SmartSelection.AnnotatedSpan span : annotations) {
-                final Map<String, Float> entityScores = new HashMap<>();
                 final SmartSelection.ClassificationResult[] results = span.getClassification();
+                if (results.length == 0 || !entitiesToIdentify.contains(results[0].mCollection)) {
+                    continue;
+                }
+                final Map<String, Float> entityScores = new HashMap<>();
                 for (int i = 0; i < results.length; i++) {
                     entityScores.put(results[i].mCollection, results[i].mScore);
                 }
@@ -191,6 +211,20 @@ final class TextClassifierImpl implements TextClassifier {
             Log.e(LOG_TAG, "Error getting links info.", t);
         }
         return builder.build();
+    }
+
+    @Override
+    public Collection<String> getEntitiesForPreset(@TextClassifier.EntityPreset int entityPreset) {
+        switch (entityPreset) {
+            case TextClassifier.ENTITY_PRESET_NONE:
+                return Collections.emptyList();
+            case TextClassifier.ENTITY_PRESET_BASE:
+                return ENTITY_TYPES_BASE;
+            case TextClassifier.ENTITY_PRESET_ALL:
+                // fall through
+            default:
+                return ENTITY_TYPES_ALL;
+        }
     }
 
     @Override
@@ -229,13 +263,13 @@ final class TextClassifierImpl implements TextClassifier {
         }
     }
 
-    @NonNull
-    private String getVersionInfo() {
+    private String getSignature(String text, int start, int end) {
         synchronized (mSmartSelectionLock) {
-            if (mLocale != null) {
-                return String.format("%s_v%d", mLocale.toLanguageTag(), mVersion);
-            }
-            return "";
+            final String versionInfo = (mLocale != null)
+                    ? String.format(Locale.US, "%s_v%d", mLocale.toLanguageTag(), mVersion)
+                    : "";
+            final int hash = Objects.hash(text, start, end, mContext.getPackageName());
+            return String.format(Locale.US, "%s|%s|%d", LOG_TAG, versionInfo, hash);
         }
     }
 
@@ -371,9 +405,11 @@ final class TextClassifierImpl implements TextClassifier {
     }
 
     private TextClassification createClassificationResult(
-            SmartSelection.ClassificationResult[] classifications, CharSequence text) {
+            SmartSelection.ClassificationResult[] classifications,
+            String text, int start, int end) {
+        final String classifiedText = text.substring(start, end);
         final TextClassification.Builder builder = new TextClassification.Builder()
-                .setText(text.toString());
+                .setText(classifiedText);
 
         final int size = classifications.length;
         for (int i = 0; i < size; i++) {
@@ -381,50 +417,54 @@ final class TextClassifierImpl implements TextClassifier {
         }
 
         final String type = getHighestScoringType(classifications);
-        builder.setLogType(IntentFactory.getLogType(type));
+        addActions(builder, IntentFactory.create(mContext, type, classifiedText));
 
-        final List<Intent> intents = IntentFactory.create(mContext, type, text.toString());
-        for (Intent intent : intents) {
-            extendClassificationWithIntent(intent, builder);
-        }
-
-        return builder.setVersionInfo(getVersionInfo()).build();
+        return builder.setSignature(getSignature(text, start, end)).build();
     }
 
-    /** Extends the classification with the intent if it can be resolved. */
-    private void extendClassificationWithIntent(Intent intent, TextClassification.Builder builder) {
-        final PackageManager pm;
-        final ResolveInfo resolveInfo;
-        if (intent != null) {
-            pm = mContext.getPackageManager();
-            resolveInfo = pm.resolveActivity(intent, 0);
-        } else {
-            pm = null;
-            resolveInfo = null;
-        }
-        if (resolveInfo != null && resolveInfo.activityInfo != null) {
-            final String packageName = resolveInfo.activityInfo.packageName;
-            CharSequence label;
-            Drawable icon;
-            if ("android".equals(packageName)) {
-                // Requires the chooser to find an activity to handle the intent.
-                label = IntentFactory.getLabel(mContext, intent);
-                icon = null;
+    /** Extends the classification with the intents that can be resolved. */
+    private void addActions(
+            TextClassification.Builder builder, List<Intent> intents) {
+        final PackageManager pm = mContext.getPackageManager();
+        final int size = intents.size();
+        for (int i = 0; i < size; i++) {
+            final Intent intent = intents.get(i);
+            final ResolveInfo resolveInfo;
+            if (intent != null) {
+                resolveInfo = pm.resolveActivity(intent, 0);
             } else {
-                // A default activity will handle the intent.
-                intent.setComponent(new ComponentName(packageName, resolveInfo.activityInfo.name));
-                icon = resolveInfo.activityInfo.loadIcon(pm);
-                if (icon == null) {
-                    icon = resolveInfo.loadIcon(pm);
+                resolveInfo = null;
+            }
+            if (resolveInfo != null && resolveInfo.activityInfo != null) {
+                final String packageName = resolveInfo.activityInfo.packageName;
+                CharSequence label;
+                Drawable icon;
+                if ("android".equals(packageName)) {
+                    // Requires the chooser to find an activity to handle the intent.
+                    label = IntentFactory.getLabel(mContext, intent);
+                    icon = null;
+                } else {
+                    // A default activity will handle the intent.
+                    intent.setComponent(
+                            new ComponentName(packageName, resolveInfo.activityInfo.name));
+                    icon = resolveInfo.activityInfo.loadIcon(pm);
+                    if (icon == null) {
+                        icon = resolveInfo.loadIcon(pm);
+                    }
+                    label = resolveInfo.activityInfo.loadLabel(pm);
+                    if (label == null) {
+                        label = resolveInfo.loadLabel(pm);
+                    }
                 }
-                label = resolveInfo.activityInfo.loadLabel(pm);
-                if (label == null) {
-                    label = resolveInfo.loadLabel(pm);
+                final String labelString = (label != null) ? label.toString() : null;
+                final OnClickListener onClickListener =
+                        TextClassification.createStartActivityOnClickListener(mContext, intent);
+                if (i == 0) {
+                    builder.setPrimaryAction(intent, labelString, icon, onClickListener);
+                } else {
+                    builder.addSecondaryAction(intent, labelString, icon, onClickListener);
                 }
             }
-            builder.addAction(
-                    intent, label != null ? label.toString() : null, icon,
-                    TextClassification.createStartActivityOnClickListener(mContext, intent));
         }
     }
 
@@ -555,23 +595,6 @@ final class TextClassifierImpl implements TextClassifier {
                     }
                 default:
                     return null;
-            }
-        }
-
-        @Nullable
-        public static int getLogType(String type) {
-            type = type.trim().toLowerCase(Locale.ENGLISH);
-            switch (type) {
-                case TextClassifier.TYPE_EMAIL:
-                    return TextViewMetrics.SUBTYPE_ASSIST_MENU_ITEM_EMAIL;
-                case TextClassifier.TYPE_PHONE:
-                    return TextViewMetrics.SUBTYPE_ASSIST_MENU_ITEM_PHONE;
-                case TextClassifier.TYPE_ADDRESS:
-                    return TextViewMetrics.SUBTYPE_ASSIST_MENU_ITEM_ADDRESS;
-                case TextClassifier.TYPE_URL:
-                    return TextViewMetrics.SUBTYPE_ASSIST_MENU_ITEM_URL;
-                default:
-                    return TextViewMetrics.SUBTYPE_ASSIST_MENU_ITEM_OTHER;
             }
         }
     }

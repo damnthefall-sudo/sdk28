@@ -20,16 +20,20 @@ import static android.app.slice.Slice.HINT_ACTIONS;
 import static android.app.slice.Slice.HINT_LIST;
 import static android.app.slice.Slice.HINT_LIST_ITEM;
 import static android.app.slice.Slice.HINT_PARTIAL;
-import static android.app.slice.SliceItem.FORMAT_COLOR;
+import static android.app.slice.Slice.SUBTYPE_COLOR;
+import static android.app.slice.SliceItem.FORMAT_INT;
 import static android.app.slice.SliceItem.FORMAT_SLICE;
 import static android.view.ViewGroup.LayoutParams.WRAP_CONTENT;
+
+import static androidx.app.slice.core.SliceHints.HINT_SUMMARY;
 
 import android.annotation.TargetApi;
 import android.content.Context;
 import android.support.annotation.RestrictTo;
 import android.support.v7.widget.LinearLayoutManager;
 import android.support.v7.widget.RecyclerView;
-import android.util.TypedValue;
+import android.view.View;
+import android.widget.FrameLayout;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -38,18 +42,18 @@ import java.util.function.Consumer;
 import androidx.app.slice.Slice;
 import androidx.app.slice.SliceItem;
 import androidx.app.slice.core.SliceQuery;
+import androidx.app.slice.view.R;
 
 /**
  * @hide
  */
 @RestrictTo(RestrictTo.Scope.LIBRARY)
 @TargetApi(24)
-public class LargeTemplateView extends SliceView.SliceModeView {
+public class LargeTemplateView extends FrameLayout implements SliceView.SliceModeView {
 
     private final LargeSliceAdapter mAdapter;
     private final RecyclerView mRecyclerView;
     private final int mDefaultHeight;
-    private final int mMaxHeight;
     private Slice mSlice;
     private boolean mIsScrollable;
 
@@ -61,10 +65,12 @@ public class LargeTemplateView extends SliceView.SliceModeView {
         mAdapter = new LargeSliceAdapter(context);
         mRecyclerView.setAdapter(mAdapter);
         addView(mRecyclerView);
-        mDefaultHeight = (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 200,
-                getResources().getDisplayMetrics());
-        mMaxHeight = (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 200,
-                getResources().getDisplayMetrics());
+        mDefaultHeight = getResources().getDimensionPixelSize(R.dimen.abc_slice_large_height);
+    }
+
+    @Override
+    public View getView() {
+        return this;
     }
 
     @Override
@@ -76,9 +82,10 @@ public class LargeTemplateView extends SliceView.SliceModeView {
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
         mRecyclerView.getLayoutParams().height = WRAP_CONTENT;
         super.onMeasure(widthMeasureSpec, heightMeasureSpec);
-        if (mRecyclerView.getMeasuredHeight() > mMaxHeight
+        int width = MeasureSpec.getSize(widthMeasureSpec);
+        if (mRecyclerView.getMeasuredHeight() > width
                 || (mSlice != null && SliceQuery.hasHints(mSlice, HINT_PARTIAL))) {
-            mRecyclerView.getLayoutParams().height = mDefaultHeight;
+            mRecyclerView.getLayoutParams().height = width;
         } else {
             mRecyclerView.getLayoutParams().height = mRecyclerView.getMeasuredHeight();
         }
@@ -87,7 +94,7 @@ public class LargeTemplateView extends SliceView.SliceModeView {
 
     @Override
     public void setSlice(Slice slice) {
-        SliceItem color = SliceQuery.find(slice, FORMAT_COLOR);
+        SliceItem color = SliceQuery.findSubtype(slice, FORMAT_INT, SUBTYPE_COLOR);
         mSlice = slice;
         final List<SliceItem> items = new ArrayList<>();
         final boolean[] hasHeader = new boolean[1];
@@ -97,9 +104,9 @@ public class LargeTemplateView extends SliceView.SliceModeView {
             slice.getItems().forEach(new Consumer<SliceItem>() {
                 @Override
                 public void accept(SliceItem item) {
-                    if (item.hasHint(HINT_ACTIONS)) {
+                    if (item.hasAnyHints(HINT_ACTIONS, HINT_SUMMARY)) {
                         return;
-                    } else if (FORMAT_COLOR.equals(item.getFormat())) {
+                    } else if (FORMAT_INT.equals(item.getFormat())) {
                         return;
                     } else if (FORMAT_SLICE.equals(item.getFormat())
                             && item.hasHint(HINT_LIST)) {

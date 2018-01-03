@@ -16,6 +16,7 @@
 
 package com.android.server.wm;
 
+import static android.view.WindowManager.LayoutParams.TYPE_DOCK_DIVIDER;
 import static android.view.WindowManager.LayoutParams.TYPE_MAGNIFICATION_OVERLAY;
 import static android.view.WindowManager.LayoutParams.PRIVATE_FLAG_IS_ROUNDED_CORNERS_OVERLAY;
 
@@ -234,16 +235,7 @@ final class AccessibilityController {
 
     private static void populateTransformationMatrixLocked(WindowState windowState,
             Matrix outMatrix) {
-        sTempFloats[Matrix.MSCALE_X] = windowState.mWinAnimator.mDsDx;
-        sTempFloats[Matrix.MSKEW_Y] = windowState.mWinAnimator.mDtDx;
-        sTempFloats[Matrix.MSKEW_X] = windowState.mWinAnimator.mDtDy;
-        sTempFloats[Matrix.MSCALE_Y] = windowState.mWinAnimator.mDsDy;
-        sTempFloats[Matrix.MTRANS_X] = windowState.mShownPosition.x;
-        sTempFloats[Matrix.MTRANS_Y] = windowState.mShownPosition.y;
-        sTempFloats[Matrix.MPERSP_0] = 0;
-        sTempFloats[Matrix.MPERSP_1] = 0;
-        sTempFloats[Matrix.MPERSP_2] = 1;
-        outMatrix.setValues(sTempFloats);
+        windowState.getTransformationMatrix(sTempFloats, outMatrix);
     }
 
     /**
@@ -1077,8 +1069,11 @@ final class AccessibilityController {
                         continue;
                     }
 
-                    // If the window is not touchable - ignore.
-                    if ((flags & WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0) {
+                    // Ignore non-touchable windows, except the split-screen divider, which is
+                    // occasionally non-touchable but still useful for identifying split-screen
+                    // mode.
+                    if (((flags & WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0)
+                            && (windowState.mAttrs.type != TYPE_DOCK_DIVIDER)) {
                         continue;
                     }
 

@@ -17,6 +17,7 @@
 package android.content.pm;
 
 import android.annotation.SystemApi;
+import android.annotation.TestApi;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.text.TextUtils;
@@ -144,6 +145,16 @@ public class PermissionInfo extends PackageItemInfo implements Parcelable {
     public static final int PROTECTION_FLAG_OEM = 0x4000;
 
     /**
+     * Additional flag for {${link #protectionLevel}, corresponding
+     * to the <code>vendorPrivileged</code> value of
+     * {@link android.R.attr#protectionLevel}.
+     *
+     * @hide
+     */
+    @TestApi
+    public static final int PROTECTION_FLAG_VENDOR_PRIVILEGED = 0x8000;
+
+    /**
      * Mask for {@link #protectionLevel}: the basic protection type.
      */
     public static final int PROTECTION_MASK_BASE = 0xf;
@@ -231,6 +242,12 @@ public class PermissionInfo extends PackageItemInfo implements Parcelable {
         if (level == PROTECTION_SIGNATURE_OR_SYSTEM) {
             level = PROTECTION_SIGNATURE | PROTECTION_FLAG_PRIVILEGED;
         }
+        if ((level & PROTECTION_FLAG_VENDOR_PRIVILEGED) != 0
+                && (level & PROTECTION_FLAG_PRIVILEGED) == 0) {
+            // 'vendorPrivileged' must be 'privileged'. If not,
+            // drop the vendorPrivileged.
+            level = level & ~PROTECTION_FLAG_VENDOR_PRIVILEGED;
+        }
         return level;
     }
 
@@ -283,6 +300,9 @@ public class PermissionInfo extends PackageItemInfo implements Parcelable {
         }
         if ((level & PermissionInfo.PROTECTION_FLAG_OEM) != 0) {
             protLevel += "|oem";
+        }
+        if ((level & PermissionInfo.PROTECTION_FLAG_VENDOR_PRIVILEGED) != 0) {
+            protLevel += "|vendorPrivileged";
         }
         return protLevel;
     }

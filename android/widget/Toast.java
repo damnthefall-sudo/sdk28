@@ -71,7 +71,10 @@ public class Toast {
     static final boolean localLOGV = false;
 
     /** @hide */
-    @IntDef({LENGTH_SHORT, LENGTH_LONG})
+    @IntDef(prefix = { "LENGTH_" }, value = {
+            LENGTH_SHORT,
+            LENGTH_LONG
+    })
     @Retention(RetentionPolicy.SOURCE)
     public @interface Duration {}
 
@@ -504,8 +507,7 @@ public class Toast {
         private void trySendAccessibilityEvent() {
             AccessibilityManager accessibilityManager =
                     AccessibilityManager.getInstance(mView.getContext());
-            if (!accessibilityManager.isObservedEventType(
-                    AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED)) {
+            if (!accessibilityManager.isEnabled()) {
                 return;
             }
             // treat toasts as notifications since they are used to

@@ -2185,6 +2185,30 @@ public class CaptureResult extends CameraMetadata<CaptureResult.Key<?>> {
             new Key<Boolean>("android.control.enableZsl", boolean.class);
 
     /**
+     * <p>Whether a significant scene change is detected within the currently-set AF
+     * region(s).</p>
+     * <p>When the camera focus routine detects a change in the scene it is looking at,
+     * such as a large shift in camera viewpoint, significant motion in the scene, or a
+     * significant illumination change, this value will be set to DETECTED for a single capture
+     * result. Otherwise the value will be NOT_DETECTED. The threshold for detection is similar
+     * to what would trigger a new passive focus scan to begin in CONTINUOUS autofocus modes.</p>
+     * <p>afSceneChange may be DETECTED only if afMode is AF_MODE_CONTINUOUS_VIDEO or
+     * AF_MODE_CONTINUOUS_PICTURE. In other AF modes, afSceneChange must be NOT_DETECTED.</p>
+     * <p>This key will be available if the camera device advertises this key via {@link android.hardware.camera2.CameraCharacteristics#getAvailableCaptureResultKeys }.</p>
+     * <p><b>Possible values:</b>
+     * <ul>
+     *   <li>{@link #CONTROL_AF_SCENE_CHANGE_NOT_DETECTED NOT_DETECTED}</li>
+     *   <li>{@link #CONTROL_AF_SCENE_CHANGE_DETECTED DETECTED}</li>
+     * </ul></p>
+     * <p><b>Optional</b> - This value may be {@code null} on some devices.</p>
+     * @see #CONTROL_AF_SCENE_CHANGE_NOT_DETECTED
+     * @see #CONTROL_AF_SCENE_CHANGE_DETECTED
+     */
+    @PublicKey
+    public static final Key<Integer> CONTROL_AF_SCENE_CHANGE =
+            new Key<Integer>("android.control.afSceneChange", int.class);
+
+    /**
      * <p>Operation mode for edge
      * enhancement.</p>
      * <p>Edge enhancement improves sharpness and details in the captured image. OFF means

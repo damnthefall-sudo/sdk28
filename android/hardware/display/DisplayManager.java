@@ -16,8 +16,10 @@
 
 package android.hardware.display;
 
+import android.Manifest;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.RequiresPermission;
 import android.annotation.SystemApi;
 import android.annotation.SystemService;
 import android.app.KeyguardManager;
@@ -25,6 +27,7 @@ import android.content.Context;
 import android.graphics.Point;
 import android.media.projection.MediaProjection;
 import android.os.Handler;
+import android.os.UserHandle;
 import android.util.SparseArray;
 import android.view.Display;
 import android.view.Surface;
@@ -619,8 +622,9 @@ public final class DisplayManager {
      * Fetch {@link BrightnessChangeEvent}s.
      * @hide until we make it a system api.
      */
+    @RequiresPermission(Manifest.permission.BRIGHTNESS_SLIDER_USAGE)
     public List<BrightnessChangeEvent> getBrightnessEvents() {
-        return mGlobal.getBrightnessEvents();
+        return mGlobal.getBrightnessEvents(mContext.getOpPackageName());
     }
 
     /**
@@ -628,6 +632,27 @@ public final class DisplayManager {
      */
     public void setBrightness(int brightness) {
         mGlobal.setBrightness(brightness);
+    }
+
+    /**
+     * Sets the global display brightness configuration.
+     *
+     * @hide
+     */
+    public void setBrightnessConfiguration(BrightnessConfiguration c) {
+        setBrightnessConfigurationForUser(c, UserHandle.myUserId());
+    }
+
+    /**
+     * Sets the global display brightness configuration for a specific user.
+     *
+     * Note this requires the INTERACT_ACROSS_USERS permission if setting the configuration for a
+     * user other than the one you're currently running as.
+     *
+     * @hide
+     */
+    public void setBrightnessConfigurationForUser(BrightnessConfiguration c, int userId) {
+        mGlobal.setBrightnessConfigurationForUser(c, userId);
     }
 
     /**

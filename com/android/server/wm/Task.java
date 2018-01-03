@@ -22,7 +22,6 @@ import static android.content.pm.ActivityInfo.RESIZE_MODE_FORCE_RESIZABLE_PORTRA
 import static android.content.pm.ActivityInfo.RESIZE_MODE_FORCE_RESIZABLE_PRESERVE_ORIENTATION;
 import static android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSET;
 import static android.content.res.Configuration.EMPTY;
-import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION_STARTING;
 
 import static com.android.server.EventLogTags.WM_TASK_REMOVED;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_STACK;
@@ -43,7 +42,6 @@ import android.graphics.Rect;
 import android.util.EventLog;
 import android.util.Slog;
 import android.util.proto.ProtoOutputStream;
-import android.view.DisplayInfo;
 import android.view.Surface;
 
 import com.android.internal.annotations.VisibleForTesting;
@@ -59,7 +57,6 @@ class Task extends WindowContainer<AppWindowToken> {
     final int mTaskId;
     final int mUserId;
     private boolean mDeferRemoval = false;
-    final WindowManagerService mService;
 
     final Rect mPreparedFrozenBounds = new Rect();
     final Configuration mPreparedFrozenMergedConfig = new Configuration();
@@ -102,10 +99,10 @@ class Task extends WindowContainer<AppWindowToken> {
     Task(int taskId, TaskStack stack, int userId, WindowManagerService service, int resizeMode,
             boolean supportsPictureInPicture, TaskDescription taskDescription,
             TaskWindowContainerController controller) {
+        super(service);
         mTaskId = taskId;
         mStack = stack;
         mUserId = userId;
-        mService = service;
         mResizeMode = resizeMode;
         mSupportsPictureInPicture = supportsPictureInPicture;
         setController(controller);
@@ -163,7 +160,7 @@ class Task extends WindowContainer<AppWindowToken> {
     boolean shouldDeferRemoval() {
         // TODO: This should probably return false if mChildren.isEmpty() regardless if the stack
         // is animating...
-        return hasWindowsAlive() && mStack.isAnimating();
+        return hasWindowsAlive() && mStack.isSelfOrChildAnimating();
     }
 
     @Override
@@ -539,14 +536,7 @@ class Task extends WindowContainer<AppWindowToken> {
     /** Cancels any running app transitions associated with the task. */
     void cancelTaskWindowTransition() {
         for (int i = mChildren.size() - 1; i >= 0; --i) {
-            mChildren.get(i).mAppAnimator.clearAnimation();
-        }
-    }
-
-    /** Cancels any running thumbnail transitions associated with the task. */
-    void cancelTaskThumbnailTransition() {
-        for (int i = mChildren.size() - 1; i >= 0; --i) {
-            mChildren.get(i).mAppAnimator.clearThumbnail();
+            mChildren.get(i).cancelAnimation();
         }
     }
 
@@ -659,6 +649,9 @@ class Task extends WindowContainer<AppWindowToken> {
         mDimmer.resetDimStates();
         super.prepareSurfaces();
         getDimBounds(mTmpDimBoundsRect);
+
+        // Bounds need to be relative, as the dim layer is a child.
+        mTmpDimBoundsRect.offsetTo(0, 0);
         if (mDimmer.updateDims(getPendingTransaction(), mTmpDimBoundsRect)) {
             scheduleAnimation();
         }
@@ -680,7 +673,9 @@ class Task extends WindowContainer<AppWindowToken> {
         proto.end(token);
     }
 
-    public void dump(String prefix, PrintWriter pw) {
+    @Override
+    public void dump(PrintWriter pw, String prefix, boolean dumpAll) {
+        super.dump(pw, prefix, dumpAll);
         final String doublePrefix = prefix + "  ";
 
         pw.println(prefix + "taskId=" + mTaskId);
@@ -694,7 +689,7 @@ class Task extends WindowContainer<AppWindowToken> {
         for (int i = mChildren.size() - 1; i >= 0; i--) {
             final AppWindowToken wtoken = mChildren.get(i);
             pw.println(triplePrefix + "Activity #" + i + " " + wtoken);
-            wtoken.dump(pw, triplePrefix);
+            wtoken.dump(pw, triplePrefix, dumpAll);
         }
     }
 

@@ -216,7 +216,8 @@ public class PasspointManager {
         wifiConfigStore.registerStoreData(objectFactory.makePasspointConfigStoreData(
                 mKeyStore, mSimAccessor, new DataSourceHandler()));
         mPasspointProvisioner = objectFactory.makePasspointProvisioner(context,
-                objectFactory.makeOsuNetworkConnection(context));
+                objectFactory.makeOsuNetworkConnection(context),
+                objectFactory.makeOsuServerConnection());
         sPasspointManager = this;
     }
 
@@ -720,7 +721,7 @@ public class PasspointManager {
                 mSimAccessor, mProviderIndex++, wifiConfig.creatorUid,
                 enterpriseConfig.getCaCertificateAlias(),
                 enterpriseConfig.getClientCertificateAlias(),
-                enterpriseConfig.getClientCertificateAlias(), false);
+                enterpriseConfig.getClientCertificateAlias(), false, false);
         mProviders.put(passpointConfig.getHomeSp().getFqdn(), provider);
         return true;
     }

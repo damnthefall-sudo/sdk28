@@ -50,7 +50,7 @@ import java.util.concurrent.atomic.AtomicInteger;
     /*
      * Maximum number of transaction requests that can be pending at a time
      */
-    private static final int MAX_PENDING_REQUESTS = 10;
+    private static final int MAX_PENDING_REQUESTS = 10000;
 
     /*
      * The proxy to talk to the Context Hub
@@ -61,6 +61,11 @@ import java.util.concurrent.atomic.AtomicInteger;
      * The manager for all clients for the service.
      */
     private final ContextHubClientManager mClientManager;
+
+    /*
+     * The nanoapp state manager for the service
+     */
+    private final NanoAppStateManager mNanoAppStateManager;
 
     /*
      * A queue containing the current transactions
@@ -79,9 +84,11 @@ import java.util.concurrent.atomic.AtomicInteger;
     private ScheduledFuture<?> mTimeoutFuture = null;
 
     /* package */ ContextHubTransactionManager(
-            IContexthub contextHubProxy, ContextHubClientManager clientManager) {
+            IContexthub contextHubProxy, ContextHubClientManager clientManager,
+            NanoAppStateManager nanoAppStateManager) {
         mContextHubProxy = contextHubProxy;
         mClientManager = clientManager;
+        mNanoAppStateManager = nanoAppStateManager;
     }
 
     /**
@@ -106,25 +113,28 @@ import java.util.concurrent.atomic.AtomicInteger;
                             contextHubId, hidlNanoAppBinary, this.getTransactionId());
                 } catch (RemoteException e) {
                     Log.e(TAG, "RemoteException while trying to load nanoapp with ID 0x" +
-                            Long.toHexString(nanoAppBinary.getNanoAppId()));
+                            Long.toHexString(nanoAppBinary.getNanoAppId()), e);
                     return Result.UNKNOWN_FAILURE;
                 }
             }
 
             @Override
-            /* package */ void onTimeout() {
-                onTransactionComplete(ContextHubTransaction.TRANSACTION_FAILED_TIMEOUT);
-            }
-
-            @Override
-            /* package */ void onTransactionComplete(int result) {
+            /* package */ void onTransactionComplete(@ContextHubTransaction.Result int result) {
+                if (result == ContextHubTransaction.RESULT_SUCCESS) {
+                    // NOTE: The legacy JNI code used to do a query right after a load success
+                    // to synchronize the service cache. Instead store the binary that was
+                    // requested to load to update the cache later without doing a query.
+                    mNanoAppStateManager.addNanoAppInstance(
+                            contextHubId, nanoAppBinary.getNanoAppId(),
+                            nanoAppBinary.getNanoAppVersion());
+                }
                 try {
                     onCompleteCallback.onTransactionComplete(result);
-                    if (result == Result.OK) {
+                    if (result == ContextHubTransaction.RESULT_SUCCESS) {
                         mClientManager.onNanoAppLoaded(contextHubId, nanoAppBinary.getNanoAppId());
                     }
                 } catch (RemoteException e) {
-                    Log.e(TAG, "RemoteException while calling client onTransactionComplete");
+                    Log.e(TAG, "RemoteException while calling client onTransactionComplete", e);
                 }
             }
         };
@@ -133,7 +143,7 @@ import java.util.concurrent.atomic.AtomicInteger;
     /**
      * Creates a transaction for unloading a nanoapp.
      *
-     * @param contextHubId       the ID of the hub to load the nanoapp to
+     * @param contextHubId       the ID of the hub to unload the nanoapp from
      * @param nanoAppId          the ID of the nanoapp to unload
      * @param onCompleteCallback the client on complete callback
      * @return the generated transaction
@@ -149,25 +159,93 @@ import java.util.concurrent.atomic.AtomicInteger;
                             contextHubId, nanoAppId, this.getTransactionId());
                 } catch (RemoteException e) {
                     Log.e(TAG, "RemoteException while trying to unload nanoapp with ID 0x" +
-                            Long.toHexString(nanoAppId));
+                            Long.toHexString(nanoAppId), e);
                     return Result.UNKNOWN_FAILURE;
                 }
             }
 
             @Override
-            /* package */ void onTimeout() {
-                onTransactionComplete(ContextHubTransaction.TRANSACTION_FAILED_TIMEOUT);
-            }
-
-            @Override
-            /* package */ void onTransactionComplete(int result) {
+            /* package */ void onTransactionComplete(@ContextHubTransaction.Result int result) {
+                if (result == ContextHubTransaction.RESULT_SUCCESS) {
+                    mNanoAppStateManager.removeNanoAppInstance(contextHubId, nanoAppId);
+                }
                 try {
                     onCompleteCallback.onTransactionComplete(result);
-                    if (result == Result.OK) {
+                    if (result == ContextHubTransaction.RESULT_SUCCESS) {
                         mClientManager.onNanoAppUnloaded(contextHubId, nanoAppId);
                     }
                 } catch (RemoteException e) {
-                    Log.e(TAG, "RemoteException while calling client onTransactionComplete");
+                    Log.e(TAG, "RemoteException while calling client onTransactionComplete", e);
+                }
+            }
+        };
+    }
+
+    /**
+     * Creates a transaction for enabling a nanoapp.
+     *
+     * @param contextHubId       the ID of the hub to enable the nanoapp on
+     * @param nanoAppId          the ID of the nanoapp to enable
+     * @param onCompleteCallback the client on complete callback
+     * @return the generated transaction
+     */
+    /* package */ ContextHubServiceTransaction createEnableTransaction(
+            int contextHubId, long nanoAppId, IContextHubTransactionCallback onCompleteCallback) {
+        return new ContextHubServiceTransaction(
+                mNextAvailableId.getAndIncrement(), ContextHubTransaction.TYPE_ENABLE_NANOAPP) {
+            @Override
+            /* package */ int onTransact() {
+                try {
+                    return mContextHubProxy.enableNanoApp(
+                            contextHubId, nanoAppId, this.getTransactionId());
+                } catch (RemoteException e) {
+                    Log.e(TAG, "RemoteException while trying to enable nanoapp with ID 0x" +
+                            Long.toHexString(nanoAppId), e);
+                    return Result.UNKNOWN_FAILURE;
+                }
+            }
+
+            @Override
+            /* package */ void onTransactionComplete(@ContextHubTransaction.Result int result) {
+                try {
+                    onCompleteCallback.onTransactionComplete(result);
+                } catch (RemoteException e) {
+                    Log.e(TAG, "RemoteException while calling client onTransactionComplete", e);
+                }
+            }
+        };
+    }
+
+    /**
+     * Creates a transaction for disabling a nanoapp.
+     *
+     * @param contextHubId       the ID of the hub to disable the nanoapp on
+     * @param nanoAppId          the ID of the nanoapp to disable
+     * @param onCompleteCallback the client on complete callback
+     * @return the generated transaction
+     */
+    /* package */ ContextHubServiceTransaction createDisableTransaction(
+            int contextHubId, long nanoAppId, IContextHubTransactionCallback onCompleteCallback) {
+        return new ContextHubServiceTransaction(
+                mNextAvailableId.getAndIncrement(), ContextHubTransaction.TYPE_DISABLE_NANOAPP) {
+            @Override
+            /* package */ int onTransact() {
+                try {
+                    return mContextHubProxy.disableNanoApp(
+                            contextHubId, nanoAppId, this.getTransactionId());
+                } catch (RemoteException e) {
+                    Log.e(TAG, "RemoteException while trying to disable nanoapp with ID 0x" +
+                            Long.toHexString(nanoAppId), e);
+                    return Result.UNKNOWN_FAILURE;
+                }
+            }
+
+            @Override
+            /* package */ void onTransactionComplete(@ContextHubTransaction.Result int result) {
+                try {
+                    onCompleteCallback.onTransactionComplete(result);
+                } catch (RemoteException e) {
+                    Log.e(TAG, "RemoteException while calling client onTransactionComplete", e);
                 }
             }
         };
@@ -189,23 +267,23 @@ import java.util.concurrent.atomic.AtomicInteger;
                 try {
                     return mContextHubProxy.queryApps(contextHubId);
                 } catch (RemoteException e) {
-                    Log.e(TAG, "RemoteException while trying to query for nanoapps");
+                    Log.e(TAG, "RemoteException while trying to query for nanoapps", e);
                     return Result.UNKNOWN_FAILURE;
                 }
             }
 
             @Override
-            /* package */ void onTimeout() {
-                onQueryResponse(ContextHubTransaction.TRANSACTION_FAILED_TIMEOUT,
-                        Collections.emptyList());
+            /* package */ void onTransactionComplete(@ContextHubTransaction.Result int result) {
+                onQueryResponse(result, Collections.emptyList());
             }
 
             @Override
-            /* package */ void onQueryResponse(int result, List<NanoAppState> nanoAppStateList) {
+            /* package */ void onQueryResponse(
+                    @ContextHubTransaction.Result int result, List<NanoAppState> nanoAppStateList) {
                 try {
                     onCompleteCallback.onQueryResponse(result, nanoAppStateList);
                 } catch (RemoteException e) {
-                    Log.e(TAG, "RemoteException while calling client onQueryComplete");
+                    Log.e(TAG, "RemoteException while calling client onQueryComplete", e);
                 }
             }
         };
@@ -215,7 +293,8 @@ import java.util.concurrent.atomic.AtomicInteger;
      * Adds a new transaction to the queue.
      *
      * If there was no pending transaction at the time, the transaction that was added will be
-     * started in this method.
+     * started in this method. If there were too many transactions in the queue, an exception will
+     * be thrown.
      *
      * @param transaction the transaction to add
      * @throws IllegalStateException if the queue is full
@@ -224,7 +303,7 @@ import java.util.concurrent.atomic.AtomicInteger;
     synchronized void addTransaction(
             ContextHubServiceTransaction transaction) throws IllegalStateException {
         if (mTransactionQueue.size() == MAX_PENDING_REQUESTS) {
-            throw new IllegalStateException("Transaction transaction queue is full (capacity = "
+            throw new IllegalStateException("Transaction queue is full (capacity = "
                     + MAX_PENDING_REQUESTS + ")");
         }
         mTransactionQueue.add(transaction);
@@ -238,7 +317,7 @@ import java.util.concurrent.atomic.AtomicInteger;
      * Handles a transaction response from a Context Hub.
      *
      * @param transactionId the transaction ID of the response
-     * @param result        the result of the transaction
+     * @param result        the result of the transaction as defined by the HAL TransactionResult
      */
     /* package */
     synchronized void onTransactionResponse(int transactionId, int result) {
@@ -253,7 +332,10 @@ import java.util.concurrent.atomic.AtomicInteger;
             return;
         }
 
-        transaction.onTransactionComplete(result);
+        transaction.onTransactionComplete(
+                (result == TransactionResult.SUCCESS) ?
+                        ContextHubTransaction.RESULT_SUCCESS :
+                        ContextHubTransaction.RESULT_FAILED_AT_HUB);
         removeTransactionAndStartNext();
     }
 
@@ -274,7 +356,7 @@ import java.util.concurrent.atomic.AtomicInteger;
             return;
         }
 
-        transaction.onQueryResponse(TransactionResult.SUCCESS, nanoAppStateList);
+        transaction.onQueryResponse(ContextHubTransaction.RESULT_SUCCESS, nanoAppStateList);
         removeTransactionAndStartNext();
     }
 
@@ -333,7 +415,8 @@ import java.util.concurrent.atomic.AtomicInteger;
                     synchronized (this) {
                         if (!transaction.isComplete()) {
                             Log.d(TAG, transaction + " timed out");
-                            transaction.onTimeout();
+                            transaction.onTransactionComplete(
+                                    ContextHubTransaction.RESULT_FAILED_TIMEOUT);
 
                             removeTransactionAndStartNext();
                         }
@@ -344,6 +427,8 @@ import java.util.concurrent.atomic.AtomicInteger;
                 mTimeoutFuture = mTimeoutExecutor.schedule(onTimeoutFunc, timeoutSeconds,
                         TimeUnit.SECONDS);
             } else {
+                transaction.onTransactionComplete(
+                        ContextHubServiceUtil.toTransactionResult(result));
                 mTransactionQueue.remove();
             }
         }

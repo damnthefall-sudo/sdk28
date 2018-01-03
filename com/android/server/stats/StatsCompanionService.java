@@ -15,6 +15,7 @@
  */
 package com.android.server.stats;
 
+import android.annotation.Nullable;
 import android.app.AlarmManager;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
@@ -25,16 +26,22 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.UserInfo;
 import android.net.NetworkStats;
+import android.net.wifi.IWifiManager;
+import android.net.wifi.WifiActivityEnergyInfo;
+import android.telephony.ModemActivityInfo;
+import android.telephony.TelephonyManager;
 import android.os.BatteryStatsInternal;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.os.IStatsCompanionService;
 import android.os.IStatsManager;
+import android.os.Parcelable;
 import android.os.Process;
 import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.os.StatsLogEventWrapper;
+import android.os.SynchronousResultReceiver;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.util.Slog;
@@ -52,6 +59,7 @@ import com.android.server.SystemService;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Helper service for statsd (the native stats management service in cmds/statsd/).
@@ -60,6 +68,13 @@ import java.util.Map;
  * @hide
  */
 public class StatsCompanionService extends IStatsCompanionService.Stub {
+    /**
+     * How long to wait on an individual subsystem to return its stats.
+     */
+    private static final long EXTERNAL_STATS_SYNC_TIMEOUT_MILLIS = 2000;
+
+    public static final String RESULT_RECEIVER_CONTROLLER_KEY = "controller_activity";
+
     static final String TAG = "StatsCompanionService";
     static final boolean DEBUG = true;
     public static final String ACTION_TRIGGER_COLLECTION =
@@ -79,6 +94,8 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
     private final KernelWakelockReader mKernelWakelockReader = new KernelWakelockReader();
     private final KernelWakelockStats mTmpWakelockStats = new KernelWakelockStats();
     private final KernelCpuSpeedReader[] mKernelCpuSpeedReaders;
+    private IWifiManager mWifiManager = null;
+    private TelephonyManager mTelephony = null;
 
     public StatsCompanionService(Context context) {
         super();
@@ -138,6 +155,14 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
         return ret;
     }
 
+    private final static long[] toLongArray(List<Long> list) {
+        long[] ret = new long[list.size()];
+        for (int i = 0; i < ret.length; i++) {
+            ret[i] = list.get(i);
+        }
+        return ret;
+    }
+
     // Assumes that sStatsdLock is held.
     private final void informAllUidsLocked(Context context) throws RemoteException {
         UserManager um = (UserManager) context.getSystemService(Context.USER_SERVICE);
@@ -148,7 +173,7 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
         }
 
         List<Integer> uids = new ArrayList();
-        List<Integer> versions = new ArrayList();
+        List<Long> versions = new ArrayList();
         List<String> apps = new ArrayList();
 
         // Add in all the apps for every user/profile.
@@ -157,12 +182,12 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
             for (int j = 0; j < pi.size(); j++) {
                 if (pi.get(j).applicationInfo != null) {
                     uids.add(pi.get(j).applicationInfo.uid);
-                    versions.add(pi.get(j).versionCode);
+                    versions.add(pi.get(j).getLongVersionCode());
                     apps.add(pi.get(j).packageName);
                 }
             }
         }
-        sStatsd.informAllUidData(toIntArray(uids), toIntArray(versions), apps.toArray(new
+        sStatsd.informAllUidData(toIntArray(uids), toLongArray(versions), apps.toArray(new
                 String[apps.size()]));
         if (DEBUG) {
             Slog.w(TAG, "Sent data for " + uids.size() + " apps");
@@ -205,7 +230,7 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
                         int uid = b.getInt(Intent.EXTRA_UID);
                         String app = intent.getData().getSchemeSpecificPart();
                         PackageInfo pi = pm.getPackageInfo(app, PackageManager.MATCH_ANY_USER);
-                        sStatsd.informOnePackage(app, uid, pi.versionCode);
+                        sStatsd.informOnePackage(app, uid, pi.getLongVersionCode());
                     }
                 } catch (Exception e) {
                     Slog.w(TAG, "Failed to inform statsd of an app update", e);
@@ -389,6 +414,40 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
         return ret;
     }
 
+    /**
+     * Helper method to extract the Parcelable controller info from a
+     * SynchronousResultReceiver.
+     */
+    private static <T extends Parcelable> T awaitControllerInfo(
+            @Nullable SynchronousResultReceiver receiver) {
+        if (receiver == null) {
+            return null;
+        }
+
+        try {
+            final SynchronousResultReceiver.Result result =
+                    receiver.awaitResult(EXTERNAL_STATS_SYNC_TIMEOUT_MILLIS);
+            if (result.bundle != null) {
+                // This is the final destination for the Bundle.
+                result.bundle.setDefusable(true);
+
+                final T data = result.bundle.getParcelable(
+                        RESULT_RECEIVER_CONTROLLER_KEY);
+                if (data != null) {
+                    return data;
+                }
+            }
+            Slog.e(TAG, "no controller energy info supplied for " + receiver.getName());
+        } catch (TimeoutException e) {
+            Slog.w(TAG, "timeout reading " + receiver.getName() + " stats");
+        }
+        return null;
+    }
+
+    /**
+     *
+     * Pulls wifi controller activity energy info from WiFiManager
+     */
     @Override // Binder call
     public StatsLogEventWrapper[] pullData(int tagId) {
         enforceCallingPermission();
@@ -396,7 +455,7 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
             Slog.d(TAG, "Pulling " + tagId);
 
         switch (tagId) {
-            case StatsLog.WIFI_BYTES_TRANSFERRED: {
+            case StatsLog.WIFI_BYTES_TRANSFER: {
                 long token = Binder.clearCallingIdentity();
                 try {
                     // TODO: Consider caching the following call to get BatteryStatsInternal.
@@ -417,7 +476,7 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
                 }
                 break;
             }
-            case StatsLog.MOBILE_BYTES_TRANSFERRED: {
+            case StatsLog.MOBILE_BYTES_TRANSFER: {
                 long token = Binder.clearCallingIdentity();
                 try {
                     BatteryStatsInternal bs = LocalServices.getService(BatteryStatsInternal.class);
@@ -437,7 +496,7 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
                 }
                 break;
             }
-            case StatsLog.WIFI_BYTES_TRANSFERRED_BY_FG_BG: {
+            case StatsLog.WIFI_BYTES_TRANSFER_BY_FG_BG: {
                 long token = Binder.clearCallingIdentity();
                 try {
                     BatteryStatsInternal bs = LocalServices.getService(BatteryStatsInternal.class);
@@ -457,7 +516,7 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
                 }
                 break;
             }
-            case StatsLog.MOBILE_BYTES_TRANSFERRED_BY_FG_BG: {
+            case StatsLog.MOBILE_BYTES_TRANSFER_BY_FG_BG: {
                 long token = Binder.clearCallingIdentity();
                 try {
                     BatteryStatsInternal bs = LocalServices.getService(BatteryStatsInternal.class);
@@ -477,7 +536,7 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
                 }
                 break;
             }
-            case StatsLog.KERNEL_WAKELOCK_PULLED: {
+            case StatsLog.KERNEL_WAKELOCK: {
                 final KernelWakelockStats wakelockStats =
                         mKernelWakelockReader.readKernelWakelockStats(mTmpWakelockStats);
                 List<StatsLogEventWrapper> ret = new ArrayList();
@@ -493,7 +552,7 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
                 }
                 return ret.toArray(new StatsLogEventWrapper[ret.size()]);
             }
-            case StatsLog.CPU_TIME_PER_FREQ_PULLED: {
+            case StatsLog.CPU_TIME_PER_FREQ: {
                 List<StatsLogEventWrapper> ret = new ArrayList();
                 for (int cluster = 0; cluster < mKernelCpuSpeedReaders.length; cluster++) {
                     long[] clusterTimeMs = mKernelCpuSpeedReaders[cluster].readDelta();
@@ -508,6 +567,59 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
                     }
                 }
                 return ret.toArray(new StatsLogEventWrapper[ret.size()]);
+            }
+            case StatsLog.WIFI_ACTIVITY_ENERGY_INFO: {
+                List<StatsLogEventWrapper> ret = new ArrayList();
+                long token = Binder.clearCallingIdentity();
+                if (mWifiManager == null) {
+                    mWifiManager = IWifiManager.Stub.asInterface(ServiceManager.getService(
+                            Context.WIFI_SERVICE));
+                }
+                if (mWifiManager != null) {
+                    try {
+                        SynchronousResultReceiver wifiReceiver = new SynchronousResultReceiver("wifi");
+                        mWifiManager.requestActivityInfo(wifiReceiver);
+                        final WifiActivityEnergyInfo wifiInfo = awaitControllerInfo(wifiReceiver);
+                        StatsLogEventWrapper e = new StatsLogEventWrapper(tagId, 6);
+                        e.writeLong(wifiInfo.getTimeStamp());
+                        e.writeInt(wifiInfo.getStackState());
+                        e.writeLong(wifiInfo.getControllerTxTimeMillis());
+                        e.writeLong(wifiInfo.getControllerRxTimeMillis());
+                        e.writeLong(wifiInfo.getControllerIdleTimeMillis());
+                        e.writeLong(wifiInfo.getControllerEnergyUsed());
+                        ret.add(e);
+                    } catch (RemoteException e) {
+                        Slog.e(TAG, "Pulling wifiManager for wifi controller activity energy info has error", e);
+                    } finally {
+                        Binder.restoreCallingIdentity(token);
+                    }
+                }
+                break;
+            }
+            case StatsLog.MODEM_ACTIVITY_INFO: {
+                List<StatsLogEventWrapper> ret = new ArrayList();
+                long token = Binder.clearCallingIdentity();
+                if (mTelephony == null) {
+                    mTelephony = TelephonyManager.from(mContext);
+                }
+                if (mTelephony != null) {
+                    SynchronousResultReceiver modemReceiver = new SynchronousResultReceiver("telephony");
+                    mTelephony.requestModemActivityInfo(modemReceiver);
+                    final ModemActivityInfo modemInfo = awaitControllerInfo(modemReceiver);
+                    StatsLogEventWrapper e = new StatsLogEventWrapper(tagId, 6);
+                    e.writeLong(modemInfo.getTimestamp());
+                    e.writeLong(modemInfo.getSleepTimeMillis());
+                    e.writeLong(modemInfo.getIdleTimeMillis());
+                    e.writeLong(modemInfo.getTxTimeMillis()[0]);
+                    e.writeLong(modemInfo.getTxTimeMillis()[1]);
+                    e.writeLong(modemInfo.getTxTimeMillis()[2]);
+                    e.writeLong(modemInfo.getTxTimeMillis()[3]);
+                    e.writeLong(modemInfo.getTxTimeMillis()[4]);
+                    e.writeLong(modemInfo.getRxTimeMillis());
+                    e.writeLong(modemInfo.getEnergyUsed());
+                    ret.add(e);
+                }
+                break;
             }
             default:
                 Slog.w(TAG, "No such tagId data as " + tagId);

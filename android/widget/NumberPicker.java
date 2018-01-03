@@ -510,7 +510,11 @@ public class NumberPicker extends LinearLayout {
      */
     public interface OnScrollListener {
         /** @hide */
-        @IntDef({SCROLL_STATE_IDLE, SCROLL_STATE_TOUCH_SCROLL, SCROLL_STATE_FLING})
+        @IntDef(prefix = { "SCROLL_STATE_" }, value = {
+                SCROLL_STATE_IDLE,
+                SCROLL_STATE_TOUCH_SCROLL,
+                SCROLL_STATE_FLING
+        })
         @Retention(RetentionPolicy.SOURCE)
         public @interface ScrollState {}
 
@@ -1952,8 +1956,7 @@ public class NumberPicker extends LinearLayout {
             CharSequence beforeText = mInputText.getText();
             if (!text.equals(beforeText.toString())) {
                 mInputText.setText(text);
-                if (AccessibilityManager.getInstance(mContext).isObservedEventType(
-                        AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED)) {
+                if (AccessibilityManager.getInstance(mContext).isEnabled()) {
                     AccessibilityEvent event = AccessibilityEvent.obtain(
                             AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED);
                     mInputText.onInitializeAccessibilityEvent(event);
@@ -2613,7 +2616,7 @@ public class NumberPicker extends LinearLayout {
         }
 
         private void sendAccessibilityEventForVirtualText(int eventType) {
-            if (AccessibilityManager.getInstance(mContext).isObservedEventType(eventType)) {
+            if (AccessibilityManager.getInstance(mContext).isEnabled()) {
                 AccessibilityEvent event = AccessibilityEvent.obtain(eventType);
                 mInputText.onInitializeAccessibilityEvent(event);
                 mInputText.onPopulateAccessibilityEvent(event);
@@ -2624,7 +2627,7 @@ public class NumberPicker extends LinearLayout {
 
         private void sendAccessibilityEventForVirtualButton(int virtualViewId, int eventType,
                 String text) {
-            if (AccessibilityManager.getInstance(mContext).isObservedEventType(eventType)) {
+            if (AccessibilityManager.getInstance(mContext).isEnabled()) {
                 AccessibilityEvent event = AccessibilityEvent.obtain(eventType);
                 event.setClassName(Button.class.getName());
                 event.setPackageName(mContext.getPackageName());

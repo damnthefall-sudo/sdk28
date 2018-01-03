@@ -29,7 +29,7 @@ import android.app.job.JobParameters;
 import android.app.job.JobScheduler;
 import android.app.job.JobService;
 import android.app.job.JobWorkItem;
-import android.app.usage.AppStandby;
+import android.app.usage.UsageStatsManager;
 import android.app.usage.UsageStatsManagerInternal;
 import android.app.usage.UsageStatsManagerInternal.AppIdleStateChangeListener;
 import android.content.BroadcastReceiver;
@@ -279,8 +279,8 @@ public final class JobSchedulerService extends com.android.server.SystemService
         private static final long DEFAULT_MIN_LINEAR_BACKOFF_TIME = JobInfo.MIN_BACKOFF_MILLIS;
         private static final long DEFAULT_MIN_EXP_BACKOFF_TIME = JobInfo.MIN_BACKOFF_MILLIS;
         private static final long DEFAULT_STANDBY_HEARTBEAT_TIME = 11 * 60 * 1000L;
-        private static final int DEFAULT_STANDBY_WORKING_BEATS = 5;  // ~ 1 hour, with 11-min beats
-        private static final int DEFAULT_STANDBY_FREQUENT_BEATS = 31; // ~ 6 hours
+        private static final int DEFAULT_STANDBY_WORKING_BEATS = 11;  // ~ 2 hours, with 11min beats
+        private static final int DEFAULT_STANDBY_FREQUENT_BEATS = 43; // ~ 8 hours
         private static final int DEFAULT_STANDBY_RARE_BEATS = 130; // ~ 24 hours
 
         /**
@@ -1721,16 +1721,29 @@ public final class JobSchedulerService extends com.android.server.SystemService
 
         // If the app is in a non-active standby bucket, make sure we've waited
         // an appropriate amount of time since the last invocation
-        if (mHeartbeat < mNextBucketHeartbeat[job.getStandbyBucket()]) {
-            // TODO: log/trace that we're deferring the job due to bucketing if we hit this
-            if (job.getWhenStandbyDeferred() == 0) {
-                if (DEBUG_STANDBY) {
-                    Slog.v(TAG, "Bucket deferral: " + mHeartbeat + " < "
-                            + mNextBucketHeartbeat[job.getStandbyBucket()] + " for " + job);
+        final int bucket = job.getStandbyBucket();
+        if (mHeartbeat < mNextBucketHeartbeat[bucket]) {
+            // Only skip this job if it's still waiting for the end of its (initial) nominal
+            // bucket interval.  Once it's waited that long, we let it go ahead and clear.
+            // The final (NEVER) bucket is special; we never age those apps' jobs into
+            // runnability.
+            if (bucket >= mConstants.STANDBY_BEATS.length
+                    || (mHeartbeat < job.getBaseHeartbeat() + mConstants.STANDBY_BEATS[bucket])) {
+                // TODO: log/trace that we're deferring the job due to bucketing if we hit this
+                if (job.getWhenStandbyDeferred() == 0) {
+                    if (DEBUG_STANDBY) {
+                        Slog.v(TAG, "Bucket deferral: " + mHeartbeat + " < "
+                                + mNextBucketHeartbeat[job.getStandbyBucket()] + " for " + job);
+                    }
+                    job.setWhenStandbyDeferred(sElapsedRealtimeClock.millis());
                 }
-                job.setWhenStandbyDeferred(sElapsedRealtimeClock.millis());
+                return false;
+            } else {
+                if (DEBUG_STANDBY) {
+                    Slog.v(TAG, "Bucket deferred job aged into runnability at "
+                            + mHeartbeat + " : " + job);
+                }
             }
-            return false;
         }
 
         // The expensive check last: validate that the defined package+service is
@@ -1984,6 +1997,11 @@ public final class JobSchedulerService extends com.android.server.SystemService
         }
 
         @Override
+        public void cancelJobsForUid(int uid, String reason) {
+            JobSchedulerService.this.cancelJobsForUid(uid, reason);
+        }
+
+        @Override
         public void addBackingUpUid(int uid) {
             synchronized (mLock) {
                 // No need to actually do anything here, since for a full backup the
@@ -2074,10 +2092,10 @@ public final class JobSchedulerService extends com.android.server.SystemService
 
     public static int standbyBucketToBucketIndex(int bucket) {
         // Normalize AppStandby constants to indices into our bookkeeping
-        if (bucket == AppStandby.STANDBY_BUCKET_NEVER) return 4;
-        else if (bucket >= AppStandby.STANDBY_BUCKET_RARE) return 3;
-        else if (bucket >= AppStandby.STANDBY_BUCKET_FREQUENT) return 2;
-        else if (bucket >= AppStandby.STANDBY_BUCKET_WORKING_SET) return 1;
+        if (bucket == UsageStatsManager.STANDBY_BUCKET_NEVER) return 4;
+        else if (bucket >= UsageStatsManager.STANDBY_BUCKET_RARE) return 3;
+        else if (bucket >= UsageStatsManager.STANDBY_BUCKET_FREQUENT) return 2;
+        else if (bucket >= UsageStatsManager.STANDBY_BUCKET_WORKING_SET) return 1;
         else return 0;
     }
 

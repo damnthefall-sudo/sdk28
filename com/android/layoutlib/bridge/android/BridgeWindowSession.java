@@ -23,6 +23,7 @@ import android.os.Bundle;
 import android.os.IBinder;
 import android.os.RemoteException;
 import android.util.MergedConfiguration;
+import android.view.DisplayCutout;
 import android.view.IWindow;
 import android.view.IWindowId;
 import android.view.IWindowSession;
@@ -47,8 +48,8 @@ public final class BridgeWindowSession implements IWindowSession {
 
     @Override
     public int addToDisplay(IWindow arg0, int seq, LayoutParams arg1, int arg2, int displayId,
-                            Rect arg3, Rect arg4, Rect arg5, InputChannel outInputchannel)
-            throws RemoteException {
+            Rect arg3, Rect arg4, Rect arg5, DisplayCutout.ParcelableWrapper displayCutout,
+            InputChannel outInputchannel) throws RemoteException {
         // pass for now.
         return 0;
     }
@@ -89,7 +90,8 @@ public final class BridgeWindowSession implements IWindowSession {
     @Override
     public int relayout(IWindow iWindow, int i, LayoutParams layoutParams, int i2,
             int i3, int i4, int i5, Rect rect, Rect rect2, Rect rect3, Rect rect4, Rect rect5,
-            Rect rect6, Rect rect7, MergedConfiguration mergedConfig, Surface surface)
+            Rect rect6, Rect rect7, DisplayCutout.ParcelableWrapper displayCutout,
+            MergedConfiguration mergedConfig, Surface surface)
             throws RemoteException {
         // pass for now.
         return 0;

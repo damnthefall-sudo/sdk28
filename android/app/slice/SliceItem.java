@@ -21,6 +21,7 @@ import android.annotation.StringDef;
 import android.app.PendingIntent;
 import android.app.RemoteInput;
 import android.graphics.drawable.Icon;
+import android.os.Bundle;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.text.TextUtils;
@@ -29,6 +30,8 @@ import android.widget.RemoteViews;
 
 import com.android.internal.util.ArrayUtils;
 
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
 import java.util.Arrays;
 import java.util.List;
 
@@ -42,9 +45,10 @@ import java.util.List;
  * <li>{@link #FORMAT_TEXT}</li>
  * <li>{@link #FORMAT_IMAGE}</li>
  * <li>{@link #FORMAT_ACTION}</li>
- * <li>{@link #FORMAT_COLOR}</li>
+ * <li>{@link #FORMAT_INT}</li>
  * <li>{@link #FORMAT_TIMESTAMP}</li>
  * <li>{@link #FORMAT_REMOTE_INPUT}</li>
+ * <li>{@link #FORMAT_BUNDLE}</li>
  *
  * The hints that a {@link SliceItem} are a set of strings which annotate
  * the content. The hints that are guaranteed to be understood by the system
@@ -52,11 +56,22 @@ import java.util.List;
  */
 public final class SliceItem implements Parcelable {
 
+    private static final String TAG = "SliceItem";
+
     /**
      * @hide
      */
-    @StringDef({FORMAT_SLICE, FORMAT_TEXT, FORMAT_IMAGE, FORMAT_ACTION, FORMAT_COLOR,
-            FORMAT_TIMESTAMP, FORMAT_REMOTE_INPUT})
+    @StringDef(prefix = { "FORMAT_" }, value = {
+            FORMAT_SLICE,
+            FORMAT_TEXT,
+            FORMAT_IMAGE,
+            FORMAT_ACTION,
+            FORMAT_INT,
+            FORMAT_TIMESTAMP,
+            FORMAT_REMOTE_INPUT,
+            FORMAT_BUNDLE,
+    })
+    @Retention(RetentionPolicy.SOURCE)
     public @interface SliceType {}
 
     /**
@@ -79,7 +94,12 @@ public final class SliceItem implements Parcelable {
      */
     public static final String FORMAT_ACTION = "action";
     /**
-     * A {@link SliceItem} that contains a Color int.
+     * A {@link SliceItem} that contains an int.
+     */
+    public static final String FORMAT_INT = "int";
+    /**
+     * A {@link SliceItem} that contains an int.
+     * @deprecated to be removed
      */
     public static final String FORMAT_COLOR = "color";
     /**
@@ -90,6 +110,10 @@ public final class SliceItem implements Parcelable {
      * A {@link SliceItem} that contains a {@link RemoteInput}.
      */
     public static final String FORMAT_REMOTE_INPUT = "input";
+    /**
+     * A {@link SliceItem} that contains a {@link Bundle}.
+     */
+    public static final String FORMAT_BUNDLE = "bundle";
 
     /**
      * @hide
@@ -128,20 +152,6 @@ public final class SliceItem implements Parcelable {
     }
 
     /**
-     * @hide
-     */
-    public void addHint(@Slice.SliceHint String hint) {
-        mHints = ArrayUtils.appendElement(String.class, mHints, hint);
-    }
-
-    /**
-     * @hide
-     */
-    public void removeHint(String hint) {
-        ArrayUtils.removeElement(String.class, mHints, hint);
-    }
-
-    /**
      * Get the format of this SliceItem.
      * <p>
      * The format will be one of the following types supported by the platform:
@@ -149,9 +159,10 @@ public final class SliceItem implements Parcelable {
      * <li>{@link #FORMAT_TEXT}</li>
      * <li>{@link #FORMAT_IMAGE}</li>
      * <li>{@link #FORMAT_ACTION}</li>
-     * <li>{@link #FORMAT_COLOR}</li>
+     * <li>{@link #FORMAT_INT}</li>
      * <li>{@link #FORMAT_TIMESTAMP}</li>
      * <li>{@link #FORMAT_REMOTE_INPUT}</li>
+     * <li>{@link #FORMAT_BUNDLE}</li>
      * @see #getSubType() ()
      */
     public String getFormat() {
@@ -175,6 +186,13 @@ public final class SliceItem implements Parcelable {
      */
     public CharSequence getText() {
         return (CharSequence) mObj;
+    }
+
+    /**
+     * @return The parcelable held by this {@link #FORMAT_BUNDLE} SliceItem
+     */
+    public Bundle getBundle() {
+        return (Bundle) mObj;
     }
 
     /**
@@ -206,7 +224,14 @@ public final class SliceItem implements Parcelable {
     }
 
     /**
-     * @return The color held by this {@link #FORMAT_COLOR} SliceItem
+     * @return The color held by this {@link #FORMAT_INT} SliceItem
+     */
+    public int getInt() {
+        return (Integer) mObj;
+    }
+
+    /**
+     * @deprecated to be removed.
      */
     public int getColor() {
         return (Integer) mObj;
@@ -299,6 +324,7 @@ public final class SliceItem implements Parcelable {
             case FORMAT_SLICE:
             case FORMAT_IMAGE:
             case FORMAT_REMOTE_INPUT:
+            case FORMAT_BUNDLE:
                 ((Parcelable) obj).writeToParcel(dest, flags);
                 break;
             case FORMAT_ACTION:
@@ -308,7 +334,7 @@ public final class SliceItem implements Parcelable {
             case FORMAT_TEXT:
                 TextUtils.writeToParcel((CharSequence) obj, dest, flags);
                 break;
-            case FORMAT_COLOR:
+            case FORMAT_INT:
                 dest.writeInt((Integer) obj);
                 break;
             case FORMAT_TIMESTAMP:
@@ -329,12 +355,14 @@ public final class SliceItem implements Parcelable {
                 return new Pair<>(
                         PendingIntent.CREATOR.createFromParcel(in),
                         Slice.CREATOR.createFromParcel(in));
-            case FORMAT_COLOR:
+            case FORMAT_INT:
                 return in.readInt();
             case FORMAT_TIMESTAMP:
                 return in.readLong();
             case FORMAT_REMOTE_INPUT:
                 return RemoteInput.CREATOR.createFromParcel(in);
+            case FORMAT_BUNDLE:
+                return Bundle.CREATOR.createFromParcel(in);
         }
         throw new RuntimeException("Unsupported type " + type);
     }

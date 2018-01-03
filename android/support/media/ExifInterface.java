@@ -4678,9 +4678,7 @@ public class ExifInterface {
     private int getMimeType(BufferedInputStream in) throws IOException {
         in.mark(SIGNATURE_CHECK_SIZE);
         byte[] signatureCheckBytes = new byte[SIGNATURE_CHECK_SIZE];
-        if (in.read(signatureCheckBytes) != SIGNATURE_CHECK_SIZE) {
-            throw new EOFException();
-        }
+        in.read(signatureCheckBytes);
         in.reset();
         if (isJpegFormat(signatureCheckBytes)) {
             return IMAGE_TYPE_JPEG;
@@ -5333,7 +5331,7 @@ public class ExifInterface {
             int dataFormat = dataInputStream.readUnsignedShort();
             int numberOfComponents = dataInputStream.readInt();
             // Next four bytes is for data offset or value.
-            long nextEntryOffset = dataInputStream.peek() + 4;
+            long nextEntryOffset = dataInputStream.peek() + 4L;
 
             // Look up a corresponding tag from tag number
             ExifTag tag = (ExifTag) sExifTagMapsForReading[ifdType].get(tagNumber);
