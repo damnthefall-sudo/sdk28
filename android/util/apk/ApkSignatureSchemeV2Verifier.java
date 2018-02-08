@@ -16,6 +16,7 @@
 
 package android.util.apk;
 
+import static android.util.apk.ApkSigningBlockUtils.CONTENT_DIGEST_VERITY_CHUNKED_SHA256;
 import static android.util.apk.ApkSigningBlockUtils.SIGNATURE_DSA_WITH_SHA256;
 import static android.util.apk.ApkSigningBlockUtils.SIGNATURE_ECDSA_WITH_SHA256;
 import static android.util.apk.ApkSigningBlockUtils.SIGNATURE_ECDSA_WITH_SHA512;
@@ -23,6 +24,9 @@ import static android.util.apk.ApkSigningBlockUtils.SIGNATURE_RSA_PKCS1_V1_5_WIT
 import static android.util.apk.ApkSigningBlockUtils.SIGNATURE_RSA_PKCS1_V1_5_WITH_SHA512;
 import static android.util.apk.ApkSigningBlockUtils.SIGNATURE_RSA_PSS_WITH_SHA256;
 import static android.util.apk.ApkSigningBlockUtils.SIGNATURE_RSA_PSS_WITH_SHA512;
+import static android.util.apk.ApkSigningBlockUtils.SIGNATURE_VERITY_DSA_WITH_SHA256;
+import static android.util.apk.ApkSigningBlockUtils.SIGNATURE_VERITY_ECDSA_WITH_SHA256;
+import static android.util.apk.ApkSigningBlockUtils.SIGNATURE_VERITY_RSA_PKCS1_V1_5_WITH_SHA256;
 import static android.util.apk.ApkSigningBlockUtils.compareSignatureAlgorithm;
 import static android.util.apk.ApkSigningBlockUtils.getContentDigestAlgorithmJcaDigestAlgorithm;
 import static android.util.apk.ApkSigningBlockUtils.getLengthPrefixedSlice;
@@ -35,11 +39,11 @@ import android.util.ArrayMap;
 import android.util.Pair;
 
 import java.io.ByteArrayInputStream;
-import java.io.FileDescriptor;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
+import java.security.DigestException;
 import java.security.InvalidAlgorithmParameterException;
 import java.security.InvalidKeyException;
 import java.security.KeyFactory;
@@ -103,7 +107,8 @@ public class ApkSignatureSchemeV2Verifier {
      */
     public static X509Certificate[][] verify(String apkFile)
             throws SignatureNotFoundException, SecurityException, IOException {
-        return verify(apkFile, true);
+        VerifiedSigner vSigner = verify(apkFile, true);
+        return vSigner.certs;
     }
 
     /**
@@ -117,10 +122,11 @@ public class ApkSignatureSchemeV2Verifier {
      */
     public static X509Certificate[][] plsCertsNoVerifyOnlyCerts(String apkFile)
             throws SignatureNotFoundException, SecurityException, IOException {
-        return verify(apkFile, false);
+        VerifiedSigner vSigner = verify(apkFile, false);
+        return vSigner.certs;
     }
 
-    private static X509Certificate[][] verify(String apkFile, boolean verifyIntegrity)
+    private static VerifiedSigner verify(String apkFile, boolean verifyIntegrity)
             throws SignatureNotFoundException, SecurityException, IOException {
         try (RandomAccessFile apk = new RandomAccessFile(apkFile, "r")) {
             return verify(apk, verifyIntegrity);
@@ -136,10 +142,10 @@ public class ApkSignatureSchemeV2Verifier {
      *         verify.
      * @throws IOException if an I/O error occurs while reading the APK file.
      */
-    private static X509Certificate[][] verify(RandomAccessFile apk, boolean verifyIntegrity)
+    private static VerifiedSigner verify(RandomAccessFile apk, boolean verifyIntegrity)
             throws SignatureNotFoundException, SecurityException, IOException {
         SignatureInfo signatureInfo = findSignature(apk);
-        return verify(apk.getFD(), signatureInfo, verifyIntegrity);
+        return verify(apk, signatureInfo, verifyIntegrity);
     }
 
     /**
@@ -161,10 +167,10 @@ public class ApkSignatureSchemeV2Verifier {
      * @param signatureInfo APK Signature Scheme v2 Block and information relevant for verifying it
      *        against the APK file.
      */
-    private static X509Certificate[][] verify(
-            FileDescriptor apkFileDescriptor,
+    private static VerifiedSigner verify(
+            RandomAccessFile apk,
             SignatureInfo signatureInfo,
-            boolean doVerifyIntegrity) throws SecurityException {
+            boolean doVerifyIntegrity) throws SecurityException, IOException {
         int signerCount = 0;
         Map<Integer, byte[]> contentDigests = new ArrayMap<>();
         List<X509Certificate[]> signerCerts = new ArrayList<>();
@@ -202,16 +208,17 @@ public class ApkSignatureSchemeV2Verifier {
         }
 
         if (doVerifyIntegrity) {
-            ApkSigningBlockUtils.verifyIntegrity(
-                    contentDigests,
-                    apkFileDescriptor,
-                    signatureInfo.apkSigningBlockOffset,
-                    signatureInfo.centralDirOffset,
-                    signatureInfo.eocdOffset,
-                    signatureInfo.eocd);
+            ApkSigningBlockUtils.verifyIntegrity(contentDigests, apk, signatureInfo);
         }
 
-        return signerCerts.toArray(new X509Certificate[signerCerts.size()][]);
+        byte[] verityRootHash = null;
+        if (contentDigests.containsKey(CONTENT_DIGEST_VERITY_CHUNKED_SHA256)) {
+            verityRootHash = contentDigests.get(CONTENT_DIGEST_VERITY_CHUNKED_SHA256);
+        }
+
+        return new VerifiedSigner(
+                signerCerts.toArray(new X509Certificate[signerCerts.size()][]),
+                verityRootHash);
     }
 
     private static X509Certificate[] verifySigner(
@@ -386,6 +393,25 @@ public class ApkSignatureSchemeV2Verifier {
         }
         return;
     }
+
+    static byte[] getVerityRootHash(String apkPath)
+            throws IOException, SignatureNotFoundException, SecurityException {
+        try (RandomAccessFile apk = new RandomAccessFile(apkPath, "r")) {
+            SignatureInfo signatureInfo = findSignature(apk);
+            VerifiedSigner vSigner = verify(apk, false);
+            return vSigner.verityRootHash;
+        }
+    }
+
+    static byte[] generateApkVerity(String apkPath, ByteBufferFactory bufferFactory)
+            throws IOException, SignatureNotFoundException, SecurityException, DigestException,
+                   NoSuchAlgorithmException {
+        try (RandomAccessFile apk = new RandomAccessFile(apkPath, "r")) {
+            SignatureInfo signatureInfo = findSignature(apk);
+            return ApkSigningBlockUtils.generateApkVerity(apkPath, bufferFactory, signatureInfo);
+        }
+    }
+
     private static boolean isSupportedSignatureAlgorithm(int sigAlgorithm) {
         switch (sigAlgorithm) {
             case SIGNATURE_RSA_PSS_WITH_SHA256:
@@ -395,9 +421,28 @@ public class ApkSignatureSchemeV2Verifier {
             case SIGNATURE_ECDSA_WITH_SHA256:
             case SIGNATURE_ECDSA_WITH_SHA512:
             case SIGNATURE_DSA_WITH_SHA256:
+            case SIGNATURE_VERITY_RSA_PKCS1_V1_5_WITH_SHA256:
+            case SIGNATURE_VERITY_ECDSA_WITH_SHA256:
+            case SIGNATURE_VERITY_DSA_WITH_SHA256:
                 return true;
             default:
                 return false;
         }
+    }
+
+    /**
+     * Verified APK Signature Scheme v2 signer.
+     *
+     * @hide for internal use only.
+     */
+    public static class VerifiedSigner {
+        public final X509Certificate[][] certs;
+        public final byte[] verityRootHash;
+
+        public VerifiedSigner(X509Certificate[][] certs, byte[] verityRootHash) {
+            this.certs = certs;
+            this.verityRootHash = verityRootHash;
+        }
+
     }
 }

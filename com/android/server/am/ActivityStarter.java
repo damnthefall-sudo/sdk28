@@ -74,6 +74,7 @@ import static com.android.server.am.TaskRecord.REPARENT_KEEP_STACK_AT_FRONT;
 import static com.android.server.am.TaskRecord.REPARENT_MOVE_STACK_TO_FRONT;
 
 import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.app.ActivityManager;
 import android.app.ActivityOptions;
 import android.app.IApplicationThread;
@@ -96,7 +97,6 @@ import android.os.Bundle;
 import android.os.IBinder;
 import android.os.RemoteException;
 import android.os.SystemClock;
-import android.os.Trace;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.service.voice.IVoiceInteractionSession;
@@ -109,6 +109,7 @@ import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.app.HeavyWeightSwitcherActivity;
 import com.android.internal.app.IVoiceInteractor;
 import com.android.server.am.ActivityStackSupervisor.PendingActivityLaunch;
+import com.android.server.am.LaunchParamsController.LaunchParams;
 import com.android.server.pm.InstantAppResolver;
 
 import java.io.PrintWriter;
@@ -144,7 +145,7 @@ class ActivityStarter {
     private boolean mLaunchTaskBehind;
     private int mLaunchFlags;
 
-    private Rect mLaunchBounds = new Rect();
+    private LaunchParams mLaunchParams = new LaunchParams();
 
     private ActivityRecord mNotTop;
     private boolean mDoResume;
@@ -298,24 +299,31 @@ class ActivityStarter {
         int realCallingPid;
         int realCallingUid;
         int startFlags;
-        ActivityOptions activityOptions;
+        SafeActivityOptions activityOptions;
         boolean ignoreTargetSecurity;
         boolean componentSpecified;
+        boolean avoidMoveToFront;
         ActivityRecord[] outActivity;
         TaskRecord inTask;
         String reason;
         ProfilerInfo profilerInfo;
         Configuration globalConfig;
-        Bundle waitOptions;
         int userId;
         WaitResult waitResult;
 
         /**
          * Indicates that we should wait for the result of the start request. This flag is set when
-         * {@link ActivityStarter#setMayWait(Bundle, int)} is called.
+         * {@link ActivityStarter#setMayWait(int)} is called.
          * {@see ActivityStarter#startActivityMayWait}.
          */
         boolean mayWait;
+
+        /**
+         * Ensure constructed request matches reset instance.
+         */
+        Request() {
+            reset();
+        }
 
         /**
          * Sets values back to the initial state, clearing any held references.
@@ -332,8 +340,8 @@ class ActivityStarter {
             resultTo = null;
             resultWho = null;
             requestCode = 0;
-            callingPid = 0;
-            callingUid = 0;
+            callingPid = DEFAULT_CALLING_PID;
+            callingUid = DEFAULT_CALLING_UID;
             callingPackage = null;
             realCallingPid = 0;
             realCallingUid = 0;
@@ -346,10 +354,10 @@ class ActivityStarter {
             reason = null;
             profilerInfo = null;
             globalConfig = null;
-            waitOptions = null;
             userId = 0;
             waitResult = null;
             mayWait = false;
+            avoidMoveToFront = false;
         }
 
         /**
@@ -381,10 +389,10 @@ class ActivityStarter {
             reason = request.reason;
             profilerInfo = request.profilerInfo;
             globalConfig = request.globalConfig;
-            waitOptions = request.waitOptions;
             userId = request.userId;
             waitResult = request.waitResult;
             mayWait = request.mayWait;
+            avoidMoveToFront = request.avoidMoveToFront;
         }
     }
 
@@ -412,7 +420,7 @@ class ActivityStarter {
         mLaunchFlags = starter.mLaunchFlags;
         mLaunchMode = starter.mLaunchMode;
 
-        mLaunchBounds.set(starter.mLaunchBounds);
+        mLaunchParams.set(starter.mLaunchParams);
 
         mNotTop = starter.mNotTop;
         mDoResume = starter.mDoResume;
@@ -466,7 +474,7 @@ class ActivityStarter {
                         mRequest.voiceSession, mRequest.voiceInteractor, mRequest.resultTo,
                         mRequest.resultWho, mRequest.requestCode, mRequest.startFlags,
                         mRequest.profilerInfo, mRequest.waitResult, mRequest.globalConfig,
-                        mRequest.waitOptions, mRequest.ignoreTargetSecurity, mRequest.userId,
+                        mRequest.activityOptions, mRequest.ignoreTargetSecurity, mRequest.userId,
                         mRequest.inTask, mRequest.reason);
             } else {
                 return startActivity(mRequest.caller, mRequest.intent, mRequest.ephemeralIntent,
@@ -506,7 +514,7 @@ class ActivityStarter {
             IVoiceInteractionSession voiceSession, IVoiceInteractor voiceInteractor,
             IBinder resultTo, String resultWho, int requestCode, int callingPid, int callingUid,
             String callingPackage, int realCallingPid, int realCallingUid, int startFlags,
-            ActivityOptions options, boolean ignoreTargetSecurity, boolean componentSpecified,
+            SafeActivityOptions options, boolean ignoreTargetSecurity, boolean componentSpecified,
             ActivityRecord[] outActivity, TaskRecord inTask, String reason) {
 
         if (TextUtils.isEmpty(reason)) {
@@ -548,8 +556,9 @@ class ActivityStarter {
             IVoiceInteractionSession voiceSession, IVoiceInteractor voiceInteractor,
             IBinder resultTo, String resultWho, int requestCode, int callingPid, int callingUid,
             String callingPackage, int realCallingPid, int realCallingUid, int startFlags,
-            ActivityOptions options, boolean ignoreTargetSecurity, boolean componentSpecified,
-            ActivityRecord[] outActivity, TaskRecord inTask) {
+            SafeActivityOptions options,
+            boolean ignoreTargetSecurity, boolean componentSpecified, ActivityRecord[] outActivity,
+            TaskRecord inTask) {
         int err = ActivityManager.START_SUCCESS;
         // Pull the optional Ephemeral Installer-only bundle out of the options early.
         final Bundle verificationBundle
@@ -596,7 +605,7 @@ class ActivityStarter {
             // Transfer the result target from the source activity to the new
             // one being started, including any failures.
             if (requestCode >= 0) {
-                ActivityOptions.abort(options);
+                SafeActivityOptions.abort(options);
                 return ActivityManager.START_FORWARD_AND_REQUEST_CONFLICT;
             }
             resultRecord = sourceRecord.resultTo;
@@ -684,16 +693,20 @@ class ActivityStarter {
                 resultStack.sendActivityResultLocked(
                         -1, resultRecord, resultWho, requestCode, RESULT_CANCELED, null);
             }
-            ActivityOptions.abort(options);
+            SafeActivityOptions.abort(options);
             return err;
         }
 
         boolean abort = !mSupervisor.checkStartAnyActivityPermission(intent, aInfo, resultWho,
-                requestCode, callingPid, callingUid, callingPackage, ignoreTargetSecurity, callerApp,
-                resultRecord, resultStack, options);
+                requestCode, callingPid, callingUid, callingPackage, ignoreTargetSecurity,
+                callerApp, resultRecord, resultStack);
         abort |= !mService.mIntentFirewall.checkStartActivity(intent, callingUid,
                 callingPid, resolvedType, aInfo.applicationInfo);
 
+        // Merge the two options bundles, while realCallerOptions takes precedence.
+        ActivityOptions checkedOptions = options != null
+                ? options.getOptions(intent, aInfo, callerApp, mSupervisor)
+                : null;
         if (mService.mController != null) {
             try {
                 // The Intent we give to the watcher has the extra data
@@ -708,7 +721,7 @@ class ActivityStarter {
 
         mInterceptor.setStates(userId, realCallingPid, realCallingUid, startFlags, callingPackage);
         if (mInterceptor.intercept(intent, rInfo, aInfo, resolvedType, inTask, callingPid,
-                callingUid, options)) {
+                callingUid, checkedOptions)) {
             // activity start was intercepted, e.g. because the target user is currently in quiet
             // mode (turn off work) or the target application is suspended
             intent = mInterceptor.mIntent;
@@ -718,7 +731,7 @@ class ActivityStarter {
             inTask = mInterceptor.mInTask;
             callingPid = mInterceptor.mCallingPid;
             callingUid = mInterceptor.mCallingUid;
-            options = mInterceptor.mActivityOptions;
+            checkedOptions = mInterceptor.mActivityOptions;
         }
 
         if (abort) {
@@ -728,7 +741,7 @@ class ActivityStarter {
             }
             // We pretend to the caller that it was really started, but
             // they will just get a cancel result.
-            ActivityOptions.abort(options);
+            ActivityOptions.abort(checkedOptions);
             return START_ABORTED;
         }
 
@@ -789,7 +802,7 @@ class ActivityStarter {
         ActivityRecord r = new ActivityRecord(mService, callerApp, callingPid, callingUid,
                 callingPackage, intent, resolvedType, aInfo, mService.getGlobalConfiguration(),
                 resultRecord, resultWho, requestCode, componentSpecified, voiceSession != null,
-                mSupervisor, options, sourceRecord);
+                mSupervisor, checkedOptions, sourceRecord);
         if (outActivity != null) {
             outActivity[0] = r;
         }
@@ -801,13 +814,16 @@ class ActivityStarter {
         }
 
         final ActivityStack stack = mSupervisor.mFocusedStack;
+
+        // If we are starting an activity that is not from the same uid as the currently resumed
+        // one, check whether app switches are allowed.
         if (voiceSession == null && (stack.mResumedActivity == null
-                || stack.mResumedActivity.info.applicationInfo.uid != callingUid)) {
+                || stack.mResumedActivity.info.applicationInfo.uid != realCallingUid)) {
             if (!mService.checkAppSwitchAllowedLocked(callingPid, callingUid,
                     realCallingPid, realCallingUid, "Activity start")) {
                 mController.addPendingActivityLaunch(new PendingActivityLaunch(r,
                         sourceRecord, startFlags, stack, callerApp));
-                ActivityOptions.abort(options);
+                ActivityOptions.abort(checkedOptions);
                 return ActivityManager.START_SWITCHES_CANCELED;
             }
         }
@@ -826,8 +842,9 @@ class ActivityStarter {
         mController.doPendingActivityLaunches(false);
 
         return startActivity(r, sourceRecord, voiceSession, voiceInteractor, startFlags,
-                true /* doResume */, options, inTask, outActivity);
+                true /* doResume */, checkedOptions, inTask, outActivity);
     }
+
 
     /**
      * Creates a launch intent for the given auxiliary resolution data.
@@ -893,8 +910,8 @@ class ActivityStarter {
             IVoiceInteractionSession voiceSession, IVoiceInteractor voiceInteractor,
             IBinder resultTo, String resultWho, int requestCode, int startFlags,
             ProfilerInfo profilerInfo, WaitResult outResult,
-            Configuration globalConfig, Bundle bOptions, boolean ignoreTargetSecurity, int userId,
-            TaskRecord inTask, String reason) {
+            Configuration globalConfig, SafeActivityOptions options, boolean ignoreTargetSecurity,
+            int userId, TaskRecord inTask, String reason) {
         // Refuse possible leaked file descriptors
         if (intent != null && intent.hasFileDescriptors()) {
             throw new IllegalArgumentException("File descriptors passed in Intent");
@@ -946,7 +963,6 @@ class ActivityStarter {
         // Collect information about the target of the Intent.
         ActivityInfo aInfo = mSupervisor.resolveActivity(intent, rInfo, startFlags, profilerInfo);
 
-        ActivityOptions options = ActivityOptions.fromBundle(bOptions);
         synchronized (mService) {
             final int realCallingPid = Binder.getCallingPid();
             final int realCallingUid = Binder.getCallingUid();
@@ -986,7 +1002,7 @@ class ActivityStarter {
                                 Slog.w(TAG, "Unable to find app for caller " + caller
                                         + " (pid=" + callingPid + ") when starting: "
                                         + intent.toString());
-                                ActivityOptions.abort(options);
+                                SafeActivityOptions.abort(options);
                                 return ActivityManager.START_PERMISSION_DENIED;
                             }
                         }
@@ -1032,12 +1048,10 @@ class ActivityStarter {
             }
 
             final ActivityRecord[] outRecord = new ActivityRecord[1];
-            int res = startActivity(caller, intent, ephemeralIntent, resolvedType,
-                    aInfo, rInfo, voiceSession, voiceInteractor,
-                    resultTo, resultWho, requestCode, callingPid,
-                    callingUid, callingPackage, realCallingPid, realCallingUid, startFlags,
-                    options, ignoreTargetSecurity, componentSpecified, outRecord, inTask,
-                    reason);
+            int res = startActivity(caller, intent, ephemeralIntent, resolvedType, aInfo, rInfo,
+                    voiceSession, voiceInteractor, resultTo, resultWho, requestCode, callingPid,
+                    callingUid, callingPackage, realCallingPid, realCallingUid, startFlags, options,
+                    ignoreTargetSecurity, componentSpecified, outRecord, inTask, reason);
 
             Binder.restoreCallingIdentity(origId);
 
@@ -1147,6 +1161,18 @@ class ActivityStarter {
             preferredLaunchDisplayId = mOptions.getLaunchDisplayId();
         }
 
+        // windowing mode and preferred launch display values from {@link LaunchParams} take
+        // priority over those specified in {@link ActivityOptions}.
+        if (!mLaunchParams.isEmpty()) {
+            if (mLaunchParams.hasPreferredDisplay()) {
+                preferredLaunchDisplayId = mLaunchParams.mPreferredDisplayId;
+            }
+
+            if (mLaunchParams.hasWindowingMode()) {
+                preferredWindowingMode = mLaunchParams.mWindowingMode;
+            }
+        }
+
         if (reusedActivity != null) {
             // When the flags NEW_TASK and CLEAR_TASK are set, then the task gets reused but
             // still needs to be a lock task mode violation since the task gets cleared out and
@@ -1229,7 +1255,7 @@ class ActivityStarter {
                     outActivity[0] = reusedActivity;
                 }
 
-                return START_TASK_TO_FRONT;
+                return mMovedToFront ? START_TASK_TO_FRONT : START_DELIVERED_TO_TOP;
             }
         }
 
@@ -1371,7 +1397,7 @@ class ActivityStarter {
         mLaunchFlags = 0;
         mLaunchMode = INVALID_LAUNCH_MODE;
 
-        mLaunchBounds.setEmpty();
+        mLaunchParams.reset();
 
         mNotTop = null;
         mDoResume = false;
@@ -1418,10 +1444,10 @@ class ActivityStarter {
 
         mPreferredDisplayId = getPreferedDisplayId(mSourceRecord, mStartActivity, options);
 
-        mLaunchBounds.setEmpty();
+        mLaunchParams.reset();
 
-        mSupervisor.getLaunchingBoundsController().calculateBounds(inTask, null /*layout*/, r,
-                sourceRecord, options, mLaunchBounds);
+        mSupervisor.getLaunchParamsController().calculate(inTask, null /*layout*/, r, sourceRecord,
+                options, mLaunchParams);
 
         mLaunchMode = r.launchMode;
 
@@ -1462,19 +1488,23 @@ class ActivityStarter {
             mDoResume = false;
         }
 
-        if (mOptions != null && mOptions.getLaunchTaskId() != -1
-                && mOptions.getTaskOverlay()) {
-            r.mTaskOverlay = true;
-            if (!mOptions.canTaskOverlayResume()) {
-                final TaskRecord task = mSupervisor.anyTaskForIdLocked(mOptions.getLaunchTaskId());
-                final ActivityRecord top = task != null ? task.getTopActivity() : null;
-                if (top != null && top.state != RESUMED) {
+        if (mOptions != null) {
+            if (mOptions.getLaunchTaskId() != -1 && mOptions.getTaskOverlay()) {
+                r.mTaskOverlay = true;
+                if (!mOptions.canTaskOverlayResume()) {
+                    final TaskRecord task = mSupervisor.anyTaskForIdLocked(
+                            mOptions.getLaunchTaskId());
+                    final ActivityRecord top = task != null ? task.getTopActivity() : null;
+                    if (top != null && top.state != RESUMED) {
 
-                    // The caller specifies that we'd like to be avoided to be moved to the front,
-                    // so be it!
-                    mDoResume = false;
-                    mAvoidMoveToFront = true;
+                        // The caller specifies that we'd like to be avoided to be moved to the
+                        // front, so be it!
+                        mDoResume = false;
+                        mAvoidMoveToFront = true;
+                    }
                 }
+            } else if (mOptions.getAvoidMoveToFront()) {
+                mAvoidMoveToFront = true;
             }
         }
 
@@ -1815,7 +1845,7 @@ class ActivityStarter {
         // Need to update mTargetStack because if task was moved out of it, the original stack may
         // be destroyed.
         mTargetStack = intentActivity.getStack();
-        if (!mMovedToFront && mDoResume) {
+        if (!mAvoidMoveToFront && !mMovedToFront && mDoResume) {
             if (DEBUG_TASKS) Slog.d(TAG_TASKS, "Bring to front target: " + mTargetStack
                     + " from " + intentActivity);
             mTargetStack.moveToFront("intentActivityFound");
@@ -1931,7 +1961,7 @@ class ActivityStarter {
                     mVoiceInteractor, !mLaunchTaskBehind /* toTop */, mStartActivity, mSourceRecord,
                     mOptions);
             addOrReparentStartingActivity(task, "setTaskFromReuseOrCreateNewTask - mReuseTask");
-            updateBounds(mStartActivity.getTask(), mLaunchBounds);
+            updateBounds(mStartActivity.getTask(), mLaunchParams.mBounds);
 
             if (DEBUG_TASKS) Slog.v(TAG_TASKS, "Starting new activity " + mStartActivity
                     + " in new task " + mStartActivity.getTask());
@@ -2095,7 +2125,7 @@ class ActivityStarter {
             return START_TASK_TO_FRONT;
         }
 
-        if (!mLaunchBounds.isEmpty()) {
+        if (!mLaunchParams.mBounds.isEmpty()) {
             // TODO: Shouldn't we already know what stack to use by the time we get here?
             ActivityStack stack = mSupervisor.getLaunchStack(null, null, mInTask, ON_TOP);
             if (stack != mInTask.getStack()) {
@@ -2104,7 +2134,7 @@ class ActivityStarter {
                 mTargetStack = mInTask.getStack();
             }
 
-            updateBounds(mInTask, mLaunchBounds);
+            updateBounds(mInTask, mLaunchParams.mBounds);
         }
 
         mTargetStack.moveTaskToFrontLocked(
@@ -2428,9 +2458,13 @@ class ActivityStarter {
         return this;
     }
 
-    ActivityStarter setActivityOptions(ActivityOptions options) {
+    ActivityStarter setActivityOptions(SafeActivityOptions options) {
         mRequest.activityOptions = options;
         return this;
+    }
+
+    ActivityStarter setActivityOptions(Bundle bOptions) {
+        return setActivityOptions(SafeActivityOptions.fromBundle(bOptions));
     }
 
     ActivityStarter setIgnoreTargetSecurity(boolean ignoreTargetSecurity) {
@@ -2468,19 +2502,13 @@ class ActivityStarter {
         return this;
     }
 
-    ActivityStarter setWaitOptions(Bundle options) {
-        mRequest.waitOptions = options;
-        return this;
-    }
-
     ActivityStarter setUserId(int userId) {
         mRequest.userId = userId;
         return this;
     }
 
-    ActivityStarter setMayWait(Bundle options, int userId) {
+    ActivityStarter setMayWait(int userId) {
         mRequest.mayWait = true;
-        mRequest.waitOptions = options;
         mRequest.userId = userId;
 
         return this;

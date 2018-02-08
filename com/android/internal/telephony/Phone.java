@@ -2120,6 +2120,10 @@ public abstract class Phone extends Handler implements PhoneInternalInterface {
         mNotifier.notifyDataActivationStateChanged(this, state);
     }
 
+    public void notifyUserMobileDataStateChanged(boolean state) {
+        mNotifier.notifyUserMobileDataStateChanged(this, state);
+    }
+
     public void notifySignalStrength() {
         mNotifier.notifySignalStrength(this);
     }
@@ -2994,6 +2998,15 @@ public abstract class Phone extends Handler implements PhoneInternalInterface {
 
     public String getCarrierName() {
         return null;
+    }
+
+    /**
+     *  Resets the Carrier Keys in the database. This involves 2 steps:
+     *  1. Delete the keys from the database.
+     *  2. Send an intent to download new Certificates.
+     */
+    public void resetCarrierKeysForImsiEncryption() {
+        return;
     }
 
     /**

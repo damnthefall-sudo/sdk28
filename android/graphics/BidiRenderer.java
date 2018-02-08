@@ -231,6 +231,11 @@ public class BidiRenderer {
         int[] ci = gv.getGlyphCharIndices(0, ng, null);
         if (advances != null) {
             for (int i = 0; i < ng; i++) {
+                if (mText[ci[i]] == '\uFEFF') {
+                    // Workaround for bug in JetBrains JDK
+                    // where the character \uFEFF is associated a glyph with non-zero width
+                    continue;
+                }
                 int adv_idx = advancesIndex + ci[i];
                 advances[adv_idx] += gv.getGlyphMetrics(i).getAdvanceX();
             }

@@ -18,21 +18,23 @@ package com.android.server.stats;
 import android.annotation.Nullable;
 import android.app.AlarmManager;
 import android.app.PendingIntent;
+import android.app.StatsManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.IntentSender;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.UserInfo;
 import android.net.NetworkStats;
 import android.net.wifi.IWifiManager;
 import android.net.wifi.WifiActivityEnergyInfo;
-import android.telephony.ModemActivityInfo;
-import android.telephony.TelephonyManager;
+import android.os.StatsDimensionsValue;
 import android.os.BatteryStatsInternal;
 import android.os.Binder;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.IBinder;
 import android.os.IStatsCompanionService;
 import android.os.IStatsManager;
@@ -40,18 +42,22 @@ import android.os.Parcelable;
 import android.os.Process;
 import android.os.RemoteException;
 import android.os.ServiceManager;
+import android.os.StatFs;
 import android.os.StatsLogEventWrapper;
 import android.os.SynchronousResultReceiver;
+import android.os.SystemClock;
 import android.os.UserHandle;
 import android.os.UserManager;
+import android.telephony.ModemActivityInfo;
+import android.telephony.TelephonyManager;
 import android.util.Slog;
 import android.util.StatsLog;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.net.NetworkStatsFactory;
+import com.android.internal.os.KernelCpuSpeedReader;
 import com.android.internal.os.KernelWakelockReader;
 import com.android.internal.os.KernelWakelockStats;
-import com.android.internal.os.KernelCpuSpeedReader;
 import com.android.internal.os.PowerProfile;
 import com.android.server.LocalServices;
 import com.android.server.SystemService;
@@ -77,8 +83,11 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
 
     static final String TAG = "StatsCompanionService";
     static final boolean DEBUG = true;
+
     public static final String ACTION_TRIGGER_COLLECTION =
         "com.android.server.stats.action.TRIGGER_COLLECTION";
+
+    public static final int CODE_SUBSCRIBER_BROADCAST = 1;
 
     private final Context mContext;
     private final AlarmManager mAlarmManager;
@@ -96,6 +105,11 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
     private final KernelCpuSpeedReader[] mKernelCpuSpeedReaders;
     private IWifiManager mWifiManager = null;
     private TelephonyManager mTelephony = null;
+    private final StatFs mStatFsData = new StatFs(Environment.getDataDirectory().getAbsolutePath());
+    private final StatFs mStatFsSystem =
+        new StatFs(Environment.getRootDirectory().getAbsolutePath());
+    private final StatFs mStatFsTemp =
+        new StatFs(Environment.getDownloadCacheDirectory().getAbsolutePath());
 
     public StatsCompanionService(Context context) {
         super();
@@ -143,8 +157,35 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
 
     @Override
     public void sendBroadcast(String pkg, String cls) {
+        // TODO: Use a pending intent, and enfoceCallingPermission.
         mContext.sendBroadcastAsUser(new Intent(ACTION_TRIGGER_COLLECTION).setClassName(pkg, cls),
                 UserHandle.SYSTEM);
+    }
+
+    @Override
+    public void sendSubscriberBroadcast(IBinder intentSenderBinder, long configUid, long configKey,
+                                        long subscriptionId, long subscriptionRuleId,
+                                        StatsDimensionsValue dimensionsValue) {
+        if (DEBUG) Slog.d(TAG, "Statsd requested to sendSubscriberBroadcast.");
+        enforceCallingPermission();
+        IntentSender intentSender = new IntentSender(intentSenderBinder);
+        Intent intent = new Intent()
+                .putExtra(StatsManager.EXTRA_STATS_CONFIG_UID, configUid)
+                .putExtra(StatsManager.EXTRA_STATS_CONFIG_KEY, configKey)
+                .putExtra(StatsManager.EXTRA_STATS_SUBSCRIPTION_ID, subscriptionId)
+                .putExtra(StatsManager.EXTRA_STATS_SUBSCRIPTION_RULE_ID, subscriptionRuleId)
+                .putExtra(StatsManager.EXTRA_STATS_DIMENSIONS_VALUE, dimensionsValue);
+        try {
+            intentSender.sendIntent(mContext, CODE_SUBSCRIBER_BROADCAST, intent, null, null);
+        } catch (IntentSender.SendIntentException e) {
+            Slog.w(TAG, "Unable to send using IntentSender from uid " + configUid
+                    + "; presumably it had been cancelled.");
+            if (DEBUG) {
+                Slog.d(TAG, String.format("SubscriberBroadcast params {%d %d %d %d %s}",
+                        configUid, configKey, subscriptionId,
+                        subscriptionRuleId, dimensionsValue));
+            }
+        }
     }
 
     private final static int[] toIntArray(List<Integer> list) {
@@ -555,11 +596,11 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
             case StatsLog.CPU_TIME_PER_FREQ: {
                 List<StatsLogEventWrapper> ret = new ArrayList();
                 for (int cluster = 0; cluster < mKernelCpuSpeedReaders.length; cluster++) {
-                    long[] clusterTimeMs = mKernelCpuSpeedReaders[cluster].readDelta();
+                    long[] clusterTimeMs = mKernelCpuSpeedReaders[cluster].readAbsolute();
                     if (clusterTimeMs != null) {
                         for (int speed = clusterTimeMs.length - 1; speed >= 0; --speed) {
                             StatsLogEventWrapper e = new StatsLogEventWrapper(tagId, 3);
-                            e.writeInt(tagId);
+                            e.writeInt(cluster);
                             e.writeInt(speed);
                             e.writeLong(clusterTimeMs[speed]);
                             ret.add(e);
@@ -588,6 +629,7 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
                         e.writeLong(wifiInfo.getControllerIdleTimeMillis());
                         e.writeLong(wifiInfo.getControllerEnergyUsed());
                         ret.add(e);
+                        return ret.toArray(new StatsLogEventWrapper[ret.size()]);
                     } catch (RemoteException e) {
                         Slog.e(TAG, "Pulling wifiManager for wifi controller activity energy info has error", e);
                     } finally {
@@ -618,8 +660,39 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
                     e.writeLong(modemInfo.getRxTimeMillis());
                     e.writeLong(modemInfo.getEnergyUsed());
                     ret.add(e);
+                    return ret.toArray(new StatsLogEventWrapper[ret.size()]);
                 }
                 break;
+            }
+            case StatsLog.CPU_SUSPEND_TIME: {
+                List<StatsLogEventWrapper> ret = new ArrayList();
+                StatsLogEventWrapper e = new StatsLogEventWrapper(tagId, 1);
+                e.writeLong(SystemClock.elapsedRealtime());
+                ret.add(e);
+                return ret.toArray(new StatsLogEventWrapper[ret.size()]);
+            }
+            case StatsLog.CPU_IDLE_TIME: {
+                List<StatsLogEventWrapper> ret = new ArrayList();
+                StatsLogEventWrapper e = new StatsLogEventWrapper(tagId, 1);
+                e.writeLong(SystemClock.uptimeMillis());
+                ret.add(e);
+                return ret.toArray(new StatsLogEventWrapper[ret.size()]);
+            }
+            case StatsLog.DISK_SPACE: {
+              List<StatsLogEventWrapper> ret = new ArrayList();
+              StatsLogEventWrapper e = new StatsLogEventWrapper(tagId, 3);
+              e.writeLong(mStatFsData.getAvailableBytes());
+              e.writeLong(mStatFsSystem.getAvailableBytes());
+              e.writeLong(mStatFsTemp.getAvailableBytes());
+              ret.add(e);
+              return ret.toArray(new StatsLogEventWrapper[ret.size()]);
+            }
+            case StatsLog.SYSTEM_UPTIME: {
+              List<StatsLogEventWrapper> ret = new ArrayList();
+              StatsLogEventWrapper e = new StatsLogEventWrapper(tagId, 1);
+              e.writeLong(SystemClock.uptimeMillis());
+              ret.add(e);
+              return ret.toArray(new StatsLogEventWrapper[ret.size()]);
             }
             default:
                 Slog.w(TAG, "No such tagId data as " + tagId);
@@ -743,9 +816,13 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
                 filter.addAction(Intent.ACTION_SHUTDOWN);
                 mContext.registerReceiverAsUser(
                         mShutdownEventReceiver, UserHandle.ALL, filter, null, null);
-
-                // Pull the latest state of UID->app name, version mapping when statsd starts.
-                informAllUidsLocked(mContext);
+                final long token = Binder.clearCallingIdentity();
+                try {
+                    // Pull the latest state of UID->app name, version mapping when statsd starts.
+                    informAllUidsLocked(mContext);
+                } finally {
+                    restoreCallingIdentity(token);
+                }
             } catch (RemoteException e) {
                 Slog.e(TAG, "Failed to inform statsd that statscompanion is ready", e);
                 forgetEverything();

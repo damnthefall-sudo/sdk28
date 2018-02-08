@@ -1119,6 +1119,24 @@ class SettingsProtoDumpUtil {
         dumpSetting(s, p,
                 Settings.Global.NOTIFICATION_SNOOZE_OPTIONS,
                 GlobalSettingsProto.NOTIFICATION_SNOOZE_OPTIONS);
+        dumpSetting(s, p,
+                Settings.Global.ZRAM_ENABLED,
+                GlobalSettingsProto.ZRAM_ENABLED);
+        dumpSetting(s, p,
+                Settings.Global.ENABLE_SMART_REPLIES_IN_NOTIFICATIONS,
+                GlobalSettingsProto.ENABLE_SMART_REPLIES_IN_NOTIFICATIONS);
+        dumpSetting(s, p,
+                Settings.Global.SHOW_FIRST_CRASH_DIALOG,
+                GlobalSettingsProto.SHOW_FIRST_CRASH_DIALOG);
+        dumpSetting(s, p,
+                Settings.Global.WIFI_CONNECTED_MAC_RANDOMIZATION_ENABLED,
+                GlobalSettingsProto.WIFI_CONNECTED_MAC_RANDOMIZATION_ENABLED);
+        dumpSetting(s, p,
+                Settings.Global.SHOW_RESTART_IN_CRASH_DIALOG,
+                GlobalSettingsProto.SHOW_RESTART_IN_CRASH_DIALOG);
+        dumpSetting(s, p,
+                Settings.Global.SHOW_MUTE_IN_CRASH_DIALOG,
+                GlobalSettingsProto.SHOW_MUTE_IN_CRASH_DIALOG);
     }
 
     /** Dump a single {@link SettingsState.Setting} to a proto buf */
@@ -1211,9 +1229,6 @@ class SettingsProtoDumpUtil {
         dumpSetting(s, p,
                 Settings.Secure.LOCATION_MODE,
                 SecureSettingsProto.LOCATION_MODE);
-        dumpSetting(s, p,
-                Settings.Secure.LOCATION_PREVIOUS_MODE,
-                SecureSettingsProto.LOCATION_PREVIOUS_MODE);
         // Settings.Secure.LOCK_BIOMETRIC_WEAK_FLAGS intentionally excluded since it's deprecated.
         dumpSetting(s, p,
                 Settings.Secure.LOCK_TO_APP_EXIT_LOCKED,
@@ -1510,6 +1525,9 @@ class SettingsProtoDumpUtil {
                 Settings.Secure.ANR_SHOW_BACKGROUND,
                 SecureSettingsProto.ANR_SHOW_BACKGROUND);
         dumpSetting(s, p,
+                Settings.Secure.SHOW_FIRST_CRASH_DIALOG_DEV_OPTION,
+                SecureSettingsProto.SHOW_FIRST_CRASH_DIALOG_DEV_OPTION);
+        dumpSetting(s, p,
                 Settings.Secure.VOICE_RECOGNITION_SERVICE,
                 SecureSettingsProto.VOICE_RECOGNITION_SERVICE);
         dumpSetting(s, p,
@@ -1720,9 +1738,6 @@ class SettingsProtoDumpUtil {
                 Settings.Secure.QS_TILES,
                 SecureSettingsProto.QS_TILES);
         dumpSetting(s, p,
-                Settings.Secure.DEMO_USER_SETUP_COMPLETE,
-                SecureSettingsProto.DEMO_USER_SETUP_COMPLETE);
-        dumpSetting(s, p,
                 Settings.Secure.INSTANT_APPS_ENABLED,
                 SecureSettingsProto.INSTANT_APPS_ENABLED);
         dumpSetting(s, p,
@@ -1746,6 +1761,9 @@ class SettingsProtoDumpUtil {
         dumpSetting(s, p,
                 Settings.Secure.BACKUP_MANAGER_CONSTANTS,
                 SecureSettingsProto.BACKUP_MANAGER_CONSTANTS);
+        dumpSetting(s, p,
+                Settings.Secure.BLUETOOTH_ON_WHILE_DRIVING,
+                SecureSettingsProto.BLUETOOTH_ON_WHILE_DRIVING);
     }
 
     private static void dumpProtoSystemSettingsLocked(

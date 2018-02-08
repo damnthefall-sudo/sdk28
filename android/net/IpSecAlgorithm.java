@@ -231,13 +231,44 @@ public final class IpSecAlgorithm implements Parcelable {
         }
     }
 
+    /** @hide */
+    public boolean isAuthentication() {
+        switch (getName()) {
+            // Fallthrough
+            case AUTH_HMAC_MD5:
+            case AUTH_HMAC_SHA1:
+            case AUTH_HMAC_SHA256:
+            case AUTH_HMAC_SHA384:
+            case AUTH_HMAC_SHA512:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /** @hide */
+    public boolean isEncryption() {
+        return getName().equals(CRYPT_AES_CBC);
+    }
+
+    /** @hide */
+    public boolean isAead() {
+        return getName().equals(AUTH_CRYPT_AES_GCM);
+    }
+
+    // Because encryption keys are sensitive and userdebug builds are used by large user pools
+    // such as beta testers, we only allow sensitive info such as keys on eng builds.
+    private static boolean isUnsafeBuild() {
+        return Build.IS_DEBUGGABLE && Build.IS_ENG;
+    }
+
     @Override
     public String toString() {
         return new StringBuilder()
                 .append("{mName=")
                 .append(mName)
                 .append(", mKey=")
-                .append(Build.IS_DEBUGGABLE ? HexDump.toHexString(mKey) : "<hidden>")
+                .append(isUnsafeBuild() ? HexDump.toHexString(mKey) : "<hidden>")
                 .append(", mTruncLenBits=")
                 .append(mTruncLenBits)
                 .append("}")

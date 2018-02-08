@@ -16,12 +16,10 @@
 
 package com.android.systemui.pip.phone;
 
-import static android.app.WindowConfiguration.ACTIVITY_TYPE_UNDEFINED;
-import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED;
 import static android.view.Display.DEFAULT_DISPLAY;
+import static android.view.WindowManager.INPUT_CONSUMER_PIP;
 
 import android.app.ActivityManager;
-import android.app.ActivityManager.StackInfo;
 import android.app.IActivityManager;
 import android.content.ComponentName;
 import android.content.Context;
@@ -43,6 +41,7 @@ import com.android.systemui.recents.events.component.ExpandPipEvent;
 import com.android.systemui.recents.misc.SysUiTaskStackChangeListener;
 import com.android.systemui.recents.misc.SystemServicesProxy;
 import com.android.systemui.shared.system.ActivityManagerWrapper;
+import com.android.systemui.shared.system.InputConsumerController;
 
 import java.io.PrintWriter;
 
@@ -65,6 +64,7 @@ public class PipManager implements BasePipManager {
     private PipMenuActivityController mMenuController;
     private PipMediaController mMediaController;
     private PipTouchHandler mTouchHandler;
+    private PipAppOpsListener mAppOpsListener;
 
     /**
      * Handler for system task stack changes.
@@ -75,6 +75,7 @@ public class PipManager implements BasePipManager {
             mTouchHandler.onActivityPinned();
             mMediaController.onActivityPinned();
             mMenuController.onActivityPinned();
+            mAppOpsListener.onActivityPinned(packageName);
 
             SystemServicesProxy.getInstance(mContext).setPipVisibility(true);
         }
@@ -87,6 +88,7 @@ public class PipManager implements BasePipManager {
             final int userId = topActivity != null ? topPipActivityInfo.second : 0;
             mMenuController.onActivityUnpinned();
             mTouchHandler.onActivityUnpinned(topActivity);
+            mAppOpsListener.onActivityUnpinned();
 
             SystemServicesProxy.getInstance(mContext).setPipVisibility(topActivity != null);
         }
@@ -171,12 +173,15 @@ public class PipManager implements BasePipManager {
         }
         ActivityManagerWrapper.getInstance().registerTaskStackListener(mTaskStackListener);
 
-        mInputConsumerController = new InputConsumerController(mWindowManager);
+        mInputConsumerController = InputConsumerController.getPipInputConsumer();
+        mInputConsumerController.registerInputConsumer();
         mMediaController = new PipMediaController(context, mActivityManager);
         mMenuController = new PipMenuActivityController(context, mActivityManager, mMediaController,
                 mInputConsumerController);
         mTouchHandler = new PipTouchHandler(context, mActivityManager, mMenuController,
                 mInputConsumerController);
+        mAppOpsListener = new PipAppOpsListener(context, mActivityManager,
+                mTouchHandler.getMotionHelper());
         EventBus.getDefault().register(this);
     }
 

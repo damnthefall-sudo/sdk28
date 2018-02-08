@@ -71,6 +71,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -98,6 +99,9 @@ abstract public class ManagedServices {
     static final String ATT_APPROVED_LIST = "approved";
     static final String ATT_USER_ID = "user";
     static final String ATT_IS_PRIMARY = "primary";
+    static final String ATT_VERSION = "version";
+
+    static final int DB_VERSION = 1;
 
     static final int APPROVAL_BY_PACKAGE = 0;
     static final int APPROVAL_BY_COMPONENT = 1;
@@ -250,24 +254,16 @@ abstract public class ManagedServices {
 
         for (ComponentName cmpt : mEnabledServicesForCurrentProfiles) {
             if (filter != null && !filter.matches(cmpt)) continue;
-
-            final long cToken = proto.start(ManagedServicesProto.ENABLED);
-            cmpt.toProto(proto);
-            proto.end(cToken);
+            cmpt.writeToProto(proto, ManagedServicesProto.ENABLED);
         }
 
         for (ManagedServiceInfo info : mServices) {
             if (filter != null && !filter.matches(info.component)) continue;
-
-            final long lToken = proto.start(ManagedServicesProto.LIVE_SERVICES);
-            info.toProto(proto, this);
-            proto.end(lToken);
+            info.writeToProto(proto, ManagedServicesProto.LIVE_SERVICES, this);
         }
 
         for (ComponentName name : mSnoozingForCurrentProfiles) {
-            final long cToken = proto.start(ManagedServicesProto.SNOOZED);
-            name.toProto(proto);
-            proto.end(cToken);
+            name.writeToProto(proto, ManagedServicesProto.SNOOZED);
         }
     }
 
@@ -300,6 +296,8 @@ abstract public class ManagedServices {
 
     public void writeXml(XmlSerializer out, boolean forBackup) throws IOException {
         out.startTag(null, getConfig().xmlTag);
+
+        out.attribute(null, ATT_VERSION, String.valueOf(DB_VERSION));
 
         if (forBackup) {
             trimApprovedListsAccordingToInstalledServices();
@@ -342,6 +340,14 @@ abstract public class ManagedServices {
 
     public void readXml(XmlPullParser parser)
             throws XmlPullParserException, IOException {
+        // upgrade xml
+        int xmlVersion = XmlUtils.readIntAttribute(parser, ATT_VERSION, 0);
+        final List<UserInfo> activeUsers = mUm.getUsers(true);
+        for (UserInfo userInfo : activeUsers) {
+            upgradeXml(xmlVersion, userInfo.getUserHandle().getIdentifier());
+        }
+
+        // read grants
         int type;
         while ((type = parser.next()) != XmlPullParser.END_DOCUMENT) {
             String tag = parser.getName();
@@ -352,6 +358,7 @@ abstract public class ManagedServices {
             if (type == XmlPullParser.START_TAG) {
                 if (TAG_MANAGED_SERVICES.equals(tag)) {
                     Slog.i(TAG, "Read " + mConfig.caption + " permissions from xml");
+
                     final String approved = XmlUtils.readStringAttribute(parser, ATT_APPROVED_LIST);
                     final int userId = XmlUtils.readIntAttribute(parser, ATT_USER_ID, 0);
                     final boolean isPrimary =
@@ -365,6 +372,8 @@ abstract public class ManagedServices {
         }
         rebindServices(false);
     }
+
+    protected void upgradeXml(final int xmlVersion, final int userId) {}
 
     private void loadAllowedComponentsFromSettings() {
 
@@ -385,7 +394,7 @@ abstract public class ManagedServices {
         Slog.d(TAG, "Done loading approved values from settings");
     }
 
-    private void addApprovedList(String approved, int userId, boolean isPrimary) {
+    protected void addApprovedList(String approved, int userId, boolean isPrimary) {
         if (TextUtils.isEmpty(approved)) {
             approved = "";
         }
@@ -1132,14 +1141,14 @@ abstract public class ManagedServices {
                     .append(']').toString();
         }
 
-        public void toProto(ProtoOutputStream proto, ManagedServices host) {
-            final long cToken = proto.start(ManagedServiceInfoProto.COMPONENT);
-            component.toProto(proto);
-            proto.end(cToken);
+        public void writeToProto(ProtoOutputStream proto, long fieldId, ManagedServices host) {
+            final long token = proto.start(fieldId);
+            component.writeToProto(proto, ManagedServiceInfoProto.COMPONENT);
             proto.write(ManagedServiceInfoProto.USER_ID, userid);
             proto.write(ManagedServiceInfoProto.SERVICE, service.getClass().getName());
             proto.write(ManagedServiceInfoProto.IS_SYSTEM, isSystem);
             proto.write(ManagedServiceInfoProto.IS_GUEST, isGuest(host));
+            proto.end(token);
         }
 
         public boolean enabledAndUserMatches(int nid) {

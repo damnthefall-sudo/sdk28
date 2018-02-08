@@ -17,9 +17,7 @@
 package com.android.server.backup.transport;
 
 import static com.android.server.backup.TransportManager.SERVICE_ACTION_TRANSPORT_HOST;
-
 import static com.google.common.truth.Truth.assertThat;
-
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
@@ -36,14 +34,13 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.UserHandle;
 import android.platform.test.annotations.Presubmit;
-
 import com.android.internal.backup.IBackupTransport;
+import com.android.server.EventLogTags;
 import com.android.server.backup.TransportManager;
 import com.android.server.testing.FrameworkRobolectricTestRunner;
+import com.android.server.testing.ShadowEventLog;
 import com.android.server.testing.SystemLoaderClasses;
-
 import org.junit.Before;
-import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
@@ -53,7 +50,7 @@ import org.robolectric.annotation.Config;
 import org.robolectric.shadows.ShadowLooper;
 
 @RunWith(FrameworkRobolectricTestRunner.class)
-@Config(manifest = Config.NONE, sdk = 26)
+@Config(manifest = Config.NONE, sdk = 26, shadows = {ShadowEventLog.class})
 @SystemLoaderClasses({TransportManager.class, TransportClient.class})
 @Presubmit
 public class TransportClientTest {
@@ -65,7 +62,7 @@ public class TransportClientTest {
     @Mock private IBackupTransport.Stub mIBackupTransport;
     private TransportClient mTransportClient;
     private ComponentName mTransportComponent;
-    private String mTransportDirName;
+    private String mTransportString;
     private Intent mBindIntent;
     private ShadowLooper mShadowLooper;
 
@@ -77,16 +74,11 @@ public class TransportClientTest {
         mShadowLooper = shadowOf(mainLooper);
         mTransportComponent =
                 new ComponentName(PACKAGE_NAME, PACKAGE_NAME + ".transport.Transport");
-        mTransportDirName = mTransportComponent.toString();
+        mTransportString = mTransportComponent.flattenToShortString();
         mBindIntent = new Intent(SERVICE_ACTION_TRANSPORT_HOST).setComponent(mTransportComponent);
         mTransportClient =
                 new TransportClient(
-                        mContext,
-                        mBindIntent,
-                        mTransportComponent,
-                        mTransportDirName,
-                        "1",
-                        new Handler(mainLooper));
+                        mContext, mBindIntent, mTransportComponent, "1", new Handler(mainLooper));
 
         when(mContext.bindServiceAsUser(
                         eq(mBindIntent),
@@ -94,11 +86,6 @@ public class TransportClientTest {
                         anyInt(),
                         any(UserHandle.class)))
                 .thenReturn(true);
-    }
-
-    @Test
-    public void testGetTransportDirName_returnsTransportDirName() {
-        assertThat(mTransportClient.getTransportDirName()).isEqualTo(mTransportDirName);
     }
 
     @Test
@@ -178,7 +165,7 @@ public class TransportClientTest {
     }
 
     @Test
-    public void testConnectAsync_whenFrameworkDoesntBind_releasesConnection() throws Exception {
+    public void testConnectAsync_whenFrameworkDoesNotBind_releasesConnection() throws Exception {
         when(mContext.bindServiceAsUser(
                         eq(mBindIntent),
                         any(ServiceConnection.class),
@@ -222,32 +209,110 @@ public class TransportClientTest {
                 .onTransportConnectionResult(isNull(), eq(mTransportClient));
     }
 
-    // TODO(b/69153972): Support SDK 26 API (ServiceConnection.inBindingDied) for transport tests
-    /*@Test
+    @Test
     public void testConnectAsync_callsListenerIfBindingDies() throws Exception {
-        mTransportClient.connectAsync(mTransportListener, "caller");
+        mTransportClient.connectAsync(mTransportConnectionListener, "caller");
 
         ServiceConnection connection = verifyBindServiceAsUserAndCaptureServiceConnection(mContext);
         connection.onBindingDied(mTransportComponent);
 
         mShadowLooper.runToEndOfTasks();
-        verify(mTransportListener).onTransportBound(isNull(), eq(mTransportClient));
+        verify(mTransportConnectionListener)
+                .onTransportConnectionResult(isNull(), eq(mTransportClient));
     }
 
     @Test
     public void testConnectAsync_whenPendingConnection_callsListenersIfBindingDies()
             throws Exception {
-        mTransportClient.connectAsync(mTransportListener, "caller1");
+        mTransportClient.connectAsync(mTransportConnectionListener, "caller1");
         ServiceConnection connection = verifyBindServiceAsUserAndCaptureServiceConnection(mContext);
 
-        mTransportClient.connectAsync(mTransportListener2, "caller2");
+        mTransportClient.connectAsync(mTransportConnectionListener2, "caller2");
 
         connection.onBindingDied(mTransportComponent);
 
         mShadowLooper.runToEndOfTasks();
-        verify(mTransportListener).onTransportBound(isNull(), eq(mTransportClient));
-        verify(mTransportListener2).onTransportBound(isNull(), eq(mTransportClient));
-    }*/
+        verify(mTransportConnectionListener)
+                .onTransportConnectionResult(isNull(), eq(mTransportClient));
+        verify(mTransportConnectionListener2)
+                .onTransportConnectionResult(isNull(), eq(mTransportClient));
+    }
+
+    @Test
+    public void testConnectAsync_beforeFrameworkCall_logsBoundTransition() {
+        ShadowEventLog.clearEvents();
+
+        mTransportClient.connectAsync(mTransportConnectionListener, "caller1");
+
+        assertEventLogged(EventLogTags.BACKUP_TRANSPORT_LIFECYCLE, mTransportString, 1);
+    }
+
+    @Test
+    public void testConnectAsync_afterOnServiceConnected_logsBoundAndConnectedTransitions() {
+        ShadowEventLog.clearEvents();
+
+        mTransportClient.connectAsync(mTransportConnectionListener, "caller1");
+        ServiceConnection connection = verifyBindServiceAsUserAndCaptureServiceConnection(mContext);
+        connection.onServiceConnected(mTransportComponent, mIBackupTransport);
+
+        assertEventLogged(EventLogTags.BACKUP_TRANSPORT_LIFECYCLE, mTransportString, 1);
+        assertEventLogged(EventLogTags.BACKUP_TRANSPORT_CONNECTION, mTransportString, 1);
+    }
+
+    @Test
+    public void testConnectAsync_afterOnBindingDied_logsBoundAndUnboundTransitions() {
+        ShadowEventLog.clearEvents();
+
+        mTransportClient.connectAsync(mTransportConnectionListener, "caller1");
+        ServiceConnection connection = verifyBindServiceAsUserAndCaptureServiceConnection(mContext);
+        connection.onBindingDied(mTransportComponent);
+
+        assertEventLogged(EventLogTags.BACKUP_TRANSPORT_LIFECYCLE, mTransportString, 1);
+        assertEventLogged(EventLogTags.BACKUP_TRANSPORT_LIFECYCLE, mTransportString, 0);
+    }
+
+    @Test
+    public void testUnbind_whenConnected_logsDisconnectedAndUnboundTransitions() {
+        mTransportClient.connectAsync(mTransportConnectionListener, "caller1");
+        ServiceConnection connection = verifyBindServiceAsUserAndCaptureServiceConnection(mContext);
+        connection.onServiceConnected(mTransportComponent, mIBackupTransport);
+        ShadowEventLog.clearEvents();
+
+        mTransportClient.unbind("caller1");
+
+        assertEventLogged(EventLogTags.BACKUP_TRANSPORT_CONNECTION, mTransportString, 0);
+        assertEventLogged(EventLogTags.BACKUP_TRANSPORT_LIFECYCLE, mTransportString, 0);
+    }
+
+    @Test
+    public void testOnServiceDisconnected_whenConnected_logsDisconnectedAndUnboundTransitions() {
+        mTransportClient.connectAsync(mTransportConnectionListener, "caller1");
+        ServiceConnection connection = verifyBindServiceAsUserAndCaptureServiceConnection(mContext);
+        connection.onServiceConnected(mTransportComponent, mIBackupTransport);
+        ShadowEventLog.clearEvents();
+
+        connection.onServiceDisconnected(mTransportComponent);
+
+        assertEventLogged(EventLogTags.BACKUP_TRANSPORT_CONNECTION, mTransportString, 0);
+        assertEventLogged(EventLogTags.BACKUP_TRANSPORT_LIFECYCLE, mTransportString, 0);
+    }
+
+    @Test
+    public void testOnBindingDied_whenConnected_logsDisconnectedAndUnboundTransitions() {
+        mTransportClient.connectAsync(mTransportConnectionListener, "caller1");
+        ServiceConnection connection = verifyBindServiceAsUserAndCaptureServiceConnection(mContext);
+        connection.onServiceConnected(mTransportComponent, mIBackupTransport);
+        ShadowEventLog.clearEvents();
+
+        connection.onBindingDied(mTransportComponent);
+
+        assertEventLogged(EventLogTags.BACKUP_TRANSPORT_CONNECTION, mTransportString, 0);
+        assertEventLogged(EventLogTags.BACKUP_TRANSPORT_LIFECYCLE, mTransportString, 0);
+    }
+
+    private void assertEventLogged(int tag, Object... values) {
+        assertThat(ShadowEventLog.hasEvent(tag, values)).isTrue();
+    }
 
     private ServiceConnection verifyBindServiceAsUserAndCaptureServiceConnection(Context context) {
         ArgumentCaptor<ServiceConnection> connectionCaptor =

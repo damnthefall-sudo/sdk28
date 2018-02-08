@@ -19,15 +19,14 @@ package com.android.systemui.statusbar.phone;
 import android.app.ActivityManager;
 import android.content.Context;
 import android.content.res.Resources;
+import android.graphics.Canvas;
 import android.graphics.Matrix;
 import android.graphics.Rect;
 import android.os.RemoteException;
 import android.util.Log;
-import android.view.GestureDetector;
 import android.view.MotionEvent;
 import android.view.VelocityTracker;
 import android.view.View;
-import android.view.ViewConfiguration;
 
 import com.android.internal.logging.nano.MetricsProto.MetricsEvent;
 import com.android.internal.policy.DividerSnapAlgorithm.SnapTarget;
@@ -37,18 +36,20 @@ import com.android.systemui.R;
 import com.android.systemui.RecentsComponent;
 import com.android.systemui.plugins.statusbar.phone.NavGesture.GestureHelper;
 import com.android.systemui.shared.recents.IOverviewProxy;
+import com.android.systemui.shared.recents.utilities.Utilities;
 import com.android.systemui.stackdivider.Divider;
 import com.android.systemui.tuner.TunerService;
 
 import static android.view.WindowManager.DOCKED_INVALID;
 import static android.view.WindowManager.DOCKED_LEFT;
 import static android.view.WindowManager.DOCKED_TOP;
+import static com.android.systemui.OverviewProxyService.DEBUG_OVERVIEW_PROXY;
+import static com.android.systemui.OverviewProxyService.TAG_OPS;
 
 /**
  * Class to detect gestures on the navigation bar.
  */
-public class NavigationBarGestureHelper extends GestureDetector.SimpleOnGestureListener
-        implements TunerService.Tunable, GestureHelper {
+public class NavigationBarGestureHelper implements TunerService.Tunable, GestureHelper {
 
     private static final String TAG = "NavBarGestureHelper";
     private static final String KEY_DOCK_WINDOW_GESTURE = "overview_nav_bar_gesture";
@@ -72,11 +73,9 @@ public class NavigationBarGestureHelper extends GestureDetector.SimpleOnGestureL
     private Context mContext;
     private NavigationBarView mNavigationBarView;
     private boolean mIsVertical;
-    private boolean mIsRTL;
 
-    private final GestureDetector mTaskSwitcherDetector;
+    private final QuickScrubController mQuickScrubController;
     private final int mScrollTouchSlop;
-    private final int mMinFlingVelocity;
     private final Matrix mTransformGlobalMatrix = new Matrix();
     private final Matrix mTransformLocalMatrix = new Matrix();
     private int mTouchDownX;
@@ -91,11 +90,9 @@ public class NavigationBarGestureHelper extends GestureDetector.SimpleOnGestureL
 
     public NavigationBarGestureHelper(Context context) {
         mContext = context;
-        ViewConfiguration configuration = ViewConfiguration.get(context);
         Resources r = context.getResources();
         mScrollTouchSlop = r.getDimensionPixelSize(R.dimen.navigation_bar_min_swipe_distance);
-        mMinFlingVelocity = configuration.getScaledMinimumFlingVelocity();
-        mTaskSwitcherDetector = new GestureDetector(context, this);
+        mQuickScrubController = new QuickScrubController(context);
         Dependency.get(TunerService.class).addTunable(this, KEY_DOCK_WINDOW_GESTURE);
     }
 
@@ -108,11 +105,12 @@ public class NavigationBarGestureHelper extends GestureDetector.SimpleOnGestureL
         mRecentsComponent = recentsComponent;
         mDivider = divider;
         mNavigationBarView = navigationBarView;
+        mQuickScrubController.setComponents(mNavigationBarView);
     }
 
     public void setBarState(boolean isVertical, boolean isRTL) {
         mIsVertical = isVertical;
-        mIsRTL = isRTL;
+        mQuickScrubController.setBarState(isVertical, isRTL);
     }
 
     private boolean proxyMotionEvents(MotionEvent event) {
@@ -122,6 +120,9 @@ public class NavigationBarGestureHelper extends GestureDetector.SimpleOnGestureL
             event.transform(mTransformGlobalMatrix);
             try {
                 overviewProxy.onMotionEvent(event);
+                if (DEBUG_OVERVIEW_PROXY) {
+                    Log.d(TAG_OPS, "Send MotionEvent: " + event.toString());
+                }
                 return true;
             } catch (RemoteException e) {
                 Log.e(TAG, "Callback failed", e);
@@ -134,7 +135,6 @@ public class NavigationBarGestureHelper extends GestureDetector.SimpleOnGestureL
 
     public boolean onInterceptTouchEvent(MotionEvent event) {
         int action = event.getAction();
-        boolean result = false;
         switch (action & MotionEvent.ACTION_MASK) {
             case MotionEvent.ACTION_DOWN: {
                 mTouchDownX = (int) event.getX();
@@ -145,28 +145,26 @@ public class NavigationBarGestureHelper extends GestureDetector.SimpleOnGestureL
                 mNavigationBarView.transformMatrixToLocal(mTransformLocalMatrix);
                 break;
             }
-            case MotionEvent.ACTION_MOVE: {
-                int x = (int) event.getX();
-                int y = (int) event.getY();
-                int xDiff = Math.abs(x - mTouchDownX);
-                int yDiff = Math.abs(y - mTouchDownY);
-                boolean exceededTouchSlop = xDiff > mScrollTouchSlop && xDiff > yDiff
-                        || yDiff > mScrollTouchSlop && yDiff > xDiff;
-                if (exceededTouchSlop) {
-                    result = true;
-                }
-                break;
-            }
-            case MotionEvent.ACTION_CANCEL:
-            case MotionEvent.ACTION_UP:
-                break;
         }
-        if (!proxyMotionEvents(event)) {
-            // If we move more than a fixed amount, then start capturing for the
-            // task switcher detector, disabled when proxying motion events to launcher service
-            mTaskSwitcherDetector.onTouchEvent(event);
+        if (!mQuickScrubController.onInterceptTouchEvent(event)) {
+            proxyMotionEvents(event);
+            return false;
         }
-        return result || (mDockWindowEnabled && interceptDockWindowEvent(event));
+        return (mDockWindowEnabled && interceptDockWindowEvent(event));
+    }
+
+    public void onDraw(Canvas canvas) {
+        if (mOverviewEventSender.getProxy() != null) {
+            mQuickScrubController.onDraw(canvas);
+        }
+    }
+
+    public void onLayout(boolean changed, int left, int top, int right, int bottom) {
+        mQuickScrubController.onLayout(changed, left, top, right, bottom);
+    }
+
+    public void onDarkIntensityChange(float intensity) {
+        mQuickScrubController.onDarkIntensityChange(intensity);
     }
 
     private boolean interceptDockWindowEvent(MotionEvent event) {
@@ -306,34 +304,11 @@ public class NavigationBarGestureHelper extends GestureDetector.SimpleOnGestureL
     }
 
     public boolean onTouchEvent(MotionEvent event) {
-        boolean result = proxyMotionEvents(event) || mTaskSwitcherDetector.onTouchEvent(event);
+        boolean result = mQuickScrubController.onTouchEvent(event) || proxyMotionEvents(event);
         if (mDockWindowEnabled) {
             result |= handleDockWindowEvent(event);
         }
         return result;
-    }
-
-    @Override
-    public boolean onFling(MotionEvent e1, MotionEvent e2, float velocityX, float velocityY) {
-        float absVelX = Math.abs(velocityX);
-        float absVelY = Math.abs(velocityY);
-        boolean isValidFling = absVelX > mMinFlingVelocity &&
-                mIsVertical ? (absVelY > absVelX) : (absVelX > absVelY);
-        if (isValidFling && mRecentsComponent != null) {
-            boolean showNext;
-            if (!mIsRTL) {
-                showNext = mIsVertical ? (velocityY < 0) : (velocityX < 0);
-            } else {
-                // In RTL, vertical is still the same, but horizontal is flipped
-                showNext = mIsVertical ? (velocityY < 0) : (velocityX > 0);
-            }
-            if (showNext) {
-                mRecentsComponent.showNextAffiliatedTask();
-            } else {
-                mRecentsComponent.showPrevAffiliatedTask();
-            }
-        }
-        return true;
     }
 
     @Override

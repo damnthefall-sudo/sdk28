@@ -166,6 +166,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.net.InetAddress;
 import java.text.DateFormat;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -220,6 +221,9 @@ public final class ActivityThread extends ClientTransactionHandler {
     // Whether to invoke an activity callback after delivering new configuration.
     private static final boolean REPORT_TO_ACTIVITY = true;
 
+    // Maximum number of recent tokens to maintain for debugging purposes
+    private static final int MAX_RECENT_TOKENS = 10;
+
     /**
      * Denotes an invalid sequence number corresponding to a process state change.
      */
@@ -252,6 +256,8 @@ public final class ActivityThread extends ClientTransactionHandler {
     final H mH = new H();
     final Executor mExecutor = new HandlerExecutor(mH);
     final ArrayMap<IBinder, ActivityClientRecord> mActivities = new ArrayMap<>();
+    final ArrayDeque<Integer> mRecentTokens = new ArrayDeque<>();
+
     // List of new activities (via ActivityRecord.nextIdle) that should
     // be reported when next we idle.
     ActivityClientRecord mNewActivities = null;
@@ -1752,9 +1758,11 @@ public final class ActivityThread extends ClientTransactionHandler {
                     handleLocalVoiceInteractionStarted((IBinder) ((SomeArgs) msg.obj).arg1,
                             (IVoiceInteractor) ((SomeArgs) msg.obj).arg2);
                     break;
-                case ATTACH_AGENT:
-                    handleAttachAgent((String) msg.obj);
+                case ATTACH_AGENT: {
+                    Application app = getApplication();
+                    handleAttachAgent((String) msg.obj, app != null ? app.mLoadedApk : null);
                     break;
+                }
                 case APPLICATION_INFO_CHANGED:
                     mUpdatingSystemConfig = true;
                     try {
@@ -1770,7 +1778,12 @@ public final class ActivityThread extends ClientTransactionHandler {
                 case EXECUTE_TRANSACTION:
                     final ClientTransaction transaction = (ClientTransaction) msg.obj;
                     mTransactionExecutor.execute(transaction);
-                    transaction.recycle();
+                    if (isSystem()) {
+                        // Client transactions inside system process are recycled on the client side
+                        // instead of ClientLifecycleManager to avoid being cleared before this
+                        // message is handled.
+                        transaction.recycle();
+                    }
                     break;
             }
             Object obj = msg.obj;
@@ -2159,6 +2172,18 @@ public final class ActivityThread extends ClientTransactionHandler {
 
     static void printRow(PrintWriter pw, String format, Object...objs) {
         pw.println(String.format(format, objs));
+    }
+
+    @Override
+    public void dump(PrintWriter pw, String prefix) {
+        pw.println(prefix + "mActivities:");
+
+        for (ArrayMap.Entry<IBinder, ActivityClientRecord> entry : mActivities.entrySet()) {
+            pw.println(prefix + "  [token:" + entry.getKey().hashCode() + " record:"
+                    + entry.getValue().toString() + "]");
+        }
+
+        pw.println(prefix + "mRecentTokens:" + mRecentTokens);
     }
 
     public static void dumpMemInfoTable(PrintWriter pw, Debug.MemoryInfo memInfo, boolean checkin,
@@ -2845,6 +2870,11 @@ public final class ActivityThread extends ClientTransactionHandler {
             r.setState(ON_CREATE);
 
             mActivities.put(r.token, r);
+            mRecentTokens.push(r.token.hashCode());
+
+            if (mRecentTokens.size() > MAX_RECENT_TOKENS) {
+                mRecentTokens.removeLast();
+            }
 
         } catch (SuperNotCalledException e) {
             throw e;
@@ -3066,7 +3096,7 @@ public final class ActivityThread extends ClientTransactionHandler {
         checkAndBlockForNetworkAccess();
         deliverNewIntents(r, intents);
         if (resumed) {
-            r.activity.performResume();
+            r.activity.performResume(false);
             r.activity.mTemporaryPause = false;
         }
 
@@ -3241,11 +3271,23 @@ public final class ActivityThread extends ClientTransactionHandler {
         }
     }
 
-    static final void handleAttachAgent(String agent) {
+    private static boolean attemptAttachAgent(String agent, ClassLoader classLoader) {
         try {
-            VMDebug.attachAgent(agent);
+            VMDebug.attachAgent(agent, classLoader);
+            return true;
         } catch (IOException e) {
-            Slog.e(TAG, "Attaching agent failed: " + agent);
+            Slog.e(TAG, "Attaching agent with " + classLoader + " failed: " + agent);
+            return false;
+        }
+    }
+
+    static void handleAttachAgent(String agent, LoadedApk loadedApk) {
+        ClassLoader classLoader = loadedApk != null ? loadedApk.getClassLoader() : null;
+        if (attemptAttachAgent(agent, classLoader)) {
+            return;
+        }
+        if (classLoader != null) {
+            attemptAttachAgent(agent, null);
         }
     }
 
@@ -3676,7 +3718,7 @@ public final class ActivityThread extends ClientTransactionHandler {
                     deliverResults(r, r.pendingResults);
                     r.pendingResults = null;
                 }
-                r.activity.performResume();
+                r.activity.performResume(r.startsNotResumed);
 
                 synchronized (mResourcesManager) {
                     // If there is a pending local relaunch that was requested when the activity was
@@ -4395,7 +4437,7 @@ public final class ActivityThread extends ClientTransactionHandler {
             checkAndBlockForNetworkAccess();
             deliverResults(r, results);
             if (resumed) {
-                r.activity.performResume();
+                r.activity.performResume(false);
                 r.activity.mTemporaryPause = false;
             }
         }
@@ -5537,12 +5579,16 @@ public final class ActivityThread extends ClientTransactionHandler {
         mCompatConfiguration = new Configuration(data.config);
 
         mProfiler = new Profiler();
+        String agent = null;
         if (data.initProfilerInfo != null) {
             mProfiler.profileFile = data.initProfilerInfo.profileFile;
             mProfiler.profileFd = data.initProfilerInfo.profileFd;
             mProfiler.samplingInterval = data.initProfilerInfo.samplingInterval;
             mProfiler.autoStopProfiler = data.initProfilerInfo.autoStopProfiler;
             mProfiler.streamingOutput = data.initProfilerInfo.streamingOutput;
+            if (data.initProfilerInfo.attachAgentDuringBind) {
+                agent = data.initProfilerInfo.agent;
+            }
         }
 
         // send up app name; do this *before* waiting for debugger
@@ -5591,6 +5637,10 @@ public final class ActivityThread extends ClientTransactionHandler {
         }
 
         data.loadedApk = getLoadedApkNoCheck(data.appInfo, data.compatInfo);
+
+        if (agent != null) {
+            handleAttachAgent(agent, data.loadedApk);
+        }
 
         /**
          * Switch this process to density compatibility mode if needed.

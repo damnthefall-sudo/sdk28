@@ -105,33 +105,42 @@ final class AutofillManagerServiceImpl {
     private final AutoFillUI mUi;
     private final MetricsLogger mMetricsLogger = new MetricsLogger();
 
+    @GuardedBy("mLock")
     private RemoteCallbackList<IAutoFillManagerClient> mClients;
+
+    @GuardedBy("mLock")
     private AutofillServiceInfo mInfo;
 
     private static final Random sRandom = new Random();
 
     private final LocalLog mRequestsHistory;
     private final LocalLog mUiLatencyHistory;
+    private final LocalLog mWtfHistory;
+    private final FieldClassificationStrategy mFieldClassificationStrategy;
 
     /**
      * Apps disabled by the service; key is package name, value is when they will be enabled again.
      */
+    @GuardedBy("mLock")
     private ArrayMap<String, Long> mDisabledApps;
 
     /**
      * Activities disabled by the service; key is component name, value is when they will be enabled
      * again.
      */
+    @GuardedBy("mLock")
     private ArrayMap<ComponentName, Long> mDisabledActivities;
 
     /**
      * Whether service was disabled for user due to {@link UserManager} restrictions.
      */
+    @GuardedBy("mLock")
     private boolean mDisabled;
 
     /**
      * Data used for field classification.
      */
+    @GuardedBy("mLock")
     private UserData mUserData;
 
     /**
@@ -170,13 +179,16 @@ final class AutofillManagerServiceImpl {
     private long mLastPrune = 0;
 
     AutofillManagerServiceImpl(Context context, Object lock, LocalLog requestsHistory,
-            LocalLog uiLatencyHistory, int userId, AutoFillUI ui, boolean disabled) {
+            LocalLog uiLatencyHistory, LocalLog wtfHistory, int userId, AutoFillUI ui,
+            boolean disabled) {
         mContext = context;
         mLock = lock;
         mRequestsHistory = requestsHistory;
         mUiLatencyHistory = uiLatencyHistory;
+        mWtfHistory = wtfHistory;
         mUserId = userId;
         mUi = ui;
+        mFieldClassificationStrategy = new FieldClassificationStrategy(context, userId);
         updateLocked(disabled);
     }
 
@@ -235,7 +247,7 @@ final class AutofillManagerServiceImpl {
     }
 
     void updateLocked(boolean disabled) {
-        final boolean wasEnabled = isEnabled();
+        final boolean wasEnabled = isEnabledLocked();
         if (sVerbose) {
             Slog.v(TAG, "updateLocked(u=" + mUserId + "): wasEnabled=" + wasEnabled
                     + ", mSetupComplete= " + mSetupComplete
@@ -274,7 +286,7 @@ final class AutofillManagerServiceImpl {
             Slog.e(TAG, "Bad AutofillServiceInfo for '" + componentName + "': " + e);
             mInfo = null;
         }
-        final boolean isEnabled = isEnabled();
+        final boolean isEnabled = isEnabledLocked();
         if (wasEnabled != isEnabled) {
             if (!isEnabled) {
                 final int sessionCount = mSessions.size();
@@ -292,7 +304,7 @@ final class AutofillManagerServiceImpl {
             mClients = new RemoteCallbackList<>();
         }
         mClients.register(client);
-        return isEnabled();
+        return isEnabledLocked();
     }
 
     void removeClientLocked(IAutoFillManagerClient client) {
@@ -302,7 +314,7 @@ final class AutofillManagerServiceImpl {
     }
 
     void setAuthenticationResultLocked(Bundle data, int sessionId, int authenticationId, int uid) {
-        if (!isEnabled()) {
+        if (!isEnabledLocked()) {
             return;
         }
         final Session session = mSessions.get(sessionId);
@@ -312,7 +324,7 @@ final class AutofillManagerServiceImpl {
     }
 
     void setHasCallback(int sessionId, int uid, boolean hasIt) {
-        if (!isEnabled()) {
+        if (!isEnabledLocked()) {
             return;
         }
         final Session session = mSessions.get(sessionId);
@@ -327,7 +339,7 @@ final class AutofillManagerServiceImpl {
             @NonNull IBinder appCallbackToken, @NonNull AutofillId autofillId,
             @NonNull Rect virtualBounds, @Nullable AutofillValue value, boolean hasCallback,
             int flags, @NonNull ComponentName componentName) {
-        if (!isEnabled()) {
+        if (!isEnabledLocked()) {
             return 0;
         }
 
@@ -388,7 +400,7 @@ final class AutofillManagerServiceImpl {
     }
 
     void finishSessionLocked(int sessionId, int uid) {
-        if (!isEnabled()) {
+        if (!isEnabledLocked()) {
             return;
         }
 
@@ -411,7 +423,7 @@ final class AutofillManagerServiceImpl {
     }
 
     void cancelSessionLocked(int sessionId, int uid) {
-        if (!isEnabled()) {
+        if (!isEnabledLocked()) {
             return;
         }
 
@@ -474,8 +486,8 @@ final class AutofillManagerServiceImpl {
         assertCallerLocked(componentName);
 
         final Session newSession = new Session(this, mUi, mContext, mHandlerCaller, mUserId, mLock,
-                sessionId, uid, activityToken, appCallbackToken, hasCallback,
-                mUiLatencyHistory, mInfo.getServiceInfo().getComponentName(), componentName, flags);
+                sessionId, uid, activityToken, appCallbackToken, hasCallback, mUiLatencyHistory,
+                mWtfHistory, mInfo.getServiceInfo().getComponentName(), componentName, flags);
         mSessions.put(newSession.id, newSession);
 
         return newSession;
@@ -720,10 +732,33 @@ final class AutofillManagerServiceImpl {
             @Nullable ArrayList<String> changedDatasetIds,
             @Nullable ArrayList<AutofillId> manuallyFilledFieldIds,
             @Nullable ArrayList<ArrayList<String>> manuallyFilledDatasetIds,
+            @NonNull String appPackageName) {
+        logContextCommittedLocked(sessionId, clientState, selectedDatasets, ignoredDatasets,
+                changedFieldIds, changedDatasetIds, manuallyFilledFieldIds,
+                manuallyFilledDatasetIds, null, null, appPackageName);
+    }
+
+    void logContextCommittedLocked(int sessionId, @Nullable Bundle clientState,
+            @Nullable ArrayList<String> selectedDatasets,
+            @Nullable ArraySet<String> ignoredDatasets,
+            @Nullable ArrayList<AutofillId> changedFieldIds,
+            @Nullable ArrayList<String> changedDatasetIds,
+            @Nullable ArrayList<AutofillId> manuallyFilledFieldIds,
+            @Nullable ArrayList<ArrayList<String>> manuallyFilledDatasetIds,
             @Nullable ArrayList<AutofillId> detectedFieldIdsList,
             @Nullable ArrayList<FieldClassification> detectedFieldClassificationsList,
             @NonNull String appPackageName) {
         if (isValidEventLocked("logDatasetNotSelected()", sessionId)) {
+            if (sVerbose) {
+                Slog.v(TAG, "logContextCommitted() with FieldClassification: id=" + sessionId
+                        + ", selectedDatasets=" + selectedDatasets
+                        + ", ignoredDatasetIds=" + ignoredDatasets
+                        + ", changedAutofillIds=" + changedFieldIds
+                        + ", changedDatasetIds=" + changedDatasetIds
+                        + ", manuallyFilledFieldIds=" + manuallyFilledFieldIds
+                        + ", detectedFieldIds=" + detectedFieldIdsList
+                        + ", detectedFieldClassifications=" + detectedFieldClassificationsList);
+            }
             AutofillId[] detectedFieldsIds = null;
             FieldClassification[] detectedFieldClassifications = null;
             if (detectedFieldIdsList != null) {
@@ -799,14 +834,15 @@ final class AutofillManagerServiceImpl {
     // Called by AutofillManager
     void setUserData(int callingUid, UserData userData) {
         synchronized (mLock) {
-            if (isCalledByServiceLocked("setUserData", callingUid)) {
-                mUserData = userData;
-                // Log it
-                int numberFields = mUserData == null ? 0: mUserData.getRemoteIds().length;
-                mMetricsLogger.write(Helper.newLogMaker(MetricsEvent.AUTOFILL_USERDATA_UPDATED,
-                        getServicePackageName(), null)
-                        .setCounterValue(numberFields));
+            if (!isCalledByServiceLocked("setUserData", callingUid)) {
+                return;
             }
+            mUserData = userData;
+            // Log it
+            int numberFields = mUserData == null ? 0: mUserData.getRemoteIds().length;
+            mMetricsLogger.write(Helper.newLogMaker(MetricsEvent.AUTOFILL_USERDATA_UPDATED,
+                    getServicePackageName(), null)
+                    .setCounterValue(numberFields));
         }
     }
 
@@ -917,6 +953,9 @@ final class AutofillManagerServiceImpl {
             pw.println();
             mUserData.dump(prefix2, pw);
         }
+
+        pw.print(prefix); pw.println("Field Classification strategy: ");
+        mFieldClassificationStrategy.dump(prefix2, pw);
     }
 
     void destroySessionsLocked() {
@@ -964,11 +1003,13 @@ final class AutofillManagerServiceImpl {
                 final IAutoFillManagerClient client = clients.getBroadcastItem(i);
                 try {
                     final boolean resetSession;
+                    final boolean isEnabled;
                     synchronized (mLock) {
                         resetSession = resetClient || isClientSessionDestroyedLocked(client);
+                        isEnabled = isEnabledLocked();
                     }
                     int flags = 0;
-                    if (isEnabled()) {
+                    if (isEnabled) {
                         flags |= AutofillManager.SET_STATE_FLAG_ENABLED;
                     }
                     if (resetSession) {
@@ -1004,7 +1045,7 @@ final class AutofillManagerServiceImpl {
         return true;
     }
 
-    boolean isEnabled() {
+    boolean isEnabledLocked() {
         return mSetupComplete && mInfo != null && !mDisabled;
     }
 
@@ -1093,9 +1134,9 @@ final class AutofillManagerServiceImpl {
     }
 
     // Called by AutofillManager, checks UID.
-    boolean isFieldClassificationEnabled(int uid) {
+    boolean isFieldClassificationEnabled(int callingUid) {
         synchronized (mLock) {
-            if (!isCalledByServiceLocked("isFieldClassificationEnabled", uid)) {
+            if (!isCalledByServiceLocked("isFieldClassificationEnabled", callingUid)) {
                 return false;
             }
             return isFieldClassificationEnabledLocked();
@@ -1108,6 +1149,28 @@ final class AutofillManagerServiceImpl {
                 mContext.getContentResolver(),
                 Settings.Secure.AUTOFILL_FEATURE_FIELD_CLASSIFICATION, 0,
                 mUserId) == 1;
+    }
+
+    FieldClassificationStrategy getFieldClassificationStrategy() {
+        return mFieldClassificationStrategy;
+    }
+
+    String[] getAvailableFieldClassificationAlgorithms(int callingUid) {
+        synchronized (mLock) {
+            if (!isCalledByServiceLocked("getFCAlgorithms()", callingUid)) {
+                return null;
+            }
+        }
+        return mFieldClassificationStrategy.getAvailableAlgorithms();
+    }
+
+    String getDefaultFieldClassificationAlgorithm(int callingUid) {
+        synchronized (mLock) {
+            if (!isCalledByServiceLocked("getDefaultFCAlgorithm()", callingUid)) {
+                return null;
+            }
+        }
+        return mFieldClassificationStrategy.getDefaultAlgorithm();
     }
 
     @Override

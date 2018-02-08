@@ -33,10 +33,8 @@ import static com.android.server.SystemService.PHASE_SYSTEM_SERVICES_READY;
 
 import android.app.ActivityManager;
 import android.app.AppGlobals;
-import android.app.admin.DevicePolicyManager;
 import android.app.usage.UsageStatsManager.StandbyBuckets;
 import android.app.usage.UsageEvents;
-import android.app.usage.UsageStatsManager;
 import android.app.usage.UsageStatsManagerInternal.AppIdleStateChangeListener;
 import android.appwidget.AppWidgetManager;
 import android.content.BroadcastReceiver;
@@ -67,25 +65,33 @@ import android.os.SystemClock;
 import android.os.UserHandle;
 import android.provider.Settings;
 import android.telephony.TelephonyManager;
+import android.util.ArraySet;
 import android.util.KeyValueListParser;
 import android.util.Slog;
+import android.util.SparseArray;
 import android.util.SparseIntArray;
 import android.util.TimeUtils;
 import android.view.Display;
 
 import com.android.internal.annotations.GuardedBy;
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.app.IBatteryStats;
 import com.android.internal.os.SomeArgs;
 import com.android.internal.util.ArrayUtils;
+import com.android.internal.util.ConcurrentUtils;
 import com.android.internal.util.IndentingPrintWriter;
 import com.android.server.LocalServices;
 
 import java.io.File;
 import java.io.PrintWriter;
+import java.time.Duration;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 
 /**
  * Manages the standby state of an app, listening to various events.
@@ -124,6 +130,11 @@ public class AppStandbyController {
     // Expiration time for predicted bucket
     private static final long PREDICTION_TIMEOUT = 12 * ONE_HOUR;
 
+    /**
+     * Indicates the maximum wait time for admin data to be available;
+     */
+    private static final long WAIT_FOR_ADMIN_DATA_TIMEOUT_MS = 10_000;
+
     // To name the lock for stack traces
     static class Lock {}
 
@@ -145,6 +156,11 @@ public class AppStandbyController {
     /** List of carrier-privileged apps that should be excluded from standby */
     @GuardedBy("mAppIdleLock")
     private List<String> mCarrierPrivilegedApps;
+
+    @GuardedBy("mActiveAdminApps")
+    private final SparseArray<Set<String>> mActiveAdminApps = new SparseArray<>();
+
+    private final CountDownLatch mAdminDataAvailableLatch = new CountDownLatch(1);
 
     // Messages for the handler
     static final int MSG_INFORM_LISTENERS = 3;
@@ -263,8 +279,9 @@ public class AppStandbyController {
                 }
                 if (!packageName.equals(providerPkgName)) {
                     synchronized (mAppIdleLock) {
-                        int newBucket = mAppIdleHistory.reportMildUsage(packageName, userId,
-                                    elapsedRealtime);
+                        int newBucket = mAppIdleHistory.reportUsage(packageName, userId,
+                                STANDBY_BUCKET_ACTIVE, elapsedRealtime,
+                                elapsedRealtime + 2 * ONE_HOUR);
                         maybeInformListeners(packageName, userId, elapsedRealtime,
                                 newBucket);
                     }
@@ -406,8 +423,10 @@ public class AppStandbyController {
                         AppIdleHistory.AppUsageHistory app =
                                 mAppIdleHistory.getAppUsageHistory(packageName,
                                 userId, elapsedRealtime);
-                        // If the bucket was forced by the developer, leave it alone
-                        if (REASON_FORCED.equals(app.bucketingReason)) {
+                        // If the bucket was forced by the developer or the app is within the
+                        // temporary active period, leave it alone.
+                        if (REASON_FORCED.equals(app.bucketingReason)
+                                || !hasBucketTimeoutPassed(app, elapsedRealtime)) {
                             continue;
                         }
                         boolean predictionLate = false;
@@ -447,6 +466,11 @@ public class AppStandbyController {
                 && app.lastPredictedTime > 0
                 && mAppIdleHistory.getElapsedTime(elapsedRealtime)
                     - app.lastPredictedTime > PREDICTION_TIMEOUT;
+    }
+
+    private boolean hasBucketTimeoutPassed(AppIdleHistory.AppUsageHistory app,
+            long elapsedRealtime) {
+        return app.bucketTimeoutTime < mAppIdleHistory.getElapsedTime(elapsedRealtime);
     }
 
     private void maybeInformListeners(String packageName, int userId,
@@ -544,11 +568,13 @@ public class AppStandbyController {
 
                 final int newBucket;
                 if (event.mEventType == UsageEvents.Event.NOTIFICATION_SEEN) {
-                    newBucket = mAppIdleHistory.reportMildUsage(event.mPackage, userId,
-                            elapsedRealtime);
+                    newBucket = mAppIdleHistory.reportUsage(event.mPackage, userId,
+                            STANDBY_BUCKET_WORKING_SET,
+                            elapsedRealtime, elapsedRealtime + 2 * ONE_HOUR);
                 } else {
                     newBucket = mAppIdleHistory.reportUsage(event.mPackage, userId,
-                            elapsedRealtime);
+                            STANDBY_BUCKET_ACTIVE,
+                            elapsedRealtime, elapsedRealtime + 2 * ONE_HOUR);
                 }
 
                 maybeInformListeners(event.mPackage, userId, elapsedRealtime,
@@ -592,9 +618,25 @@ public class AppStandbyController {
         }
     }
 
+    public void setLastJobRunTime(String packageName, int userId, long elapsedRealtime) {
+        synchronized (mAppIdleLock) {
+            mAppIdleHistory.setLastJobRunTime(packageName, userId, elapsedRealtime);
+        }
+    }
+
+    public long getTimeSinceLastJobRun(String packageName, int userId) {
+        final long elapsedRealtime = mInjector.elapsedRealtime();
+        synchronized (mAppIdleLock) {
+            return mAppIdleHistory.getTimeSinceLastJobRun(packageName, userId, elapsedRealtime);
+        }
+    }
+
     public void onUserRemoved(int userId) {
         synchronized (mAppIdleLock) {
             mAppIdleHistory.onUserRemoved(userId);
+            synchronized (mActiveAdminApps) {
+                mActiveAdminApps.remove(userId);
+            }
         }
     }
 
@@ -805,16 +847,27 @@ public class AppStandbyController {
             AppIdleHistory.AppUsageHistory app = mAppIdleHistory.getAppUsageHistory(packageName,
                     userId, elapsedRealtime);
             boolean predicted = reason != null && reason.startsWith(REASON_PREDICTED);
+
             // Don't allow changing bucket if higher than ACTIVE
             if (app.currentBucket < STANDBY_BUCKET_ACTIVE) return;
-            // Don't allow prediction to change from or to NEVER
+
+            // Don't allow prediction to change from/to NEVER
             if ((app.currentBucket == STANDBY_BUCKET_NEVER
                     || newBucket == STANDBY_BUCKET_NEVER)
                     && predicted) {
                 return;
             }
+
             // If the bucket was forced, don't allow prediction to override
             if (app.bucketingReason.equals(REASON_FORCED) && predicted) return;
+
+            // If the bucket is required to stay in a higher state for a specified duration, don't
+            // override unless the duration has passed
+            if (predicted && app.currentBucket < newBucket
+                    && !hasBucketTimeoutPassed(app, elapsedRealtime)) {
+                return;
+            }
+
             mAppIdleHistory.setAppStandbyBucket(packageName, userId, elapsedRealtime, newBucket,
                     reason);
         }
@@ -822,10 +875,53 @@ public class AppStandbyController {
                 newBucket);
     }
 
-    private boolean isActiveDeviceAdmin(String packageName, int userId) {
-        DevicePolicyManager dpm = mContext.getSystemService(DevicePolicyManager.class);
-        if (dpm == null) return false;
-        return dpm.packageHasActiveAdmins(packageName, userId);
+    @VisibleForTesting
+    boolean isActiveDeviceAdmin(String packageName, int userId) {
+        synchronized (mActiveAdminApps) {
+            final Set<String> adminPkgs = mActiveAdminApps.get(userId);
+            return adminPkgs != null && adminPkgs.contains(packageName);
+        }
+    }
+
+    public void addActiveDeviceAdmin(String adminPkg, int userId) {
+        synchronized (mActiveAdminApps) {
+            Set<String> adminPkgs = mActiveAdminApps.get(userId);
+            if (adminPkgs == null) {
+                adminPkgs = new ArraySet<>();
+                mActiveAdminApps.put(userId, adminPkgs);
+            }
+            adminPkgs.add(adminPkg);
+        }
+    }
+
+    public void setActiveAdminApps(Set<String> adminPkgs, int userId) {
+        synchronized (mActiveAdminApps) {
+            if (adminPkgs == null) {
+                mActiveAdminApps.remove(userId);
+            } else {
+                mActiveAdminApps.put(userId, adminPkgs);
+            }
+        }
+    }
+
+    public void onAdminDataAvailable() {
+        mAdminDataAvailableLatch.countDown();
+    }
+
+    /**
+     * This will only ever be called once - during device boot.
+     */
+    private void waitForAdminData() {
+        if (mContext.getPackageManager().hasSystemFeature(PackageManager.FEATURE_DEVICE_ADMIN)) {
+            ConcurrentUtils.waitForCountDownNoInterrupt(mAdminDataAvailableLatch,
+                    WAIT_FOR_ADMIN_DATA_TIMEOUT_MS, "Wait for admin data");
+        }
+    }
+
+    Set<String> getActiveAdminAppsForTest(int userId) {
+        synchronized (mActiveAdminApps) {
+            return mActiveAdminApps.get(userId);
+        }
     }
 
     /**
@@ -947,7 +1043,10 @@ public class AppStandbyController {
                 final PackageInfo pi = packages.get(i);
                 String packageName = pi.packageName;
                 if (pi.applicationInfo != null && pi.applicationInfo.isSystemApp()) {
-                    mAppIdleHistory.reportUsage(packageName, userId, elapsedRealtime);
+                    // Mark app as used for 4 hours. After that it can timeout to whatever the
+                    // past usage pattern was.
+                    mAppIdleHistory.reportUsage(packageName, userId, STANDBY_BUCKET_ACTIVE, 0,
+                            elapsedRealtime + 4 * ONE_HOUR);
                     if (isAppSpecial(packageName, UserHandle.getAppId(pi.applicationInfo.uid),
                             userId)) {
                         mAppIdleHistory.setAppStandbyBucket(packageName, userId, elapsedRealtime,
@@ -965,12 +1064,6 @@ public class AppStandbyController {
         args.arg3 = userId;
         mHandler.obtainMessage(MSG_REPORT_CONTENT_PROVIDER_USAGE, args)
                 .sendToTarget();
-    }
-
-    void dumpHistory(IndentingPrintWriter idpw, int userId) {
-        synchronized (mAppIdleLock) {
-            mAppIdleHistory.dumpHistory(idpw, userId);
-        }
     }
 
     void dumpUser(IndentingPrintWriter idpw, int userId, String pkg) {
@@ -1154,6 +1247,7 @@ public class AppStandbyController {
 
                 case MSG_ONE_TIME_CHECK_IDLE_STATES:
                     mHandler.removeMessages(MSG_ONE_TIME_CHECK_IDLE_STATES);
+                    waitForAdminData();
                     checkIdleStates(UserHandle.USER_ALL);
                     break;
 
@@ -1278,10 +1372,10 @@ public class AppStandbyController {
             synchronized (mAppIdleLock) {
 
                 // Default: 24 hours between paroles
-                mAppIdleParoleIntervalMillis = mParser.getLong(KEY_PAROLE_INTERVAL,
+                mAppIdleParoleIntervalMillis = mParser.getDurationMillis(KEY_PAROLE_INTERVAL,
                         COMPRESS_TIME ? ONE_MINUTE * 10 : 24 * 60 * ONE_MINUTE);
 
-                mAppIdleParoleDurationMillis = mParser.getLong(KEY_PAROLE_DURATION,
+                mAppIdleParoleDurationMillis = mParser.getDurationMillis(KEY_PAROLE_DURATION,
                         COMPRESS_TIME ? ONE_MINUTE : 10 * ONE_MINUTE); // 10 minutes
 
                 String screenThresholdsValue = mParser.getString(KEY_SCREEN_TIME_THRESHOLDS, null);
@@ -1308,7 +1402,15 @@ public class AppStandbyController {
                 if (thresholds.length == THRESHOLD_BUCKETS.length) {
                     long[] array = new long[THRESHOLD_BUCKETS.length];
                     for (int i = 0; i < THRESHOLD_BUCKETS.length; i++) {
-                        array[i] = Long.parseLong(thresholds[i]);
+                        try {
+                            if (thresholds[i].startsWith("P") || thresholds[i].startsWith("p")) {
+                                array[i] = Duration.parse(thresholds[i]).toMillis();
+                            } else {
+                                array[i] = Long.parseLong(thresholds[i]);
+                            }
+                        } catch (NumberFormatException|DateTimeParseException e) {
+                            return defaults;
+                        }
                     }
                     return array;
                 } else {

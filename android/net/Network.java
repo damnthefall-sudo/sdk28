@@ -21,6 +21,7 @@ import android.os.Parcelable;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.system.OsConstants;
+import android.util.proto.ProtoOutputStream;
 
 import com.android.okhttp.internalandroidapi.Dns;
 import com.android.okhttp.internalandroidapi.HttpURLConnectionFactory;
@@ -356,13 +357,13 @@ public class Network implements Parcelable {
         // Multiple Provisioning Domains API recommendations, as made by the
         // IETF mif working group.
         //
-        // The HANDLE_MAGIC value MUST be kept in sync with the corresponding
+        // The handleMagic value MUST be kept in sync with the corresponding
         // value in the native/android/net.c NDK implementation.
         if (netId == 0) {
             return 0L;  // make this zero condition obvious for debugging
         }
-        final long HANDLE_MAGIC = 0xfacade;
-        return (((long) netId) << 32) | HANDLE_MAGIC;
+        final long handleMagic = 0xcafed00dL;
+        return (((long) netId) << 32) | handleMagic;
     }
 
     // implement the Parcelable interface
@@ -401,5 +402,12 @@ public class Network implements Parcelable {
     @Override
     public String toString() {
         return Integer.toString(netId);
+    }
+
+    /** @hide */
+    public void writeToProto(ProtoOutputStream proto, long fieldId) {
+        final long token = proto.start(fieldId);
+        proto.write(NetworkProto.NET_ID, netId);
+        proto.end(token);
     }
 }

@@ -17,6 +17,11 @@
 package com.android.server.broadcastradio.hal2;
 
 import android.annotation.NonNull;
+import android.annotation.Nullable;
+import android.hardware.radio.IAnnouncementListener;
+import android.hardware.radio.ICloseHandle;
+import android.hardware.radio.ITuner;
+import android.hardware.radio.ITunerCallback;
 import android.hardware.radio.RadioManager;
 import android.hardware.broadcastradio.V2_0.IBroadcastRadio;
 import android.hidl.manager.V1_0.IServiceManager;
@@ -28,6 +33,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 public class BroadcastRadioService {
@@ -75,5 +81,45 @@ public class BroadcastRadioService {
 
     public boolean hasModule(int id) {
         return mModules.containsKey(id);
+    }
+
+    public boolean hasAnyModules() {
+        return !mModules.isEmpty();
+    }
+
+    public ITuner openSession(int moduleId, @Nullable RadioManager.BandConfig legacyConfig,
+        boolean withAudio, @NonNull ITunerCallback callback) throws RemoteException {
+        Objects.requireNonNull(callback);
+
+        if (!withAudio) {
+            throw new IllegalArgumentException("Non-audio sessions not supported with HAL 2.x");
+        }
+
+        RadioModule module = mModules.get(moduleId);
+        if (module == null) {
+            throw new IllegalArgumentException("Invalid module ID");
+        }
+
+        TunerSession session = module.openSession(callback);
+        session.setConfiguration(legacyConfig);
+        return session;
+    }
+
+    public ICloseHandle addAnnouncementListener(@NonNull int[] enabledTypes,
+            @NonNull IAnnouncementListener listener) {
+        AnnouncementAggregator aggregator = new AnnouncementAggregator(listener);
+        boolean anySupported = false;
+        for (RadioModule module : mModules.values()) {
+            try {
+                aggregator.watchModule(module, enabledTypes);
+                anySupported = true;
+            } catch (UnsupportedOperationException ex) {
+                Slog.v(TAG, "Announcements not supported for this module", ex);
+            }
+        }
+        if (!anySupported) {
+            Slog.i(TAG, "There are no HAL modules that support announcements");
+        }
+        return aggregator;
     }
 }

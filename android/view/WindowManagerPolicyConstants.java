@@ -18,8 +18,6 @@ package android.view;
 
 import static android.view.Display.DEFAULT_DISPLAY;
 
-import android.annotation.SystemApi;
-
 /**
  * Constants for interfacing with WindowManagerService and WindowManagerPolicyInternal.
  * @hide
@@ -47,6 +45,11 @@ public interface WindowManagerPolicyConstants {
     int PRESENCE_INTERNAL = 1 << 0;
     int PRESENCE_EXTERNAL = 1 << 1;
 
+    // Navigation bar position values
+    int NAV_BAR_LEFT = 1 << 0;
+    int NAV_BAR_RIGHT = 1 << 1;
+    int NAV_BAR_BOTTOM = 1 << 2;
+
     /**
      * Sticky broadcast of the current HDMI plugged state.
      */
@@ -62,7 +65,6 @@ public interface WindowManagerPolicyConstants {
      * Set to {@code true} when intent was invoked from pressing the home key.
      * @hide
      */
-    @SystemApi
     String EXTRA_FROM_HOME_KEY = "android.intent.extra.FROM_HOME_KEY";
 
     // TODO: move this to a more appropriate place.

@@ -16,11 +16,15 @@
 
 package android.view;
 
+import static android.view.DisplayCutoutProto.BOUNDS;
+import static android.view.DisplayCutoutProto.INSETS;
 import static android.view.Surface.ROTATION_0;
 import static android.view.Surface.ROTATION_180;
 import static android.view.Surface.ROTATION_270;
 import static android.view.Surface.ROTATION_90;
 
+import android.content.res.Resources;
+import android.graphics.Matrix;
 import android.graphics.Path;
 import android.graphics.Point;
 import android.graphics.Rect;
@@ -28,7 +32,12 @@ import android.graphics.RectF;
 import android.graphics.Region;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.text.TextUtils;
+import android.util.Log;
+import android.util.PathParser;
+import android.util.proto.ProtoOutputStream;
 
+import com.android.internal.R;
 import com.android.internal.annotations.VisibleForTesting;
 
 import java.util.List;
@@ -39,6 +48,9 @@ import java.util.List;
  * <p>{@code DisplayCutout} is immutable.
  */
 public final class DisplayCutout {
+
+    private static final String TAG = "DisplayCutout";
+    private static final String DP_MARKER = "@dp";
 
     private static final Rect ZERO_RECT = new Rect();
     private static final Region EMPTY_REGION = new Region();
@@ -150,8 +162,18 @@ public final class DisplayCutout {
     @Override
     public String toString() {
         return "DisplayCutout{insets=" + mSafeInsets
-                + " bounds=" + mBounds
+                + " boundingRect=" + getBoundingRect()
                 + "}";
+    }
+
+    /**
+     * @hide
+     */
+    public void writeToProto(ProtoOutputStream proto, long fieldId) {
+        final long token = proto.start(fieldId);
+        mSafeInsets.writeToProto(proto, INSETS);
+        mBounds.getBounds().writeToProto(proto, BOUNDS);
+        proto.end(token);
     }
 
     /**
@@ -266,9 +288,7 @@ public final class DisplayCutout {
      * @hide
      */
     public static DisplayCutout fromBoundingPolygon(List<Point> points) {
-        Region bounds = Region.obtain();
         Path path = new Path();
-
         path.reset();
         for (int i = 0; i < points.size(); i++) {
             Point point = points.get(i);
@@ -279,15 +299,59 @@ public final class DisplayCutout {
             }
         }
         path.close();
+        return fromBounds(path);
+    }
 
+    /**
+     * Creates an instance from a bounding {@link Path}.
+     *
+     * @hide
+     */
+    public static DisplayCutout fromBounds(Path path) {
         RectF clipRect = new RectF();
         path.computeBounds(clipRect, false /* unused */);
         Region clipRegion = Region.obtain();
         clipRegion.set((int) clipRect.left, (int) clipRect.top,
                 (int) clipRect.right, (int) clipRect.bottom);
 
+        Region bounds = new Region();
         bounds.setPath(path, clipRegion);
+        clipRegion.recycle();
         return new DisplayCutout(ZERO_RECT, bounds);
+    }
+
+    /**
+     * Creates an instance according to @android:string/config_mainBuiltInDisplayCutout.
+     *
+     * @hide
+     */
+    public static DisplayCutout fromResources(Resources res, int displayWidth) {
+        String spec = res.getString(R.string.config_mainBuiltInDisplayCutout);
+        if (TextUtils.isEmpty(spec)) {
+            return null;
+        }
+        spec = spec.trim();
+        final boolean inDp = spec.endsWith(DP_MARKER);
+        if (inDp) {
+            spec = spec.substring(0, spec.length() - DP_MARKER.length());
+        }
+
+        Path p;
+        try {
+            p = PathParser.createPathFromPathData(spec);
+        } catch (Throwable e) {
+            Log.wtf(TAG, "Could not inflate cutout: ", e);
+            return null;
+        }
+
+        final Matrix m = new Matrix();
+        if (inDp) {
+            final float dpToPx = res.getDisplayMetrics().density;
+            m.postScale(dpToPx, dpToPx);
+        }
+        m.postTranslate(displayWidth / 2f, 0);
+        p.transform(m);
+        return fromBounds(p);
     }
 
     /**
@@ -316,12 +380,23 @@ public final class DisplayCutout {
 
         @Override
         public void writeToParcel(Parcel out, int flags) {
-            if (mInner == NO_CUTOUT) {
+            writeCutoutToParcel(mInner, out, flags);
+        }
+
+        /**
+         * Writes a DisplayCutout to a {@link Parcel}.
+         *
+         * @see #readCutoutFromParcel(Parcel)
+         */
+        public static void writeCutoutToParcel(DisplayCutout cutout, Parcel out, int flags) {
+            if (cutout == null) {
+                out.writeInt(-1);
+            } else if (cutout == NO_CUTOUT) {
                 out.writeInt(0);
             } else {
                 out.writeInt(1);
-                out.writeTypedObject(mInner.mSafeInsets, flags);
-                out.writeTypedObject(mInner.mBounds, flags);
+                out.writeTypedObject(cutout.mSafeInsets, flags);
+                out.writeTypedObject(cutout.mBounds, flags);
             }
         }
 
@@ -332,13 +407,13 @@ public final class DisplayCutout {
          * Needed for AIDL out parameters.
          */
         public void readFromParcel(Parcel in) {
-            mInner = readCutout(in);
+            mInner = readCutoutFromParcel(in);
         }
 
         public static final Creator<ParcelableWrapper> CREATOR = new Creator<ParcelableWrapper>() {
             @Override
             public ParcelableWrapper createFromParcel(Parcel in) {
-                return new ParcelableWrapper(readCutout(in));
+                return new ParcelableWrapper(readCutoutFromParcel(in));
             }
 
             @Override
@@ -347,8 +422,17 @@ public final class DisplayCutout {
             }
         };
 
-        private static DisplayCutout readCutout(Parcel in) {
-            if (in.readInt() == 0) {
+        /**
+         * Reads a DisplayCutout from a {@link Parcel}.
+         *
+         * @see #writeCutoutToParcel(DisplayCutout, Parcel, int)
+         */
+        public static DisplayCutout readCutoutFromParcel(Parcel in) {
+            int variant = in.readInt();
+            if (variant == -1) {
+                return null;
+            }
+            if (variant == 0) {
                 return NO_CUTOUT;
             }
 

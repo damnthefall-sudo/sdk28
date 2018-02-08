@@ -24,6 +24,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.RemoteException;
 import android.os.ServiceManager;
@@ -108,6 +109,12 @@ public class TelecomManager {
      */
     public static final String ACTION_SHOW_RESPOND_VIA_SMS_SETTINGS =
             "android.telecom.action.SHOW_RESPOND_VIA_SMS_SETTINGS";
+
+    /**
+     * The {@link android.content.Intent} action used to show the assisted dialing settings.
+     */
+    public static final String ACTION_SHOW_ASSISTED_DIALING_SETTINGS =
+            "android.telecom.action.SHOW_ASSISTED_DIALING_SETTINGS";
 
     /**
      * The {@link android.content.Intent} action used to show the settings page used to configure
@@ -234,6 +241,15 @@ public class TelecomManager {
      */
     public static final String EXTRA_INCOMING_CALL_EXTRAS =
             "android.telecom.extra.INCOMING_CALL_EXTRAS";
+
+    /**
+     * Optional extra for {@link #ACTION_INCOMING_CALL} containing a boolean to indicate that the
+     * call has an externally generated ringer. Used by the HfpClientConnectionService when In Band
+     * Ringtone is enabled to prevent two ringers from being generated.
+     * @hide
+     */
+    public static final String EXTRA_CALL_EXTERNAL_RINGER =
+            "android.telecom.extra.CALL_EXTERNAL_RINGER";
 
     /**
      * Optional extra for {@link android.content.Intent#ACTION_CALL} and
@@ -367,6 +383,17 @@ public class TelecomManager {
      * @hide
      */
     public static final String EXTRA_IS_HANDOVER = "android.telecom.extra.IS_HANDOVER";
+
+    /**
+     * When {@code true} indicates that a request to create a new connection is for the purpose of
+     * a handover.  Note: This is used with the
+     * {@link android.telecom.Call#handoverTo(PhoneAccountHandle, int, Bundle)} API as part of the
+     * internal communication mechanism with the {@link android.telecom.ConnectionService}.  It is
+     * not the same as the legacy {@link #EXTRA_IS_HANDOVER} extra.
+     * @hide
+     */
+    public static final String EXTRA_IS_HANDOVER_CONNECTION =
+            "android.telecom.extra.IS_HANDOVER_CONNECTION";
 
     /**
      * Parcelable extra used with {@link #EXTRA_IS_HANDOVER} to indicate the source
@@ -592,10 +619,15 @@ public class TelecomManager {
     /**
      * The boolean indicated by this extra controls whether or not a call is eligible to undergo
      * assisted dialing. This extra is stored under {@link #EXTRA_OUTGOING_CALL_EXTRAS}.
-     * @hide
      */
     public static final String EXTRA_USE_ASSISTED_DIALING =
             "android.telecom.extra.USE_ASSISTED_DIALING";
+
+    /**
+     * The bundle indicated by this extra store information related to the assisted dialing action.
+     */
+    public static final String EXTRA_ASSISTED_DIALING_TRANSFORMATION_INFO =
+            "android.telecom.extra.ASSISTED_DIALING_TRANSFORMATION_INFO";
 
     /**
      * The following 4 constants define how properties such as phone numbers and names are
@@ -653,7 +685,6 @@ public class TelecomManager {
             mContext = context;
         }
         mTelecomServiceOverride = telecomServiceImpl;
-        android.telecom.Log.initMd5Sum();
     }
 
     /**
@@ -1432,6 +1463,13 @@ public class TelecomManager {
     public void addNewIncomingCall(PhoneAccountHandle phoneAccount, Bundle extras) {
         try {
             if (isServiceConnected()) {
+                if (extras != null && extras.getBoolean(EXTRA_IS_HANDOVER) &&
+                        mContext.getApplicationContext().getApplicationInfo().targetSdkVersion >
+                                Build.VERSION_CODES.O_MR1) {
+                    Log.e("TAG", "addNewIncomingCall failed. Use public api " +
+                            "acceptHandover for API > O-MR1");
+                    // TODO add "return" after DUO team adds support for new handover API
+                }
                 getTelecomService().addNewIncomingCall(
                         phoneAccount, extras == null ? new Bundle() : extras);
             }

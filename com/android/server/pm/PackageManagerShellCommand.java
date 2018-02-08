@@ -18,6 +18,7 @@ package com.android.server.pm;
 
 import android.accounts.IAccountManager;
 import android.app.ActivityManager;
+import android.app.ActivityManagerInternal;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.IIntentReceiver;
@@ -46,6 +47,7 @@ import android.content.pm.PackageManager.NameNotFoundException;
 import android.content.pm.ResolveInfo;
 import android.content.pm.UserInfo;
 import android.content.pm.VersionedPackage;
+import android.content.pm.dex.DexMetadataHelper;
 import android.content.res.AssetManager;
 import android.content.res.Resources;
 import android.net.Uri;
@@ -72,13 +74,13 @@ import android.util.PrintWriterPrinter;
 import com.android.internal.content.PackageHelper;
 import com.android.internal.util.ArrayUtils;
 import com.android.internal.util.SizedInputStream;
+import com.android.server.LocalServices;
 import com.android.server.SystemConfig;
 
 import dalvik.system.DexFile;
 
 import libcore.io.IoUtils;
 
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -222,6 +224,8 @@ class PackageManagerShellCommand extends ShellCommand {
                     return runSetUserRestriction();
                 case "get-max-users":
                     return runGetMaxUsers();
+                case "get-max-running-users":
+                    return runGetMaxRunningUsers();
                 case "set-home-activity":
                     return runSetHomeActivity();
                 case "set-installer":
@@ -230,6 +234,10 @@ class PackageManagerShellCommand extends ShellCommand {
                     return runGetInstantAppResolver();
                 case "has-feature":
                     return runHasFeature();
+                case "set-harmful-app-warning":
+                    return runSetHarmfulAppWarning();
+                case "get-harmful-app-warning":
+                    return runGetHarmfulAppWarning();
                 default: {
                     String nextArg = getNextArg();
                     if (nextArg == null) {
@@ -1277,7 +1285,7 @@ class PackageManagerShellCommand extends ShellCommand {
             return runRemoveSplit(packageName, splitName);
         }
 
-        userId = translateUserId(userId, "runUninstall");
+        userId = translateUserId(userId, true /*allowAll*/, "runUninstall");
         if (userId == UserHandle.USER_ALL) {
             userId = UserHandle.USER_SYSTEM;
             flags |= PackageManager.DELETE_ALL_USERS;
@@ -1881,6 +1889,14 @@ class PackageManagerShellCommand extends ShellCommand {
         return 0;
     }
 
+    public int runGetMaxRunningUsers() {
+        ActivityManagerInternal activityManagerInternal =
+                LocalServices.getService(ActivityManagerInternal.class);
+        getOutPrintWriter().println("Maximum supported running users: "
+                + activityManagerInternal.getMaxRunningUsers());
+        return 0;
+    }
+
     private static class InstallParams {
         SessionParams sessionParams;
         String installerPackageName;
@@ -2088,6 +2104,54 @@ class PackageManagerShellCommand extends ShellCommand {
         return 0;
     }
 
+    private int runSetHarmfulAppWarning() throws RemoteException {
+        int userId = UserHandle.USER_CURRENT;
+
+        String opt;
+        while ((opt = getNextOption()) != null) {
+            if (opt.equals("--user")) {
+                userId = UserHandle.parseUserArg(getNextArgRequired());
+            } else {
+                getErrPrintWriter().println("Error: Unknown option: " + opt);
+                return -1;
+            }
+        }
+
+        userId = translateUserId(userId, false /*allowAll*/, "runSetHarmfulAppWarning");
+
+        final String packageName = getNextArgRequired();
+        final String warning = getNextArg();
+
+        mInterface.setHarmfulAppWarning(packageName, warning, userId);
+
+        return 0;
+    }
+
+    private int runGetHarmfulAppWarning() throws RemoteException {
+        int userId = UserHandle.USER_CURRENT;
+
+        String opt;
+        while ((opt = getNextOption()) != null) {
+            if (opt.equals("--user")) {
+                userId = UserHandle.parseUserArg(getNextArgRequired());
+            } else {
+                getErrPrintWriter().println("Error: Unknown option: " + opt);
+                return -1;
+            }
+        }
+
+        userId = translateUserId(userId, false /*allowAll*/, "runGetHarmfulAppWarning");
+
+        final String packageName = getNextArgRequired();
+        final CharSequence warning = mInterface.getHarmfulAppWarning(packageName, userId);
+        if (!TextUtils.isEmpty(warning)) {
+            getOutPrintWriter().println(warning);
+            return 0;
+        } else {
+            return 1;
+        }
+    }
+
     private static String checkAbiArgument(String abi) {
         if (TextUtils.isEmpty(abi)) {
             throw new IllegalArgumentException("Missing ABI argument");
@@ -2107,14 +2171,14 @@ class PackageManagerShellCommand extends ShellCommand {
         throw new IllegalArgumentException("ABI " + abi + " not supported on this device");
     }
 
-    private int translateUserId(int userId, String logContext) {
+    private int translateUserId(int userId, boolean allowAll, String logContext) {
         return ActivityManager.handleIncomingUser(Binder.getCallingPid(), Binder.getCallingUid(),
-                userId, true, true, logContext, "pm command");
+                userId, allowAll, true, logContext, "pm command");
     }
 
     private int doCreateSession(SessionParams params, String installerPackageName, int userId)
             throws RemoteException {
-        userId = translateUserId(userId, "runInstallCreate");
+        userId = translateUserId(userId, true /*allowAll*/, "runInstallCreate");
         if (userId == UserHandle.USER_ALL) {
             userId = UserHandle.USER_SYSTEM;
             params.installFlags |= PackageManager.INSTALL_ALL_USERS;
@@ -2220,6 +2284,14 @@ class PackageManagerShellCommand extends ShellCommand {
         try {
             session = new PackageInstaller.Session(
                     mInterface.getPackageInstaller().openSession(sessionId));
+
+            // Sanity check that all .dm files match an apk.
+            // (The installer does not support standalone .dm files and will not process them.)
+            try {
+                DexMetadataHelper.validateDexPaths(session.getNames());
+            } catch (IllegalStateException | IOException e) {
+                pw.println("Warning [Could not validate the dex paths: " + e.getMessage() + "]");
+            }
 
             final LocalIntentReceiver receiver = new LocalIntentReceiver();
             session.commit(receiver.getIntentSender());
@@ -2582,6 +2654,8 @@ class PackageManagerShellCommand extends ShellCommand {
         pw.println("");
         pw.println("  get-max-users");
         pw.println("");
+        pw.println("  get-max-running-users");
+        pw.println("");
         pw.println("  compile [-m MODE | -r REASON] [-f] [-c] [--split SPLIT_NAME]");
         pw.println("          [--reset] [--check-prof (true | false)] (-a | TARGET-PACKAGE)");
         pw.println("    Trigger compilation of TARGET-PACKAGE or all packages if \"-a\".  Options are:");
@@ -2634,6 +2708,12 @@ class PackageManagerShellCommand extends ShellCommand {
         pw.println("");
         pw.println("  get-instantapp-resolver");
         pw.println("    Return the name of the component that is the current instant app installer.");
+        pw.println("");
+        pw.println("  set-harmful-app-warning [--user <USER_ID>] <PACKAGE> [<WARNING>]");
+        pw.println("    Mark the app as harmful with the given warning message.");
+        pw.println("");
+        pw.println("  get-harmful-app-warning [--user <USER_ID>] <PACKAGE>");
+        pw.println("    Return the harmful app warning message for the given app, if present");
         pw.println();
         Intent.printIntentArgsHelp(pw , "");
     }

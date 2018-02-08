@@ -29,6 +29,7 @@ import android.view.IWindowId;
 import android.view.IWindowSession;
 import android.view.InputChannel;
 import android.view.Surface;
+import android.view.SurfaceControl;
 import android.view.SurfaceView;
 import android.view.WindowManager.LayoutParams;
 
@@ -129,20 +130,12 @@ public final class BridgeWindowSession implements IWindowSession {
     }
 
     @Override
-    public IBinder prepareDrag(IWindow window, int flags,
-            int thumbnailWidth, int thumbnailHeight, Surface outSurface)
-            throws RemoteException {
-        // pass for now
-        return null;
-    }
-
-    @Override
-    public boolean performDrag(IWindow window, IBinder dragToken,
+    public IBinder performDrag(IWindow window, int flags, SurfaceControl surface,
             int touchSource, float touchX, float touchY, float thumbCenterX, float thumbCenterY,
             ClipData data)
             throws RemoteException {
         // pass for now
-        return false;
+        return null;
     }
 
     @Override
@@ -229,6 +222,12 @@ public final class BridgeWindowSession implements IWindowSession {
 
     @Override
     public void updatePointerIcon(IWindow window) {
+        // pass for now.
+    }
+
+    @Override
+    public void updateTapExcludeRegion(IWindow window, int regionId, int left, int top, int width,
+            int height) {
         // pass for now.
     }
 }

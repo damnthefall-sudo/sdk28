@@ -16,31 +16,17 @@
 
 package androidx.app.slice.widget;
 
-import static android.app.slice.Slice.HINT_ACTIONS;
-import static android.app.slice.Slice.HINT_LIST;
-import static android.app.slice.Slice.HINT_LIST_ITEM;
 import static android.app.slice.Slice.HINT_PARTIAL;
-import static android.app.slice.Slice.SUBTYPE_COLOR;
-import static android.app.slice.SliceItem.FORMAT_INT;
-import static android.app.slice.SliceItem.FORMAT_SLICE;
 import static android.view.ViewGroup.LayoutParams.WRAP_CONTENT;
-
-import static androidx.app.slice.core.SliceHints.HINT_SUMMARY;
 
 import android.annotation.TargetApi;
 import android.content.Context;
 import android.support.annotation.RestrictTo;
 import android.support.v7.widget.LinearLayoutManager;
 import android.support.v7.widget.RecyclerView;
-import android.view.View;
-import android.widget.FrameLayout;
-
-import java.util.ArrayList;
-import java.util.List;
-import java.util.function.Consumer;
+import android.util.AttributeSet;
 
 import androidx.app.slice.Slice;
-import androidx.app.slice.SliceItem;
 import androidx.app.slice.core.SliceQuery;
 import androidx.app.slice.view.R;
 
@@ -49,7 +35,7 @@ import androidx.app.slice.view.R;
  */
 @RestrictTo(RestrictTo.Scope.LIBRARY)
 @TargetApi(24)
-public class LargeTemplateView extends FrameLayout implements SliceView.SliceModeView {
+public class LargeTemplateView extends SliceChildView {
 
     private final LargeSliceAdapter mAdapter;
     private final RecyclerView mRecyclerView;
@@ -59,7 +45,6 @@ public class LargeTemplateView extends FrameLayout implements SliceView.SliceMod
 
     public LargeTemplateView(Context context) {
         super(context);
-
         mRecyclerView = new RecyclerView(getContext());
         mRecyclerView.setLayoutManager(new LinearLayoutManager(getContext()));
         mAdapter = new LargeSliceAdapter(context);
@@ -69,13 +54,16 @@ public class LargeTemplateView extends FrameLayout implements SliceView.SliceMod
     }
 
     @Override
-    public View getView() {
-        return this;
+    public @SliceView.SliceMode int getMode() {
+        return SliceView.MODE_LARGE;
     }
 
     @Override
-    public @SliceView.SliceMode int getMode() {
-        return SliceView.MODE_LARGE;
+    public void setSliceActionListener(SliceView.OnSliceActionListener observer) {
+        mObserver = observer;
+        if (mAdapter != null) {
+            mAdapter.setSliceObserver(mObserver);
+        }
     }
 
     @Override
@@ -94,40 +82,22 @@ public class LargeTemplateView extends FrameLayout implements SliceView.SliceMod
 
     @Override
     public void setSlice(Slice slice) {
-        SliceItem color = SliceQuery.findSubtype(slice, FORMAT_INT, SUBTYPE_COLOR);
         mSlice = slice;
-        final List<SliceItem> items = new ArrayList<>();
-        final boolean[] hasHeader = new boolean[1];
-        if (SliceQuery.hasHints(slice, HINT_LIST)) {
-            addList(slice, items);
-        } else {
-            slice.getItems().forEach(new Consumer<SliceItem>() {
-                @Override
-                public void accept(SliceItem item) {
-                    if (item.hasAnyHints(HINT_ACTIONS, HINT_SUMMARY)) {
-                        return;
-                    } else if (FORMAT_INT.equals(item.getFormat())) {
-                        return;
-                    } else if (FORMAT_SLICE.equals(item.getFormat())
-                            && item.hasHint(HINT_LIST)) {
-                        addList(item.getSlice(), items);
-                    } else if (item.hasHint(HINT_LIST_ITEM)) {
-                        items.add(item);
-                    } else if (!hasHeader[0]) {
-                        hasHeader[0] = true;
-                        items.add(0, item);
-                    } else {
-                        items.add(item);
-                    }
-                }
-            });
-        }
-        mAdapter.setSliceItems(items, color);
+        populate();
     }
 
-    private void addList(Slice slice, List<SliceItem> items) {
-        List<SliceItem> sliceItems = slice.getItems();
-        items.addAll(sliceItems);
+    @Override
+    public void setStyle(AttributeSet attrs) {
+        super.setStyle(attrs);
+        mAdapter.setStyle(attrs);
+    }
+
+    private void populate() {
+        if (mSlice == null) {
+            return;
+        }
+        ListContent lc = new ListContent(mSlice);
+        mAdapter.setSliceItems(lc.getRowItems(), mTintColor);
     }
 
     /**
@@ -136,5 +106,11 @@ public class LargeTemplateView extends FrameLayout implements SliceView.SliceMod
     public void setScrollable(boolean isScrollable) {
         // TODO -- restrict / enable how much this view can show
         mIsScrollable = isScrollable;
+    }
+
+    @Override
+    public void resetView() {
+        mSlice = null;
+        mAdapter.setSliceItems(null, -1);
     }
 }

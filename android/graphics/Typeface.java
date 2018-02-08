@@ -429,7 +429,7 @@ public class Typeface {
         }
 
         /**
-         * Sets an index of the font collection.
+         * Sets an index of the font collection. See {@link android.R.attr#ttcIndex}.
          *
          * Can not be used for Typeface source. build() method will return null for invalid index.
          * @param ttcIndex An index of the font collection. If the font source is not font
@@ -1025,6 +1025,10 @@ public class Typeface {
                         xmlFamily.getName(), fallback, languageTags, variant, cache, fontDir);
                 if (family != null) {
                     fallbackMap.valueAt(i).add(family);
+                } else if (defaultFamily != null) {
+                    fallbackMap.valueAt(i).add(defaultFamily);
+                } else {
+                    // There is no valid for for default fallback. Ignore.
                 }
             }
         }

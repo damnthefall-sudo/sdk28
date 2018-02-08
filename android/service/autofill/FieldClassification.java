@@ -105,9 +105,6 @@ public final class FieldClassification {
 
     /**
      * Represents the score of a {@link UserData} entry for the field.
-     *
-     * <p>The score is defined by {@link #getScore()} and the entry is identified by
-     * {@link #getRemoteId()}.
      */
     public static final class Match {
 
@@ -140,8 +137,9 @@ public final class FieldClassification {
          *   <li>Any other value is a partial match.
          * </ul>
          *
-         * <p>How the score is calculated depends on the algorithm used by the {@link Scorer}
-         * implementation.
+         * <p>How the score is calculated depends on the
+         * {@link UserData.Builder#setFieldClassificationAlgorithm(String, android.os.Bundle)
+         * algorithm} used.
          */
         public float getScore() {
             return mScore;

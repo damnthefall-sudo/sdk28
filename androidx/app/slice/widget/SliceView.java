@@ -23,11 +23,10 @@ import static android.app.slice.SliceItem.FORMAT_INT;
 import static android.app.slice.SliceItem.FORMAT_SLICE;
 
 import android.arch.lifecycle.Observer;
-import android.content.ContentResolver;
 import android.content.Context;
 import android.graphics.drawable.ColorDrawable;
-import android.net.Uri;
 import android.support.annotation.IntDef;
+import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
 import android.support.annotation.RestrictTo;
 import android.util.AttributeSet;
@@ -78,25 +77,17 @@ public class SliceView extends ViewGroup implements Observer<Slice> {
     private static final String TAG = "SliceView";
 
     /**
-     * @hide
+     * Implement this interface to be notified of interactions with the slice displayed
+     * in this view.
+     * @see EventInfo
      */
-    @RestrictTo(RestrictTo.Scope.LIBRARY)
-    public interface SliceModeView {
-
+    public interface OnSliceActionListener {
         /**
-         * @return the mode of the slice being presented.
+         * Called when an interaction has occurred with an element in this view.
+         * @param info the type of event that occurred.
+         * @param item the specific item within the {@link Slice} that was interacted with.
          */
-        int getMode();
-
-        /**
-         * @param slice the slice to show in this view.
-         */
-        void setSlice(Slice slice);
-
-        /**
-         * @return the view.
-         */
-        View getView();
+        void onSliceAction(@NonNull EventInfo info, @NonNull SliceItem item);
     }
 
     /**
@@ -128,14 +119,18 @@ public class SliceView extends ViewGroup implements Observer<Slice> {
      * that selection.
      */
     private static final int MODE_AUTO = 0;
-
     private int mMode = MODE_AUTO;
-    private SliceModeView mCurrentView;
-    private final ActionRow mActions;
+    private SliceChildView mCurrentView;
     private Slice mCurrentSlice;
-    private boolean mShowActions = true;
-    private boolean mIsScrollable;
+    private final ActionRow mActions;
     private final int mShortcutSize;
+    private OnSliceActionListener mSliceObserver;
+
+    private boolean mShowActions = true;
+    private boolean mIsScrollable = true;
+
+    private int mThemeTintColor = -1;
+    private AttributeSet mAttrs;
 
     public SliceView(Context context) {
         this(context, null);
@@ -151,6 +146,7 @@ public class SliceView extends ViewGroup implements Observer<Slice> {
 
     public SliceView(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
         super(context, attrs, defStyleAttr, defStyleRes);
+        mAttrs = attrs;
         mActions = new ActionRow(getContext(), true);
         mActions.setBackground(new ColorDrawable(0xffeeeeee));
         mCurrentView = new LargeTemplateView(getContext());
@@ -162,31 +158,51 @@ public class SliceView extends ViewGroup implements Observer<Slice> {
 
     @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-        int mode = MeasureSpec.getMode(widthMeasureSpec);
         int width = MeasureSpec.getSize(widthMeasureSpec);
+        int childWidth = MeasureSpec.getSize(widthMeasureSpec);
+        int childHeight = MeasureSpec.getSize(heightMeasureSpec);
         if (MODE_SHORTCUT == mMode) {
+            // TODO: consider scaling the shortcut to fit
+            childWidth = mShortcutSize;
             width = mShortcutSize;
         }
-        if (mode == MeasureSpec.AT_MOST || mode == MeasureSpec.UNSPECIFIED) {
-            widthMeasureSpec = MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY);
-        }
-        measureChildren(widthMeasureSpec, heightMeasureSpec);
+        final int left = getPaddingLeft();
+        final int top = getPaddingTop();
+        final int right = getPaddingRight();
+        final int bot = getPaddingBottom();
+
+        // Measure the children without the padding
+        childWidth -= left + right;
+        childHeight -= top + bot;
+        int childWidthMeasureSpec = MeasureSpec.makeMeasureSpec(childWidth, MeasureSpec.EXACTLY);
+        int childHeightMeasureSpec = MeasureSpec.makeMeasureSpec(childHeight, MeasureSpec.EXACTLY);
+        measureChildren(childWidthMeasureSpec, childHeightMeasureSpec);
+
+        // Figure out parent height
         int actionHeight = mActions.getVisibility() != View.GONE
                 ? mActions.getMeasuredHeight()
                 : 0;
-        int newHeightSpec = MeasureSpec.makeMeasureSpec(
-                mCurrentView.getView().getMeasuredHeight() + actionHeight, MeasureSpec.EXACTLY);
+        int currViewHeight = mCurrentView.getView().getMeasuredHeight() + top + bot;
+        int newHeightSpec = MeasureSpec.makeMeasureSpec(currViewHeight + actionHeight,
+                MeasureSpec.EXACTLY);
+        // Figure out parent width
+        width += left + right;
         setMeasuredDimension(width, newHeightSpec);
     }
 
     @Override
     protected void onLayout(boolean changed, int l, int t, int r, int b) {
         View v = mCurrentView.getView();
-        v.layout(0, 0, v.getMeasuredWidth(),
-                v.getMeasuredHeight());
+        final int left = getPaddingLeft();
+        final int top = getPaddingTop();
+        final int right = getPaddingRight();
+        final int bottom = getPaddingBottom();
+        v.layout(left, top, left + v.getMeasuredWidth(), top + v.getMeasuredHeight());
         if (mActions.getVisibility() != View.GONE) {
-            mActions.layout(0, v.getMeasuredHeight(), mActions.getMeasuredWidth(),
-                    v.getMeasuredHeight() + mActions.getMeasuredHeight());
+            mActions.layout(left,
+                    top + v.getMeasuredHeight() + bottom,
+                    left + mActions.getMeasuredWidth() + right,
+                    top + v.getMeasuredHeight() + bottom + mActions.getMeasuredHeight());
         }
     }
 
@@ -222,6 +238,15 @@ public class SliceView extends ViewGroup implements Observer<Slice> {
     }
 
     /**
+     * Sets the listener to notify when an interaction events occur on the view.
+     * @see EventInfo
+     */
+    public void setOnSliceActionListener(@Nullable OnSliceActionListener observer) {
+        mSliceObserver = observer;
+        mCurrentView.setSliceActionListener(mSliceObserver);
+    }
+
+    /**
      * @hide
      */
     @RestrictTo(RestrictTo.Scope.LIBRARY)
@@ -254,12 +279,12 @@ public class SliceView extends ViewGroup implements Observer<Slice> {
         reinflate();
     }
 
-    private SliceModeView createView(int mode) {
+    private SliceChildView createView(int mode) {
         switch (mode) {
             case MODE_SHORTCUT:
                 return new ShortcutView(getContext());
             case MODE_SMALL:
-                // Check if it's horizontal
+                // Check if it's horizontal and use a grid instead
                 if (SliceQuery.hasHints(mCurrentSlice, HINT_HORIZONTAL)) {
                     return new GridRowView(getContext());
                 } else {
@@ -271,40 +296,60 @@ public class SliceView extends ViewGroup implements Observer<Slice> {
 
     private void reinflate() {
         if (mCurrentSlice == null) {
+            mCurrentView.resetView();
             return;
         }
         // TODO: Smarter mapping here from one state to the next.
-        SliceItem color = SliceQuery.findSubtype(mCurrentSlice, FORMAT_INT, SUBTYPE_COLOR);
-        List<SliceItem> items = mCurrentSlice.getItems();
-        SliceItem actionRow = SliceQuery.find(mCurrentSlice, FORMAT_SLICE,
-                HINT_ACTIONS,
-                null);
         int mode = getMode();
         if (mMode == mCurrentView.getMode()) {
             mCurrentView.setSlice(mCurrentSlice);
         } else {
             removeAllViews();
             mCurrentView = createView(mode);
+            if (mSliceObserver != null) {
+                mCurrentView.setSliceActionListener(mSliceObserver);
+            }
             addView(mCurrentView.getView(), getChildLp(mCurrentView.getView()));
             addView(mActions, getChildLp(mActions));
         }
+        // Scrolling
         if (mode == MODE_LARGE) {
             ((LargeTemplateView) mCurrentView).setScrollable(mIsScrollable);
         }
+        // Styles
+        mCurrentView.setStyle(mAttrs);
+        // Set the slice
+        SliceItem actionRow = SliceQuery.find(mCurrentSlice, FORMAT_SLICE,
+                HINT_ACTIONS,
+                null);
+        List<SliceItem> items = mCurrentSlice.getItems();
         if (items.size() > 1 || (items.size() != 0 && items.get(0) != actionRow)) {
             mCurrentView.getView().setVisibility(View.VISIBLE);
             mCurrentView.setSlice(mCurrentSlice);
         } else {
             mCurrentView.getView().setVisibility(View.GONE);
         }
-
+        // Deal with actions
         boolean showActions = mShowActions && actionRow != null
                 && mode != MODE_SHORTCUT;
         if (showActions) {
-            mActions.setActions(actionRow, color);
+            mActions.setActions(actionRow, getTintColor());
             mActions.setVisibility(View.VISIBLE);
         } else {
             mActions.setVisibility(View.GONE);
+        }
+    }
+
+    private int getTintColor() {
+        if (mThemeTintColor != -1) {
+            // Theme has specified a color, use that
+            return mThemeTintColor;
+        } else {
+            final SliceItem colorItem = SliceQuery.findSubtype(
+                    mCurrentSlice, FORMAT_INT, SUBTYPE_COLOR);
+            return colorItem != null
+                    ? colorItem.getInt()
+                    : SliceViewUtil.getColorAccent(getContext());
         }
     }
 
@@ -316,12 +361,23 @@ public class SliceView extends ViewGroup implements Observer<Slice> {
         }
     }
 
-    private static void validate(Uri sliceUri) {
-        if (!ContentResolver.SCHEME_CONTENT.equals(sliceUri.getScheme())) {
-            throw new RuntimeException("Invalid uri " + sliceUri);
-        }
-        if (sliceUri.getPathSegments().size() == 0) {
-            throw new RuntimeException("Invalid uri " + sliceUri);
+    /**
+     * @return String representation of the provided mode.
+     * @hide
+     */
+    @RestrictTo(RestrictTo.Scope.LIBRARY)
+    public static String modeToString(@SliceMode int mode) {
+        switch(mode) {
+            case MODE_AUTO:
+                return "MODE AUTO";
+            case MODE_SHORTCUT:
+                return "MODE SHORTCUT";
+            case MODE_SMALL:
+                return "MODE SMALL";
+            case MODE_LARGE:
+                return "MODE LARGE";
+            default:
+                return "unknown mode: " + mode;
         }
     }
 }

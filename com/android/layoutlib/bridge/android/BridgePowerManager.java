@@ -117,16 +117,6 @@ public class BridgePowerManager implements IPowerManager {
     }
 
     @Override
-    public void setTemporaryScreenAutoBrightnessAdjustmentSettingOverride(float arg0) throws RemoteException {
-        // pass for now.
-    }
-
-    @Override
-    public void setTemporaryScreenBrightnessSettingOverride(int arg0) throws RemoteException {
-        // pass for now.
-    }
-
-    @Override
     public void setStayOnSetting(int arg0) throws RemoteException {
         // pass for now.
     }

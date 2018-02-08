@@ -26,11 +26,13 @@ import android.app.ActivityManager;
 import android.app.StatusBarManager;
 import android.content.Context;
 import android.content.res.Configuration;
+import android.graphics.Canvas;
 import android.graphics.Point;
 import android.graphics.Rect;
 import android.os.Handler;
 import android.os.Message;
 import android.os.RemoteException;
+import android.support.annotation.ColorInt;
 import android.util.AttributeSet;
 import android.util.Log;
 import android.util.SparseArray;
@@ -55,9 +57,11 @@ import com.android.systemui.plugins.PluginListener;
 import com.android.systemui.plugins.PluginManager;
 import com.android.systemui.plugins.statusbar.phone.NavGesture;
 import com.android.systemui.plugins.statusbar.phone.NavGesture.GestureHelper;
+import com.android.systemui.recents.SwipeUpOnboarding;
 import com.android.systemui.stackdivider.Divider;
 import com.android.systemui.statusbar.policy.DeadZone;
 import com.android.systemui.statusbar.policy.KeyButtonDrawable;
+import com.android.systemui.statusbar.policy.TintedKeyButtonDrawable;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
@@ -94,11 +98,13 @@ public class NavigationBarView extends FrameLayout implements PluginListener<Nav
     private KeyButtonDrawable mImeIcon;
     private KeyButtonDrawable mMenuIcon;
     private KeyButtonDrawable mAccessibilityIcon;
+    private KeyButtonDrawable mRotateSuggestionIcon;
 
     private GestureHelper mGestureHelper;
     private DeadZone mDeadZone;
     private final NavigationBarTransitions mBarTransitions;
     private final OverviewProxyService mOverviewProxyService;
+    private boolean mRecentsAnimationStarted;
 
     // workaround for LayoutTransitions leaving the nav buttons in a weird state (bug 5549288)
     final static boolean WORKAROUND_INVALID_LAYOUT = true;
@@ -120,6 +126,7 @@ public class NavigationBarView extends FrameLayout implements PluginListener<Nav
     private NavigationBarInflaterView mNavigationInflaterView;
     private RecentsComponent mRecentsComponent;
     private Divider mDivider;
+    private SwipeUpOnboarding mSwipeUpOnboarding;
 
     private class NavTransitionListener implements TransitionListener {
         private boolean mBackTransitioning;
@@ -199,8 +206,19 @@ public class NavigationBarView extends FrameLayout implements PluginListener<Nav
         }
     }
 
-    private final OverviewProxyListener mOverviewProxyListener =
-            isConnected -> setSlippery(!isConnected);
+    private final OverviewProxyListener mOverviewProxyListener = new OverviewProxyListener() {
+        @Override
+        public void onConnectionChanged(boolean isConnected) {
+            setSlippery(!isConnected);
+            setDisabledFlags(mDisabledFlags, true);
+            setUpSwipeUpOnboarding(isConnected);
+        }
+
+        @Override
+        public void onRecentsAnimationStarted() {
+            mRecentsAnimationStarted = true;
+        }
+    };
 
     public NavigationBarView(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -227,7 +245,11 @@ public class NavigationBarView extends FrameLayout implements PluginListener<Nav
         mButtonDispatchers.put(R.id.ime_switcher, new ButtonDispatcher(R.id.ime_switcher));
         mButtonDispatchers.put(R.id.accessibility_button,
                 new ButtonDispatcher(R.id.accessibility_button));
+        mButtonDispatchers.put(R.id.rotate_suggestion,
+                new ButtonDispatcher(R.id.rotate_suggestion));
+
         mOverviewProxyService = Dependency.get(OverviewProxyService.class);
+        mSwipeUpOnboarding = new SwipeUpOnboarding(context);
     }
 
     public BarTransitions getBarTransitions() {
@@ -257,12 +279,26 @@ public class NavigationBarView extends FrameLayout implements PluginListener<Nav
         if (mGestureHelper.onTouchEvent(event)) {
             return true;
         }
-        return super.onTouchEvent(event);
+        return mRecentsAnimationStarted || super.onTouchEvent(event);
     }
 
     @Override
     public boolean onInterceptTouchEvent(MotionEvent event) {
-        return mGestureHelper.onInterceptTouchEvent(event);
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+            mRecentsAnimationStarted = false;
+        } else if (action == MotionEvent.ACTION_UP) {
+            // If the overview proxy service has not started the recents animation then clean up
+            // after it to ensure that the nav bar buttons still work
+            if (mOverviewProxyService.getProxy() != null && !mRecentsAnimationStarted) {
+                try {
+                    ActivityManager.getService().cancelRecentsAnimation();
+                } catch (RemoteException e) {
+                    Log.e(TAG, "Could not cancel recents animation");
+                }
+            }
+        }
+        return mRecentsAnimationStarted || mGestureHelper.onInterceptTouchEvent(event);
     }
 
     public void abortCurrentGesture() {
@@ -301,6 +337,10 @@ public class NavigationBarView extends FrameLayout implements PluginListener<Nav
 
     public ButtonDispatcher getAccessibilityButton() {
         return mButtonDispatchers.get(R.id.accessibility_button);
+    }
+
+    public ButtonDispatcher getRotateSuggestionButton() {
+        return mButtonDispatchers.get(R.id.rotate_suggestion);
     }
 
     public SparseArray<ButtonDispatcher> getButtonDispatchers() {
@@ -347,6 +387,11 @@ public class NavigationBarView extends FrameLayout implements PluginListener<Nav
             mImeIcon = getDrawable(darkContext, lightContext,
                     R.drawable.ic_ime_switcher_default, R.drawable.ic_ime_switcher_default);
 
+            int lightColor = Utils.getColorAttr(lightContext, R.attr.singleToneColor);
+            int darkColor = Utils.getColorAttr(darkContext, R.attr.singleToneColor);
+            mRotateSuggestionIcon = getDrawable(ctx, R.drawable.ic_sysbar_rotate_button,
+                    lightColor, darkColor);
+
             if (ALTERNATE_CAR_MODE_UI) {
                 updateCarModeIcons(ctx);
             }
@@ -362,6 +407,11 @@ public class NavigationBarView extends FrameLayout implements PluginListener<Nav
             @DrawableRes int lightIcon, @DrawableRes int darkIcon) {
         return KeyButtonDrawable.create(lightContext.getDrawable(lightIcon),
                 darkContext.getDrawable(darkIcon));
+    }
+
+    private KeyButtonDrawable getDrawable(Context ctx, @DrawableRes int icon,
+            @ColorInt int lightColor, @ColorInt int darkColor) {
+        return TintedKeyButtonDrawable.create(ctx.getDrawable(icon), lightColor, darkColor);
     }
 
     @Override
@@ -436,6 +486,8 @@ public class NavigationBarView extends FrameLayout implements PluginListener<Nav
 
         setAccessibilityButtonState(mShowAccessibilityButton, mLongClickableAccessibilityButton);
         getAccessibilityButton().setImageDrawable(mAccessibilityIcon);
+
+        getRotateSuggestionButton().setImageDrawable(mRotateSuggestionIcon);
 
         setDisabledFlags(mDisabledFlags, true);
 
@@ -601,6 +653,27 @@ public class NavigationBarView extends FrameLayout implements PluginListener<Nav
         updateRotatedViews();
     }
 
+    public void onDarkIntensityChange(float intensity) {
+        if (mGestureHelper != null) {
+            mGestureHelper.onDarkIntensityChange(intensity);
+        }
+        if (mSwipeUpOnboarding != null) {
+            mSwipeUpOnboarding.setContentDarkIntensity(intensity);
+        }
+    }
+
+    @Override
+    protected void onDraw(Canvas canvas) {
+        mGestureHelper.onDraw(canvas);
+        super.onDraw(canvas);
+    }
+
+    @Override
+    protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
+        super.onLayout(changed, left, top, right, bottom);
+        mGestureHelper.onLayout(changed, left, top, right, bottom);
+    }
+
     private void updateRotatedViews() {
         mRotatedViews[Surface.ROTATION_0] =
                 mRotatedViews[Surface.ROTATION_180] = findViewById(R.id.rot0);
@@ -697,6 +770,7 @@ public class NavigationBarView extends FrameLayout implements PluginListener<Nav
         updateTaskSwitchHelper();
         updateIcons(getContext(), mConfiguration, newConfig);
         updateRecentsIcon();
+        mSwipeUpOnboarding.onConfigurationChanged(newConfig);
         if (uiCarModeChanged || mConfiguration.densityDpi != newConfig.densityDpi
                 || mConfiguration.getLayoutDirection() != newConfig.getLayoutDirection()) {
             // If car mode or density changes, we need to reset the icons.
@@ -786,6 +860,7 @@ public class NavigationBarView extends FrameLayout implements PluginListener<Nav
         Dependency.get(PluginManager.class).addPluginListener(this,
                 NavGesture.class, false /* Only one */);
         mOverviewProxyService.addCallback(mOverviewProxyListener);
+        setUpSwipeUpOnboarding(mOverviewProxyService.getProxy() != null);
     }
 
     @Override
@@ -796,6 +871,15 @@ public class NavigationBarView extends FrameLayout implements PluginListener<Nav
             mGestureHelper.destroy();
         }
         mOverviewProxyService.removeCallback(mOverviewProxyListener);
+        setUpSwipeUpOnboarding(false);
+    }
+
+    private void setUpSwipeUpOnboarding(boolean connectedToOverviewProxy) {
+        if (connectedToOverviewProxy) {
+            mSwipeUpOnboarding.onConnectedToLauncher(mOverviewProxyService.getLauncherComponent());
+        } else {
+            mSwipeUpOnboarding.onDisconnectedFromLauncher();
+        }
     }
 
     @Override

@@ -17,10 +17,12 @@
 package com.android.server.pm;
 
 import static android.content.pm.PackageManager.INSTALL_FAILED_ABORTED;
+import static android.content.pm.PackageManager.INSTALL_FAILED_BAD_DEX_METADATA;
 import static android.content.pm.PackageManager.INSTALL_FAILED_CONTAINER_ERROR;
 import static android.content.pm.PackageManager.INSTALL_FAILED_INSUFFICIENT_STORAGE;
 import static android.content.pm.PackageManager.INSTALL_FAILED_INTERNAL_ERROR;
 import static android.content.pm.PackageManager.INSTALL_FAILED_INVALID_APK;
+import static android.content.pm.PackageParser.APK_FILE_EXTENSION;
 import static android.system.OsConstants.O_CREAT;
 import static android.system.OsConstants.O_RDONLY;
 import static android.system.OsConstants.O_WRONLY;
@@ -58,7 +60,6 @@ import android.content.pm.PackageParser;
 import android.content.pm.PackageParser.ApkLite;
 import android.content.pm.PackageParser.PackageLite;
 import android.content.pm.PackageParser.PackageParserException;
-import android.content.pm.Signature;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.os.Binder;
@@ -84,6 +85,7 @@ import android.util.ArraySet;
 import android.util.ExceptionUtils;
 import android.util.MathUtils;
 import android.util.Slog;
+import android.util.apk.ApkSignatureVerifier;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.content.NativeLibraryHelper;
@@ -96,6 +98,7 @@ import com.android.server.LocalServices;
 import com.android.server.pm.Installer.InstallerException;
 import com.android.server.pm.PackageInstallerService.PackageInstallObserverAdapter;
 
+import android.content.pm.dex.DexMetadataHelper;
 import libcore.io.IoUtils;
 
 import org.xmlpull.v1.XmlPullParser;
@@ -107,7 +110,7 @@ import java.io.FileDescriptor;
 import java.io.FileFilter;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.security.cert.Certificate;
+import java.security.cert.CertificateException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -227,9 +230,7 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
     @GuardedBy("mLock")
     private long mVersionCode;
     @GuardedBy("mLock")
-    private Signature[] mSignatures;
-    @GuardedBy("mLock")
-    private Certificate[][] mCertificates;
+    private PackageParser.SigningDetails mSigningDetails;
 
     /**
      * Path to the validated base APK for this session, which may point at an
@@ -261,6 +262,7 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
             // entries like "lost+found".
             if (file.isDirectory()) return false;
             if (file.getName().endsWith(REMOVE_SPLIT_MARKER_EXTENSION)) return false;
+            if (DexMetadataHelper.isDexMetadataFile(file)) return false;
             return true;
         }
     };
@@ -342,17 +344,22 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
         final boolean isSelfUpdatePermissionGranted =
                 (mPm.checkUidPermission(android.Manifest.permission.INSTALL_SELF_UPDATES,
                         mInstallerUid) == PackageManager.PERMISSION_GRANTED);
+        final boolean isUpdatePermissionGranted =
+                (mPm.checkUidPermission(android.Manifest.permission.INSTALL_PACKAGE_UPDATES,
+                        mInstallerUid) == PackageManager.PERMISSION_GRANTED);
+        final int targetPackageUid = mPm.getPackageUid(mPackageName, 0, userId);
         final boolean isPermissionGranted = isInstallPermissionGranted
-                || (isSelfUpdatePermissionGranted
-                    && mPm.getPackageUid(mPackageName, 0, userId) == mInstallerUid);
+                || (isUpdatePermissionGranted && targetPackageUid != -1)
+                || (isSelfUpdatePermissionGranted && targetPackageUid == mInstallerUid);
         final boolean isInstallerRoot = (mInstallerUid == Process.ROOT_UID);
+        final boolean isInstallerSystem = (mInstallerUid == Process.SYSTEM_UID);
         final boolean forcePermissionPrompt =
                 (params.installFlags & PackageManager.INSTALL_FORCE_PERMISSION_PROMPT) != 0;
 
         // Device owners and affiliated profile owners  are allowed to silently install packages, so
         // the permission check is waived if the installer is the device owner.
         return forcePermissionPrompt || !(isPermissionGranted || isInstallerRoot
-                || isInstallerDeviceOwnerOrAffiliatedProfileOwnerLocked());
+                || isInstallerSystem || isInstallerDeviceOwnerOrAffiliatedProfileOwnerLocked());
     }
 
     public PackageInstallerSession(PackageInstallerService.InternalCallback callback,
@@ -856,7 +863,7 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
         }
 
         Preconditions.checkNotNull(mPackageName);
-        Preconditions.checkNotNull(mSignatures);
+        Preconditions.checkNotNull(mSigningDetails);
         Preconditions.checkNotNull(mResolvedBaseFile);
 
         if (needToAskForPermissionsLocked()) {
@@ -937,7 +944,16 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
 
         mRelinquished = true;
         mPm.installStage(mPackageName, stageDir, localObserver, params,
-                mInstallerPackageName, mInstallerUid, user, mCertificates);
+                mInstallerPackageName, mInstallerUid, user, mSigningDetails);
+    }
+
+    private static void maybeRenameFile(File from, File to) throws PackageManagerException {
+        if (!from.equals(to)) {
+            if (!from.renameTo(to)) {
+                throw new PackageManagerException(INSTALL_FAILED_INTERNAL_ERROR,
+                        "Could not rename file " + from + " to " + to);
+            }
+        }
     }
 
     /**
@@ -956,7 +972,7 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
             throws PackageManagerException {
         mPackageName = null;
         mVersionCode = -1;
-        mSignatures = null;
+        mSigningDetails = PackageParser.SigningDetails.UNKNOWN;
 
         mResolvedBaseFile = null;
         mResolvedStagedFiles.clear();
@@ -984,16 +1000,14 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
         if (ArrayUtils.isEmpty(addedFiles) && removeSplitList.size() == 0) {
             throw new PackageManagerException(INSTALL_FAILED_INVALID_APK, "No packages staged");
         }
+
         // Verify that all staged packages are internally consistent
         final ArraySet<String> stagedSplits = new ArraySet<>();
         for (File addedFile : addedFiles) {
             final ApkLite apk;
             try {
-                int flags = PackageParser.PARSE_COLLECT_CERTIFICATES;
-                if ((params.installFlags & PackageManager.INSTALL_INSTANT_APP) != 0) {
-                    flags |= PackageParser.PARSE_IS_EPHEMERAL;
-                }
-                apk = PackageParser.parseApkLite(addedFile, flags);
+                apk = PackageParser.parseApkLite(
+                        addedFile, PackageParser.PARSE_COLLECT_CERTIFICATES);
             } catch (PackageParserException e) {
                 throw PackageManagerException.from(e);
             }
@@ -1008,9 +1022,8 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
                 mPackageName = apk.packageName;
                 mVersionCode = apk.getLongVersionCode();
             }
-            if (mSignatures == null) {
-                mSignatures = apk.signatures;
-                mCertificates = apk.certificates;
+            if (mSigningDetails == PackageParser.SigningDetails.UNKNOWN) {
+                mSigningDetails = apk.signingDetails;
             }
 
             assertApkConsistentLocked(String.valueOf(addedFile), apk);
@@ -1018,9 +1031,9 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
             // Take this opportunity to enforce uniform naming
             final String targetName;
             if (apk.splitName == null) {
-                targetName = "base.apk";
+                targetName = "base" + APK_FILE_EXTENSION;
             } else {
-                targetName = "split_" + apk.splitName + ".apk";
+                targetName = "split_" + apk.splitName + APK_FILE_EXTENSION;
             }
             if (!FileUtils.isValidExtFilename(targetName)) {
                 throw new PackageManagerException(INSTALL_FAILED_INVALID_APK,
@@ -1028,9 +1041,7 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
             }
 
             final File targetFile = new File(mResolvedStageDir, targetName);
-            if (!addedFile.equals(targetFile)) {
-                addedFile.renameTo(targetFile);
-            }
+            maybeRenameFile(addedFile, targetFile);
 
             // Base is coming from session
             if (apk.splitName == null) {
@@ -1038,6 +1049,18 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
             }
 
             mResolvedStagedFiles.add(targetFile);
+
+            final File dexMetadataFile = DexMetadataHelper.findDexMetadataForFile(addedFile);
+            if (dexMetadataFile != null) {
+                if (!FileUtils.isValidExtFilename(dexMetadataFile.getName())) {
+                    throw new PackageManagerException(INSTALL_FAILED_INVALID_APK,
+                            "Invalid filename: " + dexMetadataFile);
+                }
+                final File targetDexMetadataFile = new File(mResolvedStageDir,
+                        DexMetadataHelper.buildDexMetadataPathForApk(targetName));
+                mResolvedStagedFiles.add(targetDexMetadataFile);
+                maybeRenameFile(dexMetadataFile, targetDexMetadataFile);
+            }
         }
 
         if (removeSplitList.size() > 0) {
@@ -1059,8 +1082,15 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
                 mPackageName = pkgInfo.packageName;
                 mVersionCode = pkgInfo.getLongVersionCode();
             }
-            if (mSignatures == null) {
-                mSignatures = pkgInfo.signatures;
+            if (mSigningDetails == PackageParser.SigningDetails.UNKNOWN) {
+                try {
+                    mSigningDetails = ApkSignatureVerifier.plsCertsNoVerifyOnlyCerts(
+                            pkgInfo.applicationInfo.sourceDir,
+                            PackageParser.SigningDetails.SignatureSchemeVersion.JAR);
+                } catch (PackageParserException e) {
+                    throw new PackageManagerException(INSTALL_FAILED_INVALID_APK,
+                            "Couldn't obtain signatures from base APK");
+                }
             }
         }
 
@@ -1095,6 +1125,12 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
             if (mResolvedBaseFile == null) {
                 mResolvedBaseFile = new File(appInfo.getBaseCodePath());
                 mResolvedInheritedFiles.add(mResolvedBaseFile);
+                // Inherit the dex metadata if present.
+                final File baseDexMetadataFile =
+                        DexMetadataHelper.findDexMetadataForFile(mResolvedBaseFile);
+                if (baseDexMetadataFile != null) {
+                    mResolvedInheritedFiles.add(baseDexMetadataFile);
+                }
             }
 
             // Inherit splits if not overridden
@@ -1105,6 +1141,12 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
                     final boolean splitRemoved = removeSplitList.contains(splitName);
                     if (!stagedSplits.contains(splitName) && !splitRemoved) {
                         mResolvedInheritedFiles.add(splitFile);
+                        // Inherit the dex metadata if present.
+                        final File splitDexMetadataFile =
+                                DexMetadataHelper.findDexMetadataForFile(splitFile);
+                        if (splitDexMetadataFile != null) {
+                            mResolvedInheritedFiles.add(splitDexMetadataFile);
+                        }
                     }
                 }
             }
@@ -1154,46 +1196,9 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
                     + " version code " + apk.versionCode + " inconsistent with "
                     + mVersionCode);
         }
-        if (!Signature.areExactMatch(mSignatures, apk.signatures)) {
+        if (!mSigningDetails.signaturesMatchExactly(apk.signingDetails)) {
             throw new PackageManagerException(INSTALL_FAILED_INVALID_APK,
                     tag + " signatures are inconsistent");
-        }
-    }
-
-    /**
-     * Calculate the final install footprint size, combining both staged and
-     * existing APKs together and including unpacked native code from both.
-     */
-    private long calculateInstalledSize() throws PackageManagerException {
-        Preconditions.checkNotNull(mResolvedBaseFile);
-
-        final ApkLite baseApk;
-        try {
-            baseApk = PackageParser.parseApkLite(mResolvedBaseFile, 0);
-        } catch (PackageParserException e) {
-            throw PackageManagerException.from(e);
-        }
-
-        final List<String> splitPaths = new ArrayList<>();
-        for (File file : mResolvedStagedFiles) {
-            if (mResolvedBaseFile.equals(file)) continue;
-            splitPaths.add(file.getAbsolutePath());
-        }
-        for (File file : mResolvedInheritedFiles) {
-            if (mResolvedBaseFile.equals(file)) continue;
-            splitPaths.add(file.getAbsolutePath());
-        }
-
-        // This is kind of hacky; we're creating a half-parsed package that is
-        // straddled between the inherited and staged APKs.
-        final PackageLite pkg = new PackageLite(null, baseApk, null, null, null, null,
-                splitPaths.toArray(new String[splitPaths.size()]), null);
-
-        try {
-            return PackageHelper.calculateInstalledSize(pkg, params.abiOverride);
-        } catch (IOException e) {
-            throw new PackageManagerException(INSTALL_FAILED_INVALID_APK,
-                    "Failed to calculate install size", e);
         }
     }
 

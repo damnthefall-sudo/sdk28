@@ -17,6 +17,8 @@
 package com.android.server.display;
 
 import android.annotation.Nullable;
+import android.content.res.Resources;
+import android.content.res.TypedArray;
 import android.hardware.display.BrightnessConfiguration;
 import android.os.PowerManager;
 import android.util.MathUtils;
@@ -28,6 +30,7 @@ import com.android.internal.util.Preconditions;
 import com.android.internal.annotations.VisibleForTesting;
 
 import java.io.PrintWriter;
+import java.util.Arrays;
 
 /**
  * A utility to map from an ambient brightness to a display's "backlight" brightness based on the
@@ -40,12 +43,34 @@ public abstract class BrightnessMappingStrategy {
     private static final String TAG = "BrightnessMappingStrategy";
     private static final boolean DEBUG = false;
 
+    private static final float LUX_GRAD_SMOOTHING = 0.25f;
+    private static final float MAX_GRAD = 1.0f;
+
     @Nullable
-    public static BrightnessMappingStrategy create(
-            float[] luxLevels, int[] brightnessLevelsBacklight, float[] brightnessLevelsNits,
-            float[] nitsRange, int[] backlightRange) {
+    public static BrightnessMappingStrategy create(Resources resources) {
+        float[] luxLevels = getLuxLevels(resources.getIntArray(
+                com.android.internal.R.array.config_autoBrightnessLevels));
+        int[] brightnessLevelsBacklight = resources.getIntArray(
+                com.android.internal.R.array.config_autoBrightnessLcdBacklightValues);
+        float[] brightnessLevelsNits = getFloatArray(resources.obtainTypedArray(
+                com.android.internal.R.array.config_autoBrightnessDisplayValuesNits));
+
+        float[] nitsRange = getFloatArray(resources.obtainTypedArray(
+                com.android.internal.R.array.config_screenBrightnessNits));
+        int[] backlightRange = resources.getIntArray(
+                com.android.internal.R.array.config_screenBrightnessBacklight);
+
         if (isValidMapping(nitsRange, backlightRange)
                 && isValidMapping(luxLevels, brightnessLevelsNits)) {
+            int minimumBacklight = resources.getInteger(
+                    com.android.internal.R.integer.config_screenBrightnessSettingMinimum);
+            int maximumBacklight = resources.getInteger(
+                    com.android.internal.R.integer.config_screenBrightnessSettingMaximum);
+            if (backlightRange[0] > minimumBacklight
+                    || backlightRange[backlightRange.length - 1] < maximumBacklight) {
+                Slog.w(TAG, "Screen brightness mapping does not cover whole range of available"
+                        + " backlight values, autobrightness functionality may be impaired.");
+            }
             BrightnessConfiguration.Builder builder = new BrightnessConfiguration.Builder();
             builder.setCurve(luxLevels, brightnessLevelsNits);
             return new PhysicalMappingStrategy(builder.build(), nitsRange, backlightRange);
@@ -54,6 +79,25 @@ public abstract class BrightnessMappingStrategy {
         } else {
             return null;
         }
+    }
+
+    private static float[] getLuxLevels(int[] lux) {
+        // The first control point is implicit and always at 0 lux.
+        float[] levels = new float[lux.length + 1];
+        for (int i = 0; i < lux.length; i++) {
+            levels[i + 1] = (float) lux[i];
+        }
+        return levels;
+    }
+
+    private static float[] getFloatArray(TypedArray array) {
+        final int N = array.length();
+        float[] vals = new float[N];
+        for (int i = 0; i < N; i++) {
+            vals[i] = array.getFloat(i, -1.0f);
+        }
+        array.recycle();
+        return vals;
     }
 
     private static boolean isValidMapping(float[] x, float[] y) {
@@ -124,9 +168,37 @@ public abstract class BrightnessMappingStrategy {
      * brightness and 0 is the display at minimum brightness.
      *
      * @param lux The current ambient brightness in lux.
-     * @return The desired brightness of the display compressed to the range [0, 1.0].
+     * @return The desired brightness of the display normalized to the range [0, 1.0].
      */
     public abstract float getBrightness(float lux);
+
+    /**
+     * Converts the provided backlight value to nits if possible.
+     *
+     * Returns -1.0f if there's no available mapping for the backlight to nits.
+     */
+    public abstract float convertToNits(int backlight);
+
+    /**
+     * Adds a user interaction data point to the brightness mapping.
+     *
+     * This data point <b>must</b> exist on the brightness curve as a result of this call. This is
+     * so that the next time we come to query what the screen brightness should be, we get what the
+     * user requested rather than immediately changing to some other value.
+     *
+     * Currently, we only keep track of one of these at a time to constrain what can happen to the
+     * curve.
+     */
+    public abstract void addUserDataPoint(float lux, float brightness);
+
+    /**
+     * Removes any short term adjustments made to the curve from user interactions.
+     *
+     * Note that this does *not* reset the mapping to its initial state, any brightness
+     * configurations that have been applied will continue to be in effect. This solely removes the
+     * effects of user interactions on the model.
+     */
+    public abstract void clearUserDataPoints();
 
     public abstract void dump(PrintWriter pw);
 
@@ -136,6 +208,112 @@ public abstract class BrightnessMappingStrategy {
         return (float) brightness / PowerManager.BRIGHTNESS_ON;
     }
 
+    private static Spline createSpline(float[] x, float[] y) {
+        Spline spline = Spline.createSpline(x, y);
+        if (DEBUG) {
+            Slog.d(TAG, "Spline: " + spline);
+            for (float v = 1f; v < x[x.length - 1] * 1.25f; v *= 1.25f) {
+                Slog.d(TAG, String.format("  %7.1f: %7.1f", v, spline.interpolate(v)));
+            }
+        }
+        return spline;
+    }
+
+    private static Pair<float[], float[]> insertControlPoint(
+            float[] luxLevels, float[] brightnessLevels, float lux, float brightness) {
+        if (DEBUG) {
+            Slog.d(TAG, "Inserting new control point at (" + lux + ", " + brightness + ")");
+        }
+        final int idx = findInsertionPoint(luxLevels, lux);
+        final float[] newLuxLevels;
+        final float[] newBrightnessLevels;
+        if (idx == luxLevels.length) {
+            newLuxLevels = Arrays.copyOf(luxLevels, luxLevels.length + 1);
+            newBrightnessLevels  = Arrays.copyOf(brightnessLevels, brightnessLevels.length + 1);
+            newLuxLevels[idx] = lux;
+            newBrightnessLevels[idx] = brightness;
+        } else if (luxLevels[idx] == lux) {
+            newLuxLevels = Arrays.copyOf(luxLevels, luxLevels.length);
+            newBrightnessLevels = Arrays.copyOf(brightnessLevels, brightnessLevels.length);
+            newBrightnessLevels[idx] = brightness;
+        } else {
+            newLuxLevels = Arrays.copyOf(luxLevels, luxLevels.length + 1);
+            System.arraycopy(newLuxLevels, idx, newLuxLevels, idx+1, luxLevels.length - idx);
+            newLuxLevels[idx] = lux;
+            newBrightnessLevels  = Arrays.copyOf(brightnessLevels, brightnessLevels.length + 1);
+            System.arraycopy(newBrightnessLevels, idx, newBrightnessLevels, idx+1,
+                    brightnessLevels.length - idx);
+            newBrightnessLevels[idx] = brightness;
+        }
+        smoothCurve(newLuxLevels, newBrightnessLevels, idx);
+        return Pair.create(newLuxLevels, newBrightnessLevels);
+    }
+
+    /**
+     * Returns the index of the first value that's less than or equal to {@code val}.
+     *
+     * This assumes that {@code arr} is sorted. If all values in {@code arr} are greater
+     * than val, then it will return the length of arr as the insertion point.
+     */
+    private static int findInsertionPoint(float[] arr, float val) {
+        for (int i = 0; i < arr.length; i++) {
+            if (val <= arr[i]) {
+                return i;
+            }
+        }
+        return arr.length;
+    }
+
+    private static void smoothCurve(float[] lux, float[] brightness, int idx) {
+        if (DEBUG) {
+            Slog.d(TAG, "smoothCurve(lux=" + Arrays.toString(lux)
+                    + ", brightness=" + Arrays.toString(brightness)
+                    + ", idx=" + idx + ")");
+        }
+        float prevLux = lux[idx];
+        float prevBrightness = brightness[idx];
+        // Smooth curve for data points above the newly introduced point
+        for (int i = idx+1; i < lux.length; i++) {
+            float currLux = lux[i];
+            float currBrightness = brightness[i];
+            float maxBrightness = prevBrightness * permissibleRatio(currLux, prevLux);
+            float newBrightness = MathUtils.constrain(
+                    currBrightness, prevBrightness, maxBrightness);
+            if (newBrightness == currBrightness) {
+                break;
+            }
+            prevLux = currLux;
+            prevBrightness = newBrightness;
+            brightness[i] = newBrightness;
+        }
+
+        // Smooth curve for data points below the newly introduced point
+        prevLux = lux[idx];
+        prevBrightness = brightness[idx];
+        for (int i = idx-1; i >= 0; i--) {
+            float currLux = lux[i];
+            float currBrightness = brightness[i];
+            float minBrightness = prevBrightness * permissibleRatio(currLux, prevLux);
+            float newBrightness = MathUtils.constrain(
+                    currBrightness, minBrightness, prevBrightness);
+            if (newBrightness == currBrightness) {
+                break;
+            }
+            prevLux = currLux;
+            prevBrightness = newBrightness;
+            brightness[i] = newBrightness;
+        }
+        if (DEBUG) {
+            Slog.d(TAG, "Smoothed Curve: lux=" + Arrays.toString(lux)
+                    + ", brightness=" + Arrays.toString(brightness));
+        }
+    }
+
+    private static float permissibleRatio(float currLux, float prevLux) {
+        return MathUtils.exp(MAX_GRAD
+                * (MathUtils.log(currLux + LUX_GRAD_SMOOTHING)
+                    - MathUtils.log(prevLux + LUX_GRAD_SMOOTHING)));
+    }
 
     /**
      * A {@link BrightnessMappingStrategy} that maps from ambient room brightness directly to the
@@ -145,7 +323,14 @@ public abstract class BrightnessMappingStrategy {
      * configurations that are set are just ignored.
      */
     private static class SimpleMappingStrategy extends BrightnessMappingStrategy {
-        private final Spline mSpline;
+        // Lux control points
+        private final float[] mLux;
+        // Brightness control points normalized to [0, 1]
+        private final float[] mBrightness;
+
+        private Spline mSpline;
+        private float mUserLux;
+        private float mUserBrightness;
 
         public SimpleMappingStrategy(float[] lux, int[] brightness) {
             Preconditions.checkArgument(lux.length != 0 && brightness.length != 0,
@@ -157,26 +342,20 @@ public abstract class BrightnessMappingStrategy {
                     0, Integer.MAX_VALUE, "brightness");
 
             final int N = brightness.length;
-            float[] x = new float[N];
-            float[] y = new float[N];
+            mLux = new float[N];
+            mBrightness = new float[N];
             for (int i = 0; i < N; i++) {
-                x[i] = lux[i];
-                y[i] = normalizeAbsoluteBrightness(brightness[i]);
+                mLux[i] = lux[i];
+                mBrightness[i] = normalizeAbsoluteBrightness(brightness[i]);
             }
 
-            mSpline = Spline.createSpline(x, y);
-            if (DEBUG) {
-                Slog.d(TAG, "Auto-brightness spline: " + mSpline);
-                for (float v = 1f; v < lux[lux.length - 1] * 1.25f; v *= 1.25f) {
-                    Slog.d(TAG, String.format("  %7.1f: %7.1f", v, mSpline.interpolate(v)));
-                }
-            }
+            mSpline = createSpline(mLux, mBrightness);
+            mUserLux = -1;
+            mUserBrightness = -1;
         }
 
         @Override
         public boolean setBrightnessConfiguration(@Nullable BrightnessConfiguration config) {
-            Slog.e(TAG,
-                    "setBrightnessConfiguration called on device without display information.");
             return false;
         }
 
@@ -186,9 +365,36 @@ public abstract class BrightnessMappingStrategy {
         }
 
         @Override
+        public float convertToNits(int backlight) {
+            return -1.0f;
+        }
+
+        @Override
+        public void addUserDataPoint(float lux, float brightness) {
+            if (DEBUG){
+                Slog.d(TAG, "addUserDataPoint(lux=" + lux + ", brightness=" + brightness + ")");
+            }
+            Pair<float[], float[]> curve = insertControlPoint(mLux, mBrightness, lux, brightness);
+            mSpline = createSpline(curve.first, curve.second);
+            mUserLux = lux;
+            mUserBrightness = brightness;
+        }
+
+        @Override
+        public void clearUserDataPoints() {
+            if (mUserLux != -1) {
+                mSpline = createSpline(mLux, mBrightness);
+                mUserLux = -1;
+                mUserBrightness = -1;
+            }
+        }
+
+        @Override
         public void dump(PrintWriter pw) {
             pw.println("SimpleMappingStrategy");
             pw.println("  mSpline=" + mSpline);
+            pw.println("  mUserLux=" + mUserLux);
+            pw.println("  mUserBrightness=" + mUserBrightness);
         }
     }
 
@@ -209,10 +415,17 @@ public abstract class BrightnessMappingStrategy {
 
         // A spline mapping from nits to the corresponding backlight value, normalized to the range
         // [0, 1.0].
-        private final Spline mBacklightSpline;
+        private final Spline mNitsToBacklightSpline;
 
         // The default brightness configuration.
         private final BrightnessConfiguration mDefaultConfig;
+
+        // A spline mapping from the device's backlight value, normalized to the range [0, 1.0], to
+        // a brightness in nits.
+        private Spline mBacklightToNitsSpline;
+
+        private float mUserLux;
+        private float mUserBrightness;
 
         public PhysicalMappingStrategy(BrightnessConfiguration config,
                 float[] nits, int[] backlight) {
@@ -225,23 +438,18 @@ public abstract class BrightnessMappingStrategy {
             Preconditions.checkArrayElementsInRange(backlight,
                     PowerManager.BRIGHTNESS_OFF, PowerManager.BRIGHTNESS_ON, "backlight");
 
+            mUserLux = -1;
+            mUserBrightness = -1;
+
             // Setup the backlight spline
             final int N = nits.length;
-            float[] x = new float[N];
-            float[] y = new float[N];
+            float[] normalizedBacklight = new float[N];
             for (int i = 0; i < N; i++) {
-                x[i] = nits[i];
-                y[i] = normalizeAbsoluteBrightness(backlight[i]);
+                normalizedBacklight[i] = normalizeAbsoluteBrightness(backlight[i]);
             }
 
-            mBacklightSpline = Spline.createSpline(x, y);
-            if (DEBUG) {
-                Slog.d(TAG, "Backlight spline: " + mBacklightSpline);
-                for (float v = 1f; v < nits[nits.length - 1] * 1.25f; v *= 1.25f) {
-                    Slog.d(TAG, String.format(
-                                "  %7.1f: %7.1f", v, mBacklightSpline.interpolate(v)));
-                }
-            }
+            mNitsToBacklightSpline = createSpline(nits, normalizedBacklight);
+            mBacklightToNitsSpline = createSpline(normalizedBacklight, nits);
 
             mDefaultConfig = config;
             setBrightnessConfiguration(config);
@@ -253,29 +461,49 @@ public abstract class BrightnessMappingStrategy {
                 config = mDefaultConfig;
             }
             if (config.equals(mConfig)) {
-                if (DEBUG) {
-                    Slog.d(TAG, "Tried to set an identical brightness config, ignoring");
-                }
                 return false;
             }
 
             Pair<float[], float[]> curve = config.getCurve();
-            mBrightnessSpline = Spline.createSpline(curve.first /*lux*/, curve.second /*nits*/);
-            if (DEBUG) {
-                Slog.d(TAG, "Brightness spline: " + mBrightnessSpline);
-                final float[] lux = curve.first;
-                for (float v = 1f; v < lux[lux.length - 1] * 1.25f; v *= 1.25f) {
-                    Slog.d(TAG, String.format(
-                                "  %7.1f: %7.1f", v, mBrightnessSpline.interpolate(v)));
-                }
-            }
+            mBrightnessSpline = createSpline(curve.first /*lux*/, curve.second /*nits*/);
             mConfig = config;
             return true;
         }
 
         @Override
         public float getBrightness(float lux) {
-            return mBacklightSpline.interpolate(mBrightnessSpline.interpolate(lux));
+            float nits = mBrightnessSpline.interpolate(lux);
+            float backlight = mNitsToBacklightSpline.interpolate(nits);
+            return backlight;
+        }
+
+        @Override
+        public float convertToNits(int backlight) {
+            return mBacklightToNitsSpline.interpolate(normalizeAbsoluteBrightness(backlight));
+        }
+
+        @Override
+        public void addUserDataPoint(float lux, float backlight) {
+            if (DEBUG){
+                Slog.d(TAG, "addUserDataPoint(lux=" + lux + ", backlight=" + backlight + ")");
+            }
+            float brightness = mBacklightToNitsSpline.interpolate(backlight);
+            Pair<float[], float[]> defaultCurve = mConfig.getCurve();
+            Pair<float[], float[]> newCurve =
+                    insertControlPoint(defaultCurve.first, defaultCurve.second, lux, brightness);
+            mBrightnessSpline = createSpline(newCurve.first, newCurve.second);
+            mUserLux = lux;
+            mUserBrightness = brightness;
+        }
+
+        @Override
+        public void clearUserDataPoints() {
+            if (mUserLux != -1) {
+                Pair<float[], float[]> defaultCurve = mConfig.getCurve();
+                mBrightnessSpline = createSpline(defaultCurve.first, defaultCurve.second);
+                mUserLux = -1;
+                mUserBrightness = -1;
+            }
         }
 
         @Override
@@ -283,7 +511,9 @@ public abstract class BrightnessMappingStrategy {
             pw.println("PhysicalMappingStrategy");
             pw.println("  mConfig=" + mConfig);
             pw.println("  mBrightnessSpline=" + mBrightnessSpline);
-            pw.println("  mBacklightSpline=" + mBacklightSpline);
+            pw.println("  mNitsToBacklightSpline=" + mNitsToBacklightSpline);
+            pw.println("  mUserLux=" + mUserLux);
+            pw.println("  mUserBrightness=" + mUserBrightness);
         }
     }
 }

@@ -17,20 +17,20 @@
 package com.android.server.backup.transport;
 
 import static com.android.server.backup.TransportManager.SERVICE_ACTION_TRANSPORT_HOST;
+import static com.android.server.backup.transport.TransportUtils.formatMessage;
 
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.util.Log;
-
-import com.android.internal.backup.IBackupTransport;
 import com.android.server.backup.TransportManager;
+import java.io.PrintWriter;
+import java.util.Map;
+import java.util.WeakHashMap;
 
 /**
  * Manages the creation and disposal of {@link TransportClient}s. The only class that should use
  * this is {@link TransportManager}, all the other usages should go to {@link TransportManager}.
- *
- * <p>TODO(brufino): Implement pool of TransportClients
  */
 public class TransportClientManager {
     private static final String TAG = "TransportClientManager";
@@ -38,6 +38,7 @@ public class TransportClientManager {
     private final Context mContext;
     private final Object mTransportClientsLock = new Object();
     private int mTransportClientsCreated = 0;
+    private Map<TransportClient, String> mTransportClientsCallerMap = new WeakHashMap<>();
 
     public TransportClientManager(Context context) {
         mContext = context;
@@ -48,17 +49,12 @@ public class TransportClientManager {
      * transportComponent}.
      *
      * @param transportComponent The {@link ComponentName} of the transport.
-     * @param transportDirName The {@link String} returned by
-     *     {@link IBackupTransport#transportDirName()} at registration.
      * @param caller A {@link String} identifying the caller for logging/debugging purposes. Check
      *     {@link TransportClient#connectAsync(TransportConnectionListener, String)} for more
      *     details.
      * @return A {@link TransportClient}.
      */
-    public TransportClient getTransportClient(
-            ComponentName transportComponent,
-            String transportDirName,
-            String caller) {
+    public TransportClient getTransportClient(ComponentName transportComponent, String caller) {
         Intent bindIntent =
                 new Intent(SERVICE_ACTION_TRANSPORT_HOST).setComponent(transportComponent);
         synchronized (mTransportClientsLock) {
@@ -67,10 +63,11 @@ public class TransportClientManager {
                             mContext,
                             bindIntent,
                             transportComponent,
-                            transportDirName,
                             Integer.toString(mTransportClientsCreated));
+            mTransportClientsCallerMap.put(transportClient, caller);
             mTransportClientsCreated++;
-            TransportUtils.log(Log.DEBUG, TAG, caller, "Retrieving " + transportClient);
+            TransportUtils.log(
+                    Log.DEBUG, TAG, formatMessage(null, caller, "Retrieving " + transportClient));
             return transportClient;
         }
     }
@@ -84,7 +81,25 @@ public class TransportClientManager {
      *     details.
      */
     public void disposeOfTransportClient(TransportClient transportClient, String caller) {
-        TransportUtils.log(Log.DEBUG, TAG, caller, "Disposing of " + transportClient);
         transportClient.unbind(caller);
+        synchronized (mTransportClientsLock) {
+            TransportUtils.log(
+                    Log.DEBUG, TAG, formatMessage(null, caller, "Disposing of " + transportClient));
+            mTransportClientsCallerMap.remove(transportClient);
+        }
+    }
+
+    public void dump(PrintWriter pw) {
+        pw.println("Transport clients created: " + mTransportClientsCreated);
+        synchronized (mTransportClientsLock) {
+            pw.println("Current transport clients: " + mTransportClientsCallerMap.size());
+            for (TransportClient transportClient : mTransportClientsCallerMap.keySet()) {
+                String caller = mTransportClientsCallerMap.get(transportClient);
+                pw.println("    " + transportClient + " [" + caller + "]");
+                for (String logEntry : transportClient.getLogBuffer()) {
+                    pw.println("        " + logEntry);
+                }
+            }
+        }
     }
 }

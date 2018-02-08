@@ -424,15 +424,6 @@ public class KeyStore {
         return getmtime(key, UID_SELF);
     }
 
-    public boolean duplicate(String srcKey, int srcUid, String destKey, int destUid) {
-        try {
-            return mBinder.duplicate(srcKey, srcUid, destKey, destUid) == NO_ERROR;
-        } catch (RemoteException e) {
-            Log.w(TAG, "Cannot connect to keystore", e);
-            return false;
-        }
-    }
-
     // TODO: remove this when it's removed from Settings
     public boolean isHardwareBacked() {
         return isHardwareBacked("RSA");
@@ -517,6 +508,19 @@ public class KeyStore {
     public int importKey(String alias, KeymasterArguments args, int format, byte[] keyData,
             int flags, KeyCharacteristics outCharacteristics) {
         return importKey(alias, args, format, keyData, UID_SELF, flags, outCharacteristics);
+    }
+
+    public int importWrappedKey(String wrappedKeyAlias, byte[] wrappedKey,
+            String wrappingKeyAlias,
+            byte[] maskingKey, KeymasterArguments args, long rootSid, long fingerprintSid, int uid,
+            KeyCharacteristics outCharacteristics) {
+        try {
+            return mBinder.importWrappedKey(wrappedKeyAlias, wrappedKey, wrappingKeyAlias,
+                    maskingKey, args, rootSid, fingerprintSid, outCharacteristics);
+        } catch (RemoteException e) {
+            Log.w(TAG, "Cannot connect to keystore", e);
+            return SYSTEM_ERROR;
+        }
     }
 
     public ExportResult exportKey(String alias, int format, KeymasterBlob clientId,

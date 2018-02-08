@@ -85,6 +85,7 @@ import android.os.AsyncTask;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.Message;
 import android.os.PowerManager;
 import android.os.RemoteException;
@@ -138,6 +139,7 @@ import com.android.keyguard.KeyguardUpdateMonitorCallback;
 import com.android.keyguard.ViewMediatorCallback;
 import com.android.systemui.ActivityStarterDelegate;
 import com.android.systemui.AutoReinflateContainer;
+import com.android.systemui.charging.WirelessChargingAnimation;
 import com.android.systemui.DemoMode;
 import com.android.systemui.Dependency;
 import com.android.systemui.EventLogTags;
@@ -1419,7 +1421,6 @@ public class StatusBar extends SystemUI implements DemoMode,
         mQSPanel.clickTile(tile);
     }
 
-
     private void updateClearAll() {
         if (!mClearAllEnabled) {
             return;
@@ -1596,7 +1597,7 @@ public class StatusBar extends SystemUI implements DemoMode,
 
         final boolean hasArtwork = artworkDrawable != null;
 
-        if ((hasArtwork || DEBUG_MEDIA_FAKE_ARTWORK)
+        if ((hasArtwork || DEBUG_MEDIA_FAKE_ARTWORK) && !mDozing
                 && (mState != StatusBarState.SHADE || allowWhenShade)
                 && mFingerprintUnlockController.getMode()
                         != FingerprintUnlockController.MODE_WAKE_AND_UNLOCK_PULSING
@@ -1657,15 +1658,16 @@ public class StatusBar extends SystemUI implements DemoMode,
                 }
             }
         } else {
-            // need to hide the album art, either because we are unlocked or because
-            // the metadata isn't there to support it
+            // need to hide the album art, either because we are unlocked, on AOD
+            // or because the metadata isn't there to support it
             if (mBackdrop.getVisibility() != View.GONE) {
                 if (DEBUG_MEDIA) {
                     Log.v(TAG, "DEBUG_MEDIA: Fading out album artwork");
                 }
+                boolean cannotAnimateDoze = mDozing && !ScrimState.AOD.getAnimateChange();
                 if (mFingerprintUnlockController.getMode()
                         == FingerprintUnlockController.MODE_WAKE_AND_UNLOCK_PULSING
-                        || hideBecauseOccluded) {
+                        || hideBecauseOccluded || cannotAnimateDoze) {
 
                     // We are unlocking directly - no animation!
                     mBackdrop.setVisibility(View.GONE);
@@ -1703,7 +1705,7 @@ public class StatusBar extends SystemUI implements DemoMode,
         if (mReportRejectedTouch == null) {
             return;
         }
-        mReportRejectedTouch.setVisibility(mState == StatusBarState.KEYGUARD
+        mReportRejectedTouch.setVisibility(mState == StatusBarState.KEYGUARD && !mDozing
                 && mFalsingManager.isReportingEnabled() ? View.VISIBLE : View.INVISIBLE);
     }
 
@@ -2421,6 +2423,18 @@ public class StatusBar extends SystemUI implements DemoMode,
                 mask, fullscreenStackBounds, dockedStackBounds, sbModeChanged, mStatusBarMode);
     }
 
+    @Override
+    public void showChargingAnimation(int batteryLevel) {
+        if (mDozing) {
+            // ambient
+        } else if (mKeyguardManager.isKeyguardLocked()) {
+            // lockscreen
+        } else {
+            WirelessChargingAnimation.makeWirelessChargingAnimation(mContext, null,
+                    batteryLevel).show();
+        }
+    }
+
     void touchAutoHide() {
         // update transient bar autohide
         if (mStatusBarMode == MODE_SEMI_TRANSPARENT || (mNavigationBar != null
@@ -2660,6 +2674,10 @@ public class StatusBar extends SystemUI implements DemoMode,
 
         if (mFingerprintUnlockController != null) {
             mFingerprintUnlockController.dump(pw);
+        }
+
+        if (mKeyguardIndicationController != null) {
+            mKeyguardIndicationController.dump(fd, pw, args);
         }
 
         if (mScrimController != null) {
@@ -4505,6 +4523,7 @@ public class StatusBar extends SystemUI implements DemoMode,
             ((DozeReceiver) mAmbientIndicationContainer).setDozing(mDozing);
         }
         updateDozingState();
+        updateReportRejectedTouchVisibility();
         Trace.endSection();
     }
 
@@ -4614,8 +4633,7 @@ public class StatusBar extends SystemUI implements DemoMode,
                 }
 
                 private void setPulsing(Collection<HeadsUpManager.HeadsUpEntry> pulsing) {
-                    mStackScroller.setPulsing(pulsing);
-                    mNotificationPanel.setPulsing(pulsing != null);
+                    mNotificationPanel.setPulsing(pulsing);
                     mVisualStabilityManager.setPulsing(pulsing != null);
                     mIgnoreTouchWhilePulsing = false;
                 }
@@ -4644,7 +4662,7 @@ public class StatusBar extends SystemUI implements DemoMode,
 
         @Override
         public void dozeTimeTick() {
-            mNotificationPanel.refreshTime();
+            mNotificationPanel.dozeTimeTick();
         }
 
         @Override
@@ -4930,18 +4948,11 @@ public class StatusBar extends SystemUI implements DemoMode,
                     // system process is dead if we're here.
                 }
                 if (parentToCancelFinal != null) {
-                    // We have to post it to the UI thread for synchronization
-                    mHandler.post(() -> {
-                        Runnable removeRunnable =
-                                () -> mEntryManager.performRemoveNotification(parentToCancelFinal);
-                        if (isCollapsing()) {
-                            // To avoid lags we're only performing the remove
-                            // after the shade was collapsed
-                            addPostCollapseAction(removeRunnable);
-                        } else {
-                            removeRunnable.run();
-                        }
-                    });
+                    removeNotification(parentToCancelFinal);
+                }
+                if (shouldAutoCancel(sbn)) {
+                    // Automatically remove all notifications that we may have kept around longer
+                    removeNotification(sbn);
                 }
             };
 
@@ -4963,6 +4974,21 @@ public class StatusBar extends SystemUI implements DemoMode,
                 return false;
             }
         }, afterKeyguardGone);
+    }
+
+    private void removeNotification(StatusBarNotification notification) {
+        // We have to post it to the UI thread for synchronization
+        mHandler.post(() -> {
+            Runnable removeRunnable =
+                    () -> mEntryManager.performRemoveNotification(notification);
+            if (isCollapsing()) {
+                // To avoid lags we're only performing the remove
+                // after the shade was collapsed
+                addPostCollapseAction(removeRunnable);
+            } else {
+                removeRunnable.run();
+            }
+        });
     }
 
     protected NotificationListener mNotificationListener;

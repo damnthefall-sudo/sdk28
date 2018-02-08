@@ -22,6 +22,7 @@ import android.app.RemoteInput;
 import android.content.Context;
 import android.graphics.Rect;
 import android.os.Build;
+import android.provider.Settings;
 import android.service.notification.StatusBarNotification;
 import android.util.AttributeSet;
 import android.util.Log;
@@ -31,6 +32,7 @@ import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
+import android.widget.LinearLayout;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.NotificationColorUtil;
@@ -42,6 +44,7 @@ import com.android.systemui.statusbar.notification.NotificationUtils;
 import com.android.systemui.statusbar.notification.NotificationViewWrapper;
 import com.android.systemui.statusbar.phone.NotificationGroupManager;
 import com.android.systemui.statusbar.policy.RemoteInputView;
+import com.android.systemui.statusbar.policy.SmartReplyView;
 
 /**
  * A frame layout containing the actual payload of the notification, including the contracted,
@@ -72,6 +75,7 @@ public class NotificationContentView extends FrameLayout {
 
     private RemoteInputView mExpandedRemoteInput;
     private RemoteInputView mHeadsUpRemoteInput;
+    private SmartReplyView mExpandedSmartReplyView;
 
     private NotificationViewWrapper mContractedWrapper;
     private NotificationViewWrapper mExpandedWrapper;
@@ -136,7 +140,6 @@ public class NotificationContentView extends FrameLayout {
     private int mClipBottomAmount;
     private boolean mIsLowPriority;
     private boolean mIsContentExpandable;
-    private int mCustomViewSidePaddings;
 
 
     public NotificationContentView(Context context, AttributeSet attrs) {
@@ -150,8 +153,6 @@ public class NotificationContentView extends FrameLayout {
                 R.dimen.min_notification_layout_height);
         mNotificationContentMarginEnd = getResources().getDimensionPixelSize(
                 com.android.internal.R.dimen.notification_content_margin_end);
-        mCustomViewSidePaddings = getResources().getDimensionPixelSize(
-                R.dimen.notification_content_custom_view_side_padding);
     }
 
     public void setHeights(int smallHeight, int headsUpMaxHeight, int maxHeight,
@@ -391,22 +392,6 @@ public class NotificationContentView extends FrameLayout {
         mContractedWrapper = NotificationViewWrapper.wrap(getContext(), child,
                 mContainingNotification);
         mContractedWrapper.setDark(mDark, false /* animate */, 0 /* delay */);
-        updateMargins(child);
-    }
-
-    private void updateMargins(View child) {
-        if (child == null) {
-            return;
-        }
-        NotificationViewWrapper wrapper = getWrapperForView(child);
-        boolean isCustomView = wrapper instanceof NotificationCustomViewWrapper;
-        boolean needsMargins = isCustomView &&
-                child.getContext().getApplicationInfo().targetSdkVersion < Build.VERSION_CODES.P;
-        int padding = needsMargins ? mCustomViewSidePaddings : 0;
-        MarginLayoutParams layoutParams = (MarginLayoutParams) child.getLayoutParams();
-        layoutParams.setMarginStart(padding);
-        layoutParams.setMarginEnd(padding);
-        child.setLayoutParams(layoutParams);
     }
 
     private NotificationViewWrapper getWrapperForView(View child) {
@@ -456,7 +441,6 @@ public class NotificationContentView extends FrameLayout {
         mExpandedChild = child;
         mExpandedWrapper = NotificationViewWrapper.wrap(getContext(), child,
                 mContainingNotification);
-        updateMargins(child);
     }
 
     public void setHeadsUpChild(View child) {
@@ -490,7 +474,6 @@ public class NotificationContentView extends FrameLayout {
         mHeadsUpChild = child;
         mHeadsUpWrapper = NotificationViewWrapper.wrap(getContext(), child,
                 mContainingNotification);
-        updateMargins(child);
     }
 
     public void setAmbientChild(View child) {
@@ -1146,7 +1129,7 @@ public class NotificationContentView extends FrameLayout {
         if (mAmbientChild != null) {
             mAmbientWrapper.onContentUpdated(entry.row);
         }
-        applyRemoteInput(entry);
+        applyRemoteInputAndSmartReply(entry);
         updateLegacy();
         mForceSelectNextLayout = true;
         setDark(mDark, false /* animate */, 0 /* delay */);
@@ -1178,20 +1161,34 @@ public class NotificationContentView extends FrameLayout {
         }
     }
 
-    private void applyRemoteInput(final NotificationData.Entry entry) {
+    private void applyRemoteInputAndSmartReply(final NotificationData.Entry entry) {
         if (mRemoteInputController == null) {
             return;
         }
 
+        boolean enableSmartReplies = Settings.Global.getInt(mContext.getContentResolver(),
+                Settings.Global.ENABLE_SMART_REPLIES_IN_NOTIFICATIONS, 0) != 0;
+
         boolean hasRemoteInput = false;
+        RemoteInput remoteInputWithChoices = null;
+        PendingIntent pendingIntentWithChoices = null;
 
         Notification.Action[] actions = entry.notification.getNotification().actions;
         if (actions != null) {
             for (Notification.Action a : actions) {
                 if (a.getRemoteInputs() != null) {
                     for (RemoteInput ri : a.getRemoteInputs()) {
-                        if (ri.getAllowFreeFormInput()) {
+                        boolean showRemoteInputView = ri.getAllowFreeFormInput();
+                        boolean showSmartReplyView = enableSmartReplies && ri.getChoices() != null
+                                && ri.getChoices().length > 0;
+                        if (showRemoteInputView) {
                             hasRemoteInput = true;
+                        }
+                        if (showSmartReplyView) {
+                            remoteInputWithChoices = ri;
+                            pendingIntentWithChoices = a.actionIntent;
+                        }
+                        if (showRemoteInputView || showSmartReplyView) {
                             break;
                         }
                     }
@@ -1199,6 +1196,11 @@ public class NotificationContentView extends FrameLayout {
             }
         }
 
+        applyRemoteInput(entry, hasRemoteInput);
+        applySmartReplyView(remoteInputWithChoices, pendingIntentWithChoices);
+    }
+
+    private void applyRemoteInput(NotificationData.Entry entry, boolean hasRemoteInput) {
         View bigContentView = mExpandedChild;
         if (bigContentView != null) {
             mExpandedRemoteInput = applyRemoteInput(bigContentView, entry, hasRemoteInput,
@@ -1293,6 +1295,40 @@ public class NotificationContentView extends FrameLayout {
             return existing;
         }
         return null;
+    }
+
+    private void applySmartReplyView(RemoteInput remoteInput, PendingIntent pendingIntent) {
+        mExpandedSmartReplyView = mExpandedChild == null ?
+                null : applySmartReplyView(mExpandedChild, remoteInput, pendingIntent);
+    }
+
+    private SmartReplyView applySmartReplyView(
+            View view, RemoteInput remoteInput, PendingIntent pendingIntent) {
+        View smartReplyContainerCandidate = view.findViewById(
+                com.android.internal.R.id.smart_reply_container);
+        if (!(smartReplyContainerCandidate instanceof LinearLayout)) {
+            return null;
+        }
+        LinearLayout smartReplyContainer = (LinearLayout) smartReplyContainerCandidate;
+        if (remoteInput == null || pendingIntent == null) {
+            smartReplyContainer.setVisibility(View.GONE);
+            return null;
+        }
+        SmartReplyView smartReplyView = null;
+        if (smartReplyContainer.getChildCount() == 0) {
+            smartReplyView = SmartReplyView.inflate(mContext, smartReplyContainer);
+            smartReplyContainer.addView(smartReplyView);
+        } else if (smartReplyContainer.getChildCount() == 1) {
+            View child = smartReplyContainer.getChildAt(0);
+            if (child instanceof SmartReplyView) {
+                smartReplyView = (SmartReplyView) child;
+            }
+        }
+        if (smartReplyView != null) {
+            smartReplyView.setRepliesFromRemoteInput(remoteInput, pendingIntent);
+            smartReplyContainer.setVisibility(View.VISIBLE);
+        }
+        return smartReplyView;
     }
 
     public void closeRemoteInput() {
@@ -1510,19 +1546,21 @@ public class NotificationContentView extends FrameLayout {
         return false;
     }
 
-    public boolean shouldClipToSidePaddings() {
-        boolean needsPaddings = shouldClipToSidePaddings(getVisibleType());
+    public boolean shouldClipToRounding(boolean topRounded, boolean bottomRounded) {
+        boolean needsPaddings = shouldClipToRounding(getVisibleType(), topRounded, bottomRounded);
         if (mUserExpanding) {
-             needsPaddings |= shouldClipToSidePaddings(mTransformationStartVisibleType);
+             needsPaddings |= shouldClipToRounding(mTransformationStartVisibleType, topRounded,
+                     bottomRounded);
         }
         return needsPaddings;
     }
 
-    private boolean shouldClipToSidePaddings(int visibleType) {
+    private boolean shouldClipToRounding(int visibleType, boolean topRounded,
+            boolean bottomRounded) {
         NotificationViewWrapper visibleWrapper = getVisibleWrapper(visibleType);
         if (visibleWrapper == null) {
             return false;
         }
-        return visibleWrapper.shouldClipToSidePaddings();
+        return visibleWrapper.shouldClipToRounding(topRounded, bottomRounded);
     }
 }

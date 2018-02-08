@@ -16,6 +16,8 @@
 
 package android.view;
 
+import static android.view.accessibility.AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED;
+
 import static java.lang.Math.max;
 
 import android.animation.AnimatorInflater;
@@ -3226,6 +3228,11 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      */
     private static final int PFLAG3_SCREEN_READER_FOCUSABLE = 0x10000000;
 
+    /**
+     * The last aggregated visibility. Used to detect when it truly changes.
+     */
+    private static final int PFLAG3_AGGREGATED_VISIBLE = 0x20000000;
+
     /* End of masks for mPrivateFlags3 */
 
     /**
@@ -3387,6 +3394,18 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * decorations when they are shown.  You can perform layout of your inner
      * UI elements to account for non-fullscreen system UI through the
      * {@link #fitSystemWindows(Rect)} method.
+     *
+     * <p>Note: on displays that have a {@link DisplayCutout}, the window may still be placed
+     *  differently than if {@link #SYSTEM_UI_FLAG_FULLSCREEN} was set, if the
+     *  window's {@link WindowManager.LayoutParams#layoutInDisplayCutoutMode
+     *  layoutInDisplayCutoutMode} is
+     *  {@link WindowManager.LayoutParams#LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
+     *  LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT}. To avoid this, use either of the other modes.
+     *
+     * @see WindowManager.LayoutParams#layoutInDisplayCutoutMode
+     * @see WindowManager.LayoutParams#LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
+     * @see WindowManager.LayoutParams#LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+     * @see WindowManager.LayoutParams#LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER
      */
     public static final int SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN = 0x00000400;
 
@@ -4045,6 +4064,12 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
     private CharSequence mContentDescription;
 
     /**
+     * If this view represents a distinct part of the window, it can have a title that labels the
+     * area.
+     */
+    private CharSequence mAccessibilityPaneTitle;
+
+    /**
      * Specifies the id of a view for which this view serves as a label for
      * accessibility purposes.
      */
@@ -4181,6 +4206,16 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * True if the default focus highlight is needed on the target device.
      */
     private static boolean sUseDefaultFocusHighlight;
+
+    /**
+     * True if zero-sized views can be focused.
+     */
+    private static boolean sCanFocusZeroSized;
+
+    /**
+     * Always assign focus if a focusable View is available.
+     */
+    private static boolean sAlwaysAssignFocus;
 
     private String mTransitionName;
 
@@ -4407,7 +4442,6 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
     private CheckForLongPress mPendingCheckForLongPress;
     private CheckForTap mPendingCheckForTap = null;
     private PerformClick mPerformClick;
-    private SendViewScrolledAccessibilityEvent mSendViewScrolledAccessibilityEvent;
 
     private UnsetPressedState mUnsetPressedState;
 
@@ -4797,6 +4831,10 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                     com.android.internal.R.bool.config_useDefaultFocusHighlight);
 
             sThrowOnInvalidFloatProperties = targetSdkVersion >= Build.VERSION_CODES.P;
+
+            sCanFocusZeroSized = targetSdkVersion < Build.VERSION_CODES.P;
+
+            sAlwaysAssignFocus = targetSdkVersion < Build.VERSION_CODES.P;
 
             sCompatibilityDone = true;
         }
@@ -5400,6 +5438,11 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                 case R.styleable.View_screenReaderFocusable:
                     if (a.peekValue(attr) != null) {
                         setScreenReaderFocusable(a.getBoolean(attr, false));
+                    }
+                    break;
+                case R.styleable.View_accessibilityPaneTitle:
+                    if (a.peekValue(attr) != null) {
+                        setAccessibilityPaneTitle(a.getString(attr));
                     }
                     break;
             }
@@ -6983,8 +7026,8 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * Called when this view wants to give up focus. If focus is cleared
      * {@link #onFocusChanged(boolean, int, android.graphics.Rect)} is called.
      * <p>
-     * <strong>Note:</strong> When a View clears focus the framework is trying
-     * to give focus to the first focusable View from the top. Hence, if this
+     * <strong>Note:</strong> When not in touch-mode, the framework will try to give focus
+     * to the first focusable View from the top after focus is cleared. Hence, if this
      * View is the first from the top that can take focus, then all callbacks
      * related to clearing focus will be invoked after which the framework will
      * give focus to this view.
@@ -6995,7 +7038,8 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             System.out.println(this + " clearFocus()");
         }
 
-        clearFocusInternal(null, true, true);
+        final boolean refocus = sAlwaysAssignFocus || !isInTouchMode();
+        clearFocusInternal(null, true, refocus);
     }
 
     /**
@@ -7010,6 +7054,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
     void clearFocusInternal(View focused, boolean propagate, boolean refocus) {
         if ((mPrivateFlags & PFLAG_FOCUSED) != 0) {
             mPrivateFlags &= ~PFLAG_FOCUSED;
+            clearParentsWantFocus();
 
             if (propagate && mParent != null) {
                 mParent.clearChildFocus(this);
@@ -7156,7 +7201,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         if (gainFocus) {
             sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_FOCUSED);
         } else {
-            notifyViewAccessibilityStateChangedIfNeeded(
+            notifyAccessibilityStateChanged(
                     AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
         }
 
@@ -7189,24 +7234,56 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         notifyEnterOrExitForAutoFillIfNeeded(gainFocus);
     }
 
-    private void notifyEnterOrExitForAutoFillIfNeeded(boolean enter) {
-        if (isAutofillable() && isAttachedToWindow()) {
+    /** @hide */
+    public void notifyEnterOrExitForAutoFillIfNeeded(boolean enter) {
+        if (canNotifyAutofillEnterExitEvent()) {
             AutofillManager afm = getAutofillManager();
             if (afm != null) {
-                if (enter && hasWindowFocus() && isFocused()) {
+                if (enter && isFocused()) {
                     // We have not been laid out yet, hence cannot evaluate
                     // whether this view is visible to the user, we will do
                     // the evaluation once layout is complete.
                     if (!isLaidOut()) {
                         mPrivateFlags3 |= PFLAG3_NOTIFY_AUTOFILL_ENTER_ON_LAYOUT;
                     } else if (isVisibleToUser()) {
+                        // TODO This is a potential problem that View gets focus before it's visible
+                        // to User. Ideally View should handle the event when isVisibleToUser()
+                        // becomes true where it should issue notifyViewEntered().
                         afm.notifyViewEntered(this);
                     }
-                } else if (!hasWindowFocus() || !isFocused()) {
+                } else if (!isFocused()) {
                     afm.notifyViewExited(this);
                 }
             }
         }
+    }
+
+    /**
+     * If this view is a visually distinct portion of a window, for example the content view of
+     * a fragment that is replaced, it is considered a pane for accessibility purposes. In order
+     * for accessibility services to understand the views role, and to announce its title as
+     * appropriate, such views should have pane titles.
+     *
+     * @param accessibilityPaneTitle The pane's title.
+     *
+     * {@see AccessibilityNodeInfo#setPaneTitle(CharSequence)}
+     */
+    public void setAccessibilityPaneTitle(CharSequence accessibilityPaneTitle) {
+        if (!TextUtils.equals(accessibilityPaneTitle, mAccessibilityPaneTitle)) {
+            mAccessibilityPaneTitle = accessibilityPaneTitle;
+            notifyAccessibilityStateChanged(AccessibilityEvent.CONTENT_CHANGE_TYPE_PANE_TITLE);
+        }
+    }
+
+    /**
+     * Get the title of the pane for purposes of accessibility.
+     *
+     * @return The current pane title.
+     *
+     * {@see #setAccessibilityPaneTitle}.
+     */
+    public CharSequence getAccessibilityPaneTitle() {
+        return mAccessibilityPaneTitle;
     }
 
     /**
@@ -7308,7 +7385,12 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * @hide
      */
     public void sendAccessibilityEventUncheckedInternal(AccessibilityEvent event) {
-        if (!isShown()) {
+        // Panes disappearing are relevant even if though the view is no longer visible.
+        boolean isWindowStateChanged =
+                (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED);
+        boolean isWindowDisappearedEvent = isWindowStateChanged && ((event.getContentChangeTypes()
+                & AccessibilityEvent.CONTENT_CHANGE_TYPE_PANE_DISAPPEARED) != 0);
+        if (!isShown() && !isWindowDisappearedEvent) {
             return;
         }
         onInitializeAccessibilityEvent(event);
@@ -7416,6 +7498,10 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * @hide
      */
     public void onPopulateAccessibilityEventInternal(AccessibilityEvent event) {
+        if ((event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+                && !TextUtils.isEmpty(getAccessibilityPaneTitle())) {
+            event.getText().add(getAccessibilityPaneTitle());
+        }
     }
 
     /**
@@ -8237,6 +8323,11 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                 && getAutofillViewId() > LAST_APP_AUTOFILL_ID;
     }
 
+    /** @hide */
+    public boolean canNotifyAutofillEnterExitEvent() {
+        return isAutofillable() && isAttachedToWindow();
+    }
+
     private void populateVirtualStructure(ViewStructure structure,
             AccessibilityNodeProvider provider, AccessibilityNodeInfo info) {
         structure.setId(AccessibilityNodeInfo.getVirtualDescendantId(info.getSourceNodeId()),
@@ -8459,6 +8550,12 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         info.setLongClickable(isLongClickable());
         info.setContextClickable(isContextClickable());
         info.setLiveRegion(getAccessibilityLiveRegion());
+        if ((mTooltipInfo != null) && (mTooltipInfo.mTooltipText != null)) {
+            info.setTooltipText(mTooltipInfo.mTooltipText);
+            info.addAction((mTooltipInfo.mTooltipPopup == null)
+                    ? AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_TOOLTIP
+                    : AccessibilityNodeInfo.AccessibilityAction.ACTION_HIDE_TOOLTIP);
+        }
 
         // TODO: These make sense only if we are in an AdapterView but all
         // views can be selected. Maybe from accessibility perspective
@@ -8506,6 +8603,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
 
         info.addAction(AccessibilityAction.ACTION_SHOW_ON_SCREEN);
         populateAccessibilityNodeInfoDrawingOrderInParent(info);
+        info.setPaneTitle(mAccessibilityPaneTitle);
     }
 
     /**
@@ -8826,9 +8924,9 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         final boolean nonEmptyDesc = contentDescription != null && contentDescription.length() > 0;
         if (nonEmptyDesc && getImportantForAccessibility() == IMPORTANT_FOR_ACCESSIBILITY_AUTO) {
             setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
-            notifySubtreeAccessibilityStateChangedIfNeeded();
+            notifyAccessibilitySubtreeChanged();
         } else {
-            notifyViewAccessibilityStateChangedIfNeeded(
+            notifyAccessibilityStateChanged(
                     AccessibilityEvent.CONTENT_CHANGE_TYPE_CONTENT_DESCRIPTION);
         }
     }
@@ -8861,8 +8959,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             return;
         }
         mAccessibilityTraversalBeforeId = beforeId;
-        notifyViewAccessibilityStateChangedIfNeeded(
-                AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
+        notifyAccessibilityStateChanged(CONTENT_CHANGE_TYPE_UNDEFINED);
     }
 
     /**
@@ -8905,8 +9002,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             return;
         }
         mAccessibilityTraversalAfterId = afterId;
-        notifyViewAccessibilityStateChangedIfNeeded(
-                AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
+        notifyAccessibilityStateChanged(CONTENT_CHANGE_TYPE_UNDEFINED);
     }
 
     /**
@@ -8948,8 +9044,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                 && mID == View.NO_ID) {
             mID = generateViewId();
         }
-        notifyViewAccessibilityStateChangedIfNeeded(
-                AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
+        notifyAccessibilityStateChanged(CONTENT_CHANGE_TYPE_UNDEFINED);
     }
 
     /**
@@ -10046,6 +10141,13 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
     }
 
     /**
+     * @return {@code true} if laid-out and not about to do another layout.
+     */
+    boolean isLayoutValid() {
+        return isLaidOut() && ((mPrivateFlags & PFLAG_FORCE_LAYOUT) == 0);
+    }
+
+    /**
      * If this view doesn't do any drawing on its own, set this flag to
      * allow further optimizations. By default, this flag is not set on
      * View, but could be set on some View subclasses such as ViewGroup.
@@ -10442,8 +10544,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
 
         if (pflags3 != mPrivateFlags3) {
             mPrivateFlags3 = pflags3;
-            notifyViewAccessibilityStateChangedIfNeeded(
-                    AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
+            notifyAccessibilityStateChanged(CONTENT_CHANGE_TYPE_UNDEFINED);
         }
     }
 
@@ -10817,7 +10918,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         if (views == null) {
             return;
         }
-        if (!isFocusable() || !isEnabled()) {
+        if (!canTakeFocus()) {
             return;
         }
         if ((focusableMode & FOCUSABLES_TOUCH_MODE) == FOCUSABLES_TOUCH_MODE
@@ -11031,8 +11132,9 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * descendants.
      *
      * A view will not actually take focus if it is not focusable ({@link #isFocusable} returns
-     * false), or if it is focusable and it is not focusable in touch mode
-     * ({@link #isFocusableInTouchMode}) while the device is in touch mode.
+     * false), or if it can't be focused due to other conditions (not focusable in touch mode
+     * ({@link #isFocusableInTouchMode}) while the device is in touch mode, not visible, not
+     * enabled, or has no size).
      *
      * See also {@link #focusSearch(int)}, which is what you call to say that you
      * have focus, and you want your parent to look for the next one.
@@ -11139,9 +11241,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
 
     private boolean requestFocusNoSearch(int direction, Rect previouslyFocusedRect) {
         // need to be focusable
-        if ((mViewFlags & FOCUSABLE) != FOCUSABLE
-                || (mViewFlags & VISIBILITY_MASK) != VISIBLE
-                || (mViewFlags & ENABLED_MASK) != ENABLED) {
+        if (!canTakeFocus()) {
             return false;
         }
 
@@ -11156,8 +11256,21 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             return false;
         }
 
+        if (!isLayoutValid()) {
+            mPrivateFlags |= PFLAG_WANTS_FOCUS;
+        } else {
+            clearParentsWantFocus();
+        }
+
         handleFocusGainInternal(direction, previouslyFocusedRect);
         return true;
+    }
+
+    void clearParentsWantFocus() {
+        if (mParent instanceof View) {
+            ((View) mParent).mPrivateFlags &= ~PFLAG_WANTS_FOCUS;
+            ((View) mParent).clearParentsWantFocus();
+        }
     }
 
     /**
@@ -11261,8 +11374,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             mPrivateFlags2 &= ~PFLAG2_ACCESSIBILITY_LIVE_REGION_MASK;
             mPrivateFlags2 |= (mode << PFLAG2_ACCESSIBILITY_LIVE_REGION_SHIFT)
                     & PFLAG2_ACCESSIBILITY_LIVE_REGION_MASK;
-            notifyViewAccessibilityStateChangedIfNeeded(
-                    AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
+            notifyAccessibilityStateChanged(CONTENT_CHANGE_TYPE_UNDEFINED);
         }
     }
 
@@ -11319,10 +11431,9 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             mPrivateFlags2 |= (mode << PFLAG2_IMPORTANT_FOR_ACCESSIBILITY_SHIFT)
                     & PFLAG2_IMPORTANT_FOR_ACCESSIBILITY_MASK;
             if (!maySkipNotify || oldIncludeForAccessibility != includeForAccessibility()) {
-                notifySubtreeAccessibilityStateChangedIfNeeded();
+                notifyAccessibilitySubtreeChanged();
             } else {
-                notifyViewAccessibilityStateChangedIfNeeded(
-                        AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
+                notifyAccessibilityStateChanged(CONTENT_CHANGE_TYPE_UNDEFINED);
             }
         }
     }
@@ -11380,6 +11491,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * {@link #getAccessibilityLiveRegion()} is not
      * {@link #ACCESSIBILITY_LIVE_REGION_NONE}.
      * </ul>
+     * <li>Has an accessibility pane title, see {@link #setAccessibilityPaneTitle}</li>
      * </ol>
      *
      * @return Whether the view is exposed for accessibility.
@@ -11406,7 +11518,8 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
 
         return mode == IMPORTANT_FOR_ACCESSIBILITY_YES || isActionableForAccessibility()
                 || hasListenersForAccessibility() || getAccessibilityNodeProvider() != null
-                || getAccessibilityLiveRegion() != ACCESSIBILITY_LIVE_REGION_NONE;
+                || getAccessibilityLiveRegion() != ACCESSIBILITY_LIVE_REGION_NONE
+                || (mAccessibilityPaneTitle != null);
     }
 
     /**
@@ -11496,25 +11609,8 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      *
      * @hide
      */
-    public void notifyViewAccessibilityStateChangedIfNeeded(int changeType) {
-        if (!AccessibilityManager.getInstance(mContext).isEnabled() || mAttachInfo == null) {
-            return;
-        }
-        // If this is a live region, we should send a subtree change event
-        // from this view immediately. Otherwise, we can let it propagate up.
-        if (getAccessibilityLiveRegion() != ACCESSIBILITY_LIVE_REGION_NONE) {
-            final AccessibilityEvent event = AccessibilityEvent.obtain();
-            event.setEventType(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
-            event.setContentChangeTypes(changeType);
-            sendAccessibilityEventUnchecked(event);
-        } else if (mParent != null) {
-            try {
-                mParent.notifySubtreeAccessibilityStateChanged(this, this, changeType);
-            } catch (AbstractMethodError e) {
-                Log.e(VIEW_LOG_TAG, mParent.getClass().getSimpleName() +
-                        " does not fully implement ViewParent", e);
-            }
-        }
+    public void notifyAccessibilityStateChanged(int changeType) {
+        notifyAccessibilityStateChanged(this, changeType);
     }
 
     /**
@@ -11528,20 +11624,40 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      *
      * @hide
      */
-    public void notifySubtreeAccessibilityStateChangedIfNeeded() {
+    public void notifyAccessibilitySubtreeChanged() {
+        if ((mPrivateFlags2 & PFLAG2_SUBTREE_ACCESSIBILITY_STATE_CHANGED) == 0) {
+            mPrivateFlags2 |= PFLAG2_SUBTREE_ACCESSIBILITY_STATE_CHANGED;
+            notifyAccessibilityStateChanged(AccessibilityEvent.CONTENT_CHANGE_TYPE_SUBTREE);
+        }
+    }
+
+    void notifyAccessibilityStateChanged(View source, int changeType) {
         if (!AccessibilityManager.getInstance(mContext).isEnabled() || mAttachInfo == null) {
             return;
         }
-        if ((mPrivateFlags2 & PFLAG2_SUBTREE_ACCESSIBILITY_STATE_CHANGED) == 0) {
-            mPrivateFlags2 |= PFLAG2_SUBTREE_ACCESSIBILITY_STATE_CHANGED;
+        // Changes to views with a pane title count as window state changes, as the pane title
+        // marks them as significant parts of the UI.
+        if (!TextUtils.isEmpty(getAccessibilityPaneTitle())) {
+            final AccessibilityEvent event = AccessibilityEvent.obtain();
+            event.setEventType(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED);
+            event.setContentChangeTypes(changeType);
+            onPopulateAccessibilityEvent(event);
             if (mParent != null) {
                 try {
-                    mParent.notifySubtreeAccessibilityStateChanged(
-                            this, this, AccessibilityEvent.CONTENT_CHANGE_TYPE_SUBTREE);
+                    mParent.requestSendAccessibilityEvent(this, event);
                 } catch (AbstractMethodError e) {
-                    Log.e(VIEW_LOG_TAG, mParent.getClass().getSimpleName() +
-                            " does not fully implement ViewParent", e);
+                    Log.e(VIEW_LOG_TAG, mParent.getClass().getSimpleName()
+                            + " does not fully implement ViewParent", e);
                 }
+            }
+        }
+
+        if (mParent != null) {
+            try {
+                mParent.notifySubtreeAccessibilityStateChanged(this, source, changeType);
+            } catch (AbstractMethodError e) {
+                Log.e(VIEW_LOG_TAG, mParent.getClass().getSimpleName()
+                        + " does not fully implement ViewParent", e);
             }
         }
     }
@@ -11563,8 +11679,10 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
     /**
      * Reset the flag indicating the accessibility state of the subtree rooted
      * at this view changed.
+     *
+     * @hide
      */
-    void resetSubtreeAccessibilityStateChanged() {
+    public void resetSubtreeAccessibilityStateChanged() {
         mPrivateFlags2 &= ~PFLAG2_SUBTREE_ACCESSIBILITY_STATE_CHANGED;
     }
 
@@ -11725,8 +11843,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                         || getAccessibilitySelectionEnd() != end)
                         && (start == end)) {
                     setAccessibilitySelection(start, end);
-                    notifyViewAccessibilityStateChangedIfNeeded(
-                            AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
+                    notifyAccessibilityStateChanged(CONTENT_CHANGE_TYPE_UNDEFINED);
                     return true;
                 }
             } break;
@@ -11743,6 +11860,21 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                     return true;
                 }
             } break;
+            case R.id.accessibilityActionShowTooltip: {
+                if ((mTooltipInfo != null) && (mTooltipInfo.mTooltipPopup != null)) {
+                    // Tooltip already showing
+                    return false;
+                }
+                return showLongClickTooltip(0, 0);
+            }
+            case R.id.accessibilityActionHideTooltip: {
+                if ((mTooltipInfo == null) || (mTooltipInfo.mTooltipPopup == null)) {
+                    // No tooltip showing
+                    return false;
+                }
+                hideTooltip();
+                return true;
+            }
         }
         return false;
     }
@@ -12347,8 +12479,6 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             imm.focusIn(this);
         }
 
-        notifyEnterOrExitForAutoFillIfNeeded(hasWindowFocus);
-
         refreshDrawableState();
     }
 
@@ -12467,6 +12597,10 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      */
     @CallSuper
     public void onVisibilityAggregated(boolean isVisible) {
+        // Update our internal visibility tracking so we can detect changes
+        boolean oldVisible = (mPrivateFlags3 & PFLAG3_AGGREGATED_VISIBLE) != 0;
+        mPrivateFlags3 = isVisible ? (mPrivateFlags3 | PFLAG3_AGGREGATED_VISIBLE)
+                : (mPrivateFlags3 & ~PFLAG3_AGGREGATED_VISIBLE);
         if (isVisible && mAttachInfo != null) {
             initialAwakenScrollBars();
         }
@@ -12505,6 +12639,13 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                     // finish before checking state
                     mVisibilityChangeForAutofillHandler.obtainMessage(0, this).sendToTarget();
                 }
+            }
+        }
+        if (!TextUtils.isEmpty(getAccessibilityPaneTitle())) {
+            if (isVisible != oldVisible) {
+                notifyAccessibilityStateChanged(isVisible
+                        ? AccessibilityEvent.CONTENT_CHANGE_TYPE_PANE_APPEARED
+                        : AccessibilityEvent.CONTENT_CHANGE_TYPE_PANE_DISAPPEARED);
             }
         }
     }
@@ -13531,6 +13672,13 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         mAttachInfo.mUnbufferedDispatchRequested = true;
     }
 
+    private boolean canTakeFocus() {
+        return ((mViewFlags & VISIBILITY_MASK) == VISIBLE)
+                && ((mViewFlags & FOCUSABLE) == FOCUSABLE)
+                && ((mViewFlags & ENABLED_MASK) == ENABLED)
+                && (sCanFocusZeroSized || !isLayoutValid() || (mBottom > mTop) && (mRight > mLeft));
+    }
+
     /**
      * Set flags controlling behavior of this view.
      *
@@ -13550,6 +13698,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             return;
         }
         int privateFlags = mPrivateFlags;
+        boolean shouldNotifyFocusableAvailable = false;
 
         // If focusable is auto, update the FOCUSABLE bit.
         int focusableChangedByAuto = 0;
@@ -13588,7 +13737,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                             || focusableChangedByAuto == 0
                             || viewRootImpl == null
                             || viewRootImpl.mThread == Thread.currentThread()) {
-                        mParent.focusableViewAvailable(this);
+                        shouldNotifyFocusableAvailable = true;
                     }
                 }
             }
@@ -13611,10 +13760,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                 // about in case nothing has focus.  even if this specific view
                 // isn't focusable, it may contain something that is, so let
                 // the root view try to give this focus if nothing else does.
-                if ((mParent != null) && ((mViewFlags & ENABLED_MASK) == ENABLED)
-                        && (mBottom > mTop) && (mRight > mLeft)) {
-                    mParent.focusableViewAvailable(this);
-                }
+                shouldNotifyFocusableAvailable = true;
             }
         }
 
@@ -13623,14 +13769,15 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                 // a view becoming enabled should notify the parent as long as the view is also
                 // visible and the parent wasn't already notified by becoming visible during this
                 // setFlags invocation.
-                if ((mViewFlags & VISIBILITY_MASK) == VISIBLE
-                        && ((changed & VISIBILITY_MASK) == 0)) {
-                    if ((mParent != null) && (mViewFlags & ENABLED_MASK) == ENABLED) {
-                        mParent.focusableViewAvailable(this);
-                    }
-                }
+                shouldNotifyFocusableAvailable = true;
             } else {
                 if (hasFocus()) clearFocus();
+            }
+        }
+
+        if (shouldNotifyFocusableAvailable) {
+            if (mParent != null && canTakeFocus()) {
+                mParent.focusableViewAvailable(this);
             }
         }
 
@@ -13713,7 +13860,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                         ((!(mParent instanceof ViewGroup)) || ((ViewGroup) mParent).isShown())) {
                     dispatchVisibilityAggregated(newVisibility == VISIBLE);
                 }
-                notifySubtreeAccessibilityStateChangedIfNeeded();
+                notifyAccessibilitySubtreeChanged();
             }
         }
 
@@ -13759,14 +13906,12 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                     || (changed & CLICKABLE) != 0 || (changed & LONG_CLICKABLE) != 0
                     || (changed & CONTEXT_CLICKABLE) != 0) {
                 if (oldIncludeForAccessibility != includeForAccessibility()) {
-                    notifySubtreeAccessibilityStateChangedIfNeeded();
+                    notifyAccessibilitySubtreeChanged();
                 } else {
-                    notifyViewAccessibilityStateChangedIfNeeded(
-                            AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
+                    notifyAccessibilityStateChanged(CONTENT_CHANGE_TYPE_UNDEFINED);
                 }
             } else if ((changed & ENABLED_MASK) != 0) {
-                notifyViewAccessibilityStateChangedIfNeeded(
-                        AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
+                notifyAccessibilityStateChanged(CONTENT_CHANGE_TYPE_UNDEFINED);
             }
         }
     }
@@ -13800,10 +13945,13 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * @param oldt Previous vertical scroll origin.
      */
     protected void onScrollChanged(int l, int t, int oldl, int oldt) {
-        notifySubtreeAccessibilityStateChangedIfNeeded();
+        notifyAccessibilitySubtreeChanged();
 
-        if (AccessibilityManager.getInstance(mContext).isEnabled()) {
-            postSendViewScrolledAccessibilityEventCallback(l - oldl, t - oldt);
+        ViewRootImpl root = getViewRootImpl();
+        if (root != null) {
+            root.getAccessibilityState()
+                    .getSendViewScrolledAccessibilityEvent()
+                    .post(this, /* dx */ l - oldl, /* dy */ t - oldt);
         }
 
         mBackgroundSizeChanged = true;
@@ -14199,7 +14347,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             invalidateViewProperty(false, true);
 
             invalidateParentIfNeededAndWasQuickRejected();
-            notifySubtreeAccessibilityStateChangedIfNeeded();
+            notifyAccessibilitySubtreeChanged();
         }
     }
 
@@ -14243,7 +14391,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             invalidateViewProperty(false, true);
 
             invalidateParentIfNeededAndWasQuickRejected();
-            notifySubtreeAccessibilityStateChangedIfNeeded();
+            notifyAccessibilitySubtreeChanged();
         }
     }
 
@@ -14287,7 +14435,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             invalidateViewProperty(false, true);
 
             invalidateParentIfNeededAndWasQuickRejected();
-            notifySubtreeAccessibilityStateChangedIfNeeded();
+            notifyAccessibilitySubtreeChanged();
         }
     }
 
@@ -14324,7 +14472,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             invalidateViewProperty(false, true);
 
             invalidateParentIfNeededAndWasQuickRejected();
-            notifySubtreeAccessibilityStateChangedIfNeeded();
+            notifyAccessibilitySubtreeChanged();
         }
     }
 
@@ -14361,7 +14509,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             invalidateViewProperty(false, true);
 
             invalidateParentIfNeededAndWasQuickRejected();
-            notifySubtreeAccessibilityStateChangedIfNeeded();
+            notifyAccessibilitySubtreeChanged();
         }
     }
 
@@ -14564,7 +14712,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         if (mTransformationInfo.mAlpha != alpha) {
             // Report visibility changes, which can affect children, to accessibility
             if ((alpha == 0) ^ (mTransformationInfo.mAlpha == 0)) {
-                notifySubtreeAccessibilityStateChangedIfNeeded();
+                notifyAccessibilitySubtreeChanged();
             }
             mTransformationInfo.mAlpha = alpha;
             if (onSetAlpha((int) (alpha * 255))) {
@@ -15066,7 +15214,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             invalidateViewProperty(false, true);
 
             invalidateParentIfNeededAndWasQuickRejected();
-            notifySubtreeAccessibilityStateChangedIfNeeded();
+            notifyAccessibilitySubtreeChanged();
         }
     }
 
@@ -15100,7 +15248,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             invalidateViewProperty(false, true);
 
             invalidateParentIfNeededAndWasQuickRejected();
-            notifySubtreeAccessibilityStateChangedIfNeeded();
+            notifyAccessibilitySubtreeChanged();
         }
     }
 
@@ -15270,7 +15418,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
     public void invalidateOutline() {
         rebuildOutline();
 
-        notifySubtreeAccessibilityStateChangedIfNeeded();
+        notifyAccessibilitySubtreeChanged();
         invalidateViewProperty(false, false);
     }
 
@@ -15465,7 +15613,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                 }
                 invalidateParentIfNeeded();
             }
-            notifySubtreeAccessibilityStateChangedIfNeeded();
+            notifyAccessibilitySubtreeChanged();
         }
     }
 
@@ -15513,7 +15661,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                 }
                 invalidateParentIfNeeded();
             }
-            notifySubtreeAccessibilityStateChangedIfNeeded();
+            notifyAccessibilitySubtreeChanged();
         }
     }
 
@@ -16388,18 +16536,6 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
 
             attachInfo.mViewRootImpl.dispatchInvalidateRectOnAnimation(info);
         }
-    }
-
-    /**
-     * Post a callback to send a {@link AccessibilityEvent#TYPE_VIEW_SCROLLED} event.
-     * This event is sent at most once every
-     * {@link ViewConfiguration#getSendRecurringAccessibilityEventsInterval()}.
-     */
-    private void postSendViewScrolledAccessibilityEventCallback(int dx, int dy) {
-        if (mSendViewScrolledAccessibilityEvent == null) {
-            mSendViewScrolledAccessibilityEvent = new SendViewScrolledAccessibilityEvent();
-        }
-        mSendViewScrolledAccessibilityEvent.post(dx, dy);
     }
 
     /**
@@ -17657,7 +17793,13 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         removeUnsetPressCallback();
         removeLongPressCallback();
         removePerformClickCallback();
-        cancel(mSendViewScrolledAccessibilityEvent);
+        if (mAttachInfo != null
+                && mAttachInfo.mViewRootImpl.mAccessibilityState != null
+                && mAttachInfo.mViewRootImpl.mAccessibilityState.isScrollEventSenderInitialized()) {
+            mAttachInfo.mViewRootImpl.mAccessibilityState
+                    .getSendViewScrolledAccessibilityEvent()
+                    .cancelIfPendingFor(this);
+        }
         stopNestedScroll();
 
         // Anything that started animating right before detach should already
@@ -17758,6 +17900,15 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      */
     /*package*/ IWindowSession getWindowSession() {
         return mAttachInfo != null ? mAttachInfo.mSession : null;
+    }
+
+    /**
+     * Return the window this view is currently attached to. Used in
+     * {@link android.app.ActivityView} to communicate with WM.
+     * @hide
+     */
+    protected IWindow getWindow() {
+        return mAttachInfo != null ? mAttachInfo.mWindow : null;
     }
 
     /**
@@ -18936,7 +19087,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      *
      * @hide
      */
-    public Bitmap createSnapshot(Bitmap.Config quality, int backgroundColor, boolean skipChildren) {
+    public Bitmap createSnapshot(ViewDebug.CanvasProvider canvasProvider, boolean skipChildren) {
         int width = mRight - mLeft;
         int height = mBottom - mTop;
 
@@ -18945,71 +19096,48 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         width = (int) ((width * scale) + 0.5f);
         height = (int) ((height * scale) + 0.5f);
 
-        Bitmap bitmap = Bitmap.createBitmap(mResources.getDisplayMetrics(),
-                width > 0 ? width : 1, height > 0 ? height : 1, quality);
-        if (bitmap == null) {
-            throw new OutOfMemoryError();
-        }
+        Canvas oldCanvas = null;
+        try {
+            Canvas canvas = canvasProvider.getCanvas(this,
+                    width > 0 ? width : 1, height > 0 ? height : 1);
 
-        Resources resources = getResources();
-        if (resources != null) {
-            bitmap.setDensity(resources.getDisplayMetrics().densityDpi);
-        }
-
-        Canvas canvas;
-        if (attachInfo != null) {
-            canvas = attachInfo.mCanvas;
-            if (canvas == null) {
-                canvas = new Canvas();
+            if (attachInfo != null) {
+                oldCanvas = attachInfo.mCanvas;
+                // Temporarily clobber the cached Canvas in case one of our children
+                // is also using a drawing cache. Without this, the children would
+                // steal the canvas by attaching their own bitmap to it and bad, bad
+                // things would happen (invisible views, corrupted drawings, etc.)
+                attachInfo.mCanvas = null;
             }
-            canvas.setBitmap(bitmap);
-            // Temporarily clobber the cached Canvas in case one of our children
-            // is also using a drawing cache. Without this, the children would
-            // steal the canvas by attaching their own bitmap to it and bad, bad
-            // things would happen (invisible views, corrupted drawings, etc.)
-            attachInfo.mCanvas = null;
-        } else {
-            // This case should hopefully never or seldom happen
-            canvas = new Canvas(bitmap);
-        }
-        boolean enabledHwBitmapsInSwMode = canvas.isHwBitmapsInSwModeEnabled();
-        canvas.setHwBitmapsInSwModeEnabled(true);
-        if ((backgroundColor & 0xff000000) != 0) {
-            bitmap.eraseColor(backgroundColor);
-        }
 
-        computeScroll();
-        final int restoreCount = canvas.save();
-        canvas.scale(scale, scale);
-        canvas.translate(-mScrollX, -mScrollY);
+            computeScroll();
+            final int restoreCount = canvas.save();
+            canvas.scale(scale, scale);
+            canvas.translate(-mScrollX, -mScrollY);
 
-        // Temporarily remove the dirty mask
-        int flags = mPrivateFlags;
-        mPrivateFlags &= ~PFLAG_DIRTY_MASK;
+            // Temporarily remove the dirty mask
+            int flags = mPrivateFlags;
+            mPrivateFlags &= ~PFLAG_DIRTY_MASK;
 
-        // Fast path for layouts with no backgrounds
-        if ((mPrivateFlags & PFLAG_SKIP_DRAW) == PFLAG_SKIP_DRAW) {
-            dispatchDraw(canvas);
-            drawAutofilledHighlight(canvas);
-            if (mOverlay != null && !mOverlay.isEmpty()) {
-                mOverlay.getOverlayView().draw(canvas);
+            // Fast path for layouts with no backgrounds
+            if ((mPrivateFlags & PFLAG_SKIP_DRAW) == PFLAG_SKIP_DRAW) {
+                dispatchDraw(canvas);
+                drawAutofilledHighlight(canvas);
+                if (mOverlay != null && !mOverlay.isEmpty()) {
+                    mOverlay.getOverlayView().draw(canvas);
+                }
+            } else {
+                draw(canvas);
             }
-        } else {
-            draw(canvas);
+
+            mPrivateFlags = flags;
+            canvas.restoreToCount(restoreCount);
+            return canvasProvider.createBitmap();
+        } finally {
+            if (oldCanvas != null) {
+                attachInfo.mCanvas = oldCanvas;
+            }
         }
-
-        mPrivateFlags = flags;
-
-        canvas.restoreToCount(restoreCount);
-        canvas.setBitmap(null);
-        canvas.setHwBitmapsInSwModeEnabled(enabledHwBitmapsInSwMode);
-
-        if (attachInfo != null) {
-            // Restore the cached Canvas for our siblings
-            attachInfo.mCanvas = canvas;
-        }
-
-        return bitmap;
     }
 
     /**
@@ -20160,13 +20288,56 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             }
         }
 
+        final boolean wasLayoutValid = isLayoutValid();
+
         mPrivateFlags &= ~PFLAG_FORCE_LAYOUT;
         mPrivateFlags3 |= PFLAG3_IS_LAID_OUT;
+
+        if (!wasLayoutValid && isFocused()) {
+            mPrivateFlags &= ~PFLAG_WANTS_FOCUS;
+            if (canTakeFocus()) {
+                // We have a robust focus, so parents should no longer be wanting focus.
+                clearParentsWantFocus();
+            } else if (!getViewRootImpl().isInLayout()) {
+                // This is a weird case. Most-likely the user, rather than ViewRootImpl, called
+                // layout. In this case, there's no guarantee that parent layouts will be evaluated
+                // and thus the safest action is to clear focus here.
+                clearFocusInternal(null, /* propagate */ true, /* refocus */ false);
+                clearParentsWantFocus();
+            } else if (!hasParentWantsFocus()) {
+                // original requestFocus was likely on this view directly, so just clear focus
+                clearFocusInternal(null, /* propagate */ true, /* refocus */ false);
+            }
+            // otherwise, we let parents handle re-assigning focus during their layout passes.
+        } else if ((mPrivateFlags & PFLAG_WANTS_FOCUS) != 0) {
+            mPrivateFlags &= ~PFLAG_WANTS_FOCUS;
+            View focused = findFocus();
+            if (focused != null) {
+                // Try to restore focus as close as possible to our starting focus.
+                if (!restoreDefaultFocus() && !hasParentWantsFocus()) {
+                    // Give up and clear focus once we've reached the top-most parent which wants
+                    // focus.
+                    focused.clearFocusInternal(null, /* propagate */ true, /* refocus */ false);
+                }
+            }
+        }
 
         if ((mPrivateFlags3 & PFLAG3_NOTIFY_AUTOFILL_ENTER_ON_LAYOUT) != 0) {
             mPrivateFlags3 &= ~PFLAG3_NOTIFY_AUTOFILL_ENTER_ON_LAYOUT;
             notifyEnterOrExitForAutoFillIfNeeded(true);
         }
+    }
+
+    private boolean hasParentWantsFocus() {
+        ViewParent parent = mParent;
+        while (parent instanceof ViewGroup) {
+            ViewGroup pv = (ViewGroup) parent;
+            if ((pv.mPrivateFlags & PFLAG_WANTS_FOCUS) != 0) {
+                return true;
+            }
+            parent = pv.mParent;
+        }
+        return false;
     }
 
     /**
@@ -20256,7 +20427,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                 mForegroundInfo.mBoundsChanged = true;
             }
 
-            notifySubtreeAccessibilityStateChangedIfNeeded();
+            notifyAccessibilitySubtreeChanged();
         }
         return changed;
     }
@@ -20274,6 +20445,23 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         if (mOverlay != null) {
             mOverlay.getOverlayView().setRight(newWidth);
             mOverlay.getOverlayView().setBottom(newHeight);
+        }
+        // If this isn't laid out yet, focus assignment will be handled during the "deferment/
+        // backtracking" of requestFocus during layout, so don't touch focus here.
+        if (!sCanFocusZeroSized && isLayoutValid()) {
+            if (newWidth <= 0 || newHeight <= 0) {
+                if (hasFocus()) {
+                    clearFocus();
+                    if (mParent instanceof ViewGroup) {
+                        ((ViewGroup) mParent).clearFocusedInCluster();
+                    }
+                }
+                clearAccessibilityFocus();
+            } else if (oldWidth <= 0 || oldHeight <= 0) {
+                if (mParent != null && canTakeFocus()) {
+                    mParent.focusableViewAvailable(this);
+                }
+            }
         }
         rebuildOutline();
     }
@@ -21683,8 +21871,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             if (selected) {
                 sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_SELECTED);
             } else {
-                notifyViewAccessibilityStateChangedIfNeeded(
-                        AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
+                notifyAccessibilityStateChanged(CONTENT_CHANGE_TYPE_UNDEFINED);
             }
         }
     }
@@ -22038,7 +22225,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      *
      * @param id the ID to search for
      * @return a view with given ID if found, or {@code null} otherwise
-     * @see View#findViewById(int)
+     * @see View#requireViewById(int)
      */
     @Nullable
     public final <T extends View> T findViewById(@IdRes int id) {
@@ -22046,6 +22233,29 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             return null;
         }
         return findViewTraversal(id);
+    }
+
+    /**
+     * Finds the first descendant view with the given ID, the view itself if the ID matches
+     * {@link #getId()}, or throws an IllegalArgumentException if the ID is invalid or there is no
+     * matching view in the hierarchy.
+     * <p>
+     * <strong>Note:</strong> In most cases -- depending on compiler support --
+     * the resulting view is automatically cast to the target class type. If
+     * the target class type is unconstrained, an explicit cast may be
+     * necessary.
+     *
+     * @param id the ID to search for
+     * @return a view with given ID
+     * @see View#findViewById(int)
+     */
+    @NonNull
+    public final <T extends View> T requireViewById(@IdRes int id) {
+        T view = findViewById(id);
+        if (view == null) {
+            throw new IllegalArgumentException("ID does not reference a View inside this View");
+        }
+        return view;
     }
 
     /**
@@ -23391,15 +23601,13 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             data.prepareToLeaveProcess((flags & View.DRAG_FLAG_GLOBAL) != 0);
         }
 
-        boolean okay = false;
-
         Point shadowSize = new Point();
         Point shadowTouchPoint = new Point();
         shadowBuilder.onProvideShadowMetrics(shadowSize, shadowTouchPoint);
 
-        if ((shadowSize.x < 0) || (shadowSize.y < 0) ||
-                (shadowTouchPoint.x < 0) || (shadowTouchPoint.y < 0)) {
-            throw new IllegalStateException("Drag shadow dimensions must not be negative");
+        if ((shadowSize.x <= 0) || (shadowSize.y <= 0)
+                || (shadowTouchPoint.x < 0) || (shadowTouchPoint.y < 0)) {
+            throw new IllegalStateException("Drag shadow dimensions must be positive");
         }
 
         if (ViewDebug.DEBUG_DRAG) {
@@ -23410,40 +23618,50 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             mAttachInfo.mDragSurface.release();
         }
         mAttachInfo.mDragSurface = new Surface();
+        mAttachInfo.mDragToken = null;
+
+        final ViewRootImpl root = mAttachInfo.mViewRootImpl;
+        final SurfaceSession session = new SurfaceSession(root.mSurface);
+        final SurfaceControl surface = new SurfaceControl.Builder(session)
+                .setName("drag surface")
+                .setSize(shadowSize.x, shadowSize.y)
+                .setFormat(PixelFormat.TRANSLUCENT)
+                .build();
         try {
-            mAttachInfo.mDragToken = mAttachInfo.mSession.prepareDrag(mAttachInfo.mWindow,
-                    flags, shadowSize.x, shadowSize.y, mAttachInfo.mDragSurface);
-            if (ViewDebug.DEBUG_DRAG) Log.d(VIEW_LOG_TAG, "prepareDrag returned token="
-                    + mAttachInfo.mDragToken + " surface=" + mAttachInfo.mDragSurface);
-            if (mAttachInfo.mDragToken != null) {
-                Canvas canvas = mAttachInfo.mDragSurface.lockCanvas(null);
-                try {
-                    canvas.drawColor(0, PorterDuff.Mode.CLEAR);
-                    shadowBuilder.onDrawShadow(canvas);
-                } finally {
-                    mAttachInfo.mDragSurface.unlockCanvasAndPost(canvas);
-                }
-
-                final ViewRootImpl root = getViewRootImpl();
-
-                // Cache the local state object for delivery with DragEvents
-                root.setLocalDragState(myLocalState);
-
-                // repurpose 'shadowSize' for the last touch point
-                root.getLastTouchPoint(shadowSize);
-
-                okay = mAttachInfo.mSession.performDrag(mAttachInfo.mWindow, mAttachInfo.mDragToken,
-                        root.getLastTouchSource(), shadowSize.x, shadowSize.y,
-                        shadowTouchPoint.x, shadowTouchPoint.y, data);
-                if (ViewDebug.DEBUG_DRAG) Log.d(VIEW_LOG_TAG, "performDrag returned " + okay);
+            mAttachInfo.mDragSurface.copyFrom(surface);
+            final Canvas canvas = mAttachInfo.mDragSurface.lockCanvas(null);
+            try {
+                canvas.drawColor(0, PorterDuff.Mode.CLEAR);
+                shadowBuilder.onDrawShadow(canvas);
+            } finally {
+                mAttachInfo.mDragSurface.unlockCanvasAndPost(canvas);
             }
+
+            // Cache the local state object for delivery with DragEvents
+            root.setLocalDragState(myLocalState);
+
+            // repurpose 'shadowSize' for the last touch point
+            root.getLastTouchPoint(shadowSize);
+
+            mAttachInfo.mDragToken = mAttachInfo.mSession.performDrag(
+                    mAttachInfo.mWindow, flags, surface, root.getLastTouchSource(),
+                    shadowSize.x, shadowSize.y, shadowTouchPoint.x, shadowTouchPoint.y, data);
+            if (ViewDebug.DEBUG_DRAG) {
+                Log.d(VIEW_LOG_TAG, "performDrag returned " + mAttachInfo.mDragToken);
+            }
+
+            return mAttachInfo.mDragToken != null;
         } catch (Exception e) {
             Log.e(VIEW_LOG_TAG, "Unable to initiate drag", e);
-            mAttachInfo.mDragSurface.destroy();
-            mAttachInfo.mDragSurface = null;
+            return false;
+        } finally {
+            if (mAttachInfo.mDragToken == null) {
+                mAttachInfo.mDragSurface.destroy();
+                mAttachInfo.mDragSurface = null;
+                root.setLocalDragState(null);
+            }
+            session.kill();
         }
-
-        return okay;
     }
 
     /**
@@ -26240,53 +26458,6 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
     }
 
     /**
-     * Resuable callback for sending
-     * {@link AccessibilityEvent#TYPE_VIEW_SCROLLED} accessibility event.
-     */
-    private class SendViewScrolledAccessibilityEvent implements Runnable {
-        public volatile boolean mIsPending;
-        public int mDeltaX;
-        public int mDeltaY;
-
-        public void post(int dx, int dy) {
-            mDeltaX += dx;
-            mDeltaY += dy;
-            if (!mIsPending) {
-                mIsPending = true;
-                postDelayed(this, ViewConfiguration.getSendRecurringAccessibilityEventsInterval());
-            }
-        }
-
-        @Override
-        public void run() {
-            if (AccessibilityManager.getInstance(mContext).isEnabled()) {
-                AccessibilityEvent event = AccessibilityEvent.obtain(
-                        AccessibilityEvent.TYPE_VIEW_SCROLLED);
-                event.setScrollDeltaX(mDeltaX);
-                event.setScrollDeltaY(mDeltaY);
-                sendAccessibilityEventUnchecked(event);
-            }
-            reset();
-        }
-
-        private void reset() {
-            mIsPending = false;
-            mDeltaX = 0;
-            mDeltaY = 0;
-        }
-    }
-
-    /**
-     * Remove the pending callback for sending a
-     * {@link AccessibilityEvent#TYPE_VIEW_SCROLLED} accessibility event.
-     */
-    private void cancel(@Nullable SendViewScrolledAccessibilityEvent callback) {
-        if (callback == null || !callback.mIsPending) return;
-        removeCallbacks(callback);
-        callback.reset();
-    }
-
-    /**
      * <p>
      * This class represents a delegate that can be registered in a {@link View}
      * to enhance accessibility support via composition rather via inheritance.
@@ -26902,6 +27073,8 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         final boolean fromTouch = (mPrivateFlags3 & PFLAG3_FINGER_DOWN) == PFLAG3_FINGER_DOWN;
         mTooltipInfo.mTooltipPopup.show(this, x, y, fromTouch, mTooltipInfo.mTooltipText);
         mAttachInfo.mTooltipHost = this;
+        // The available accessibility actions have changed
+        notifyAccessibilityStateChanged(CONTENT_CHANGE_TYPE_UNDEFINED);
         return true;
     }
 
@@ -26920,6 +27093,8 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         if (mAttachInfo != null) {
             mAttachInfo.mTooltipHost = null;
         }
+        // The available accessibility actions have changed
+        notifyAccessibilityStateChanged(CONTENT_CHANGE_TYPE_UNDEFINED);
     }
 
     private boolean showLongClickTooltip(int x, int y) {
@@ -26928,8 +27103,8 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         return showTooltip(x, y, true);
     }
 
-    private void showHoverTooltip() {
-        showTooltip(mTooltipInfo.mAnchorX, mTooltipInfo.mAnchorY, false);
+    private boolean showHoverTooltip() {
+        return showTooltip(mTooltipInfo.mAnchorX, mTooltipInfo.mAnchorY, false);
     }
 
     boolean dispatchTooltipHoverEvent(MotionEvent event) {

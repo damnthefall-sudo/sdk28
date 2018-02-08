@@ -33,15 +33,18 @@ class TunerAdapter extends RadioTuner {
     private static final String TAG = "BroadcastRadio.TunerAdapter";
 
     @NonNull private final ITuner mTuner;
+    @NonNull private final TunerCallbackAdapter mCallback;
     private boolean mIsClosed = false;
 
     private @RadioManager.Band int mBand;
 
-    TunerAdapter(ITuner tuner, @RadioManager.Band int band) {
-        if (tuner == null) {
-            throw new NullPointerException();
-        }
-        mTuner = tuner;
+    private ProgramList mLegacyListProxy;
+    private Map<String, String> mLegacyListFilter;
+
+    TunerAdapter(@NonNull ITuner tuner, @NonNull TunerCallbackAdapter callback,
+            @RadioManager.Band int band) {
+        mTuner = Objects.requireNonNull(tuner);
+        mCallback = Objects.requireNonNull(callback);
         mBand = band;
     }
 
@@ -53,6 +56,10 @@ class TunerAdapter extends RadioTuner {
                 return;
             }
             mIsClosed = true;
+            if (mLegacyListProxy != null) {
+                mLegacyListProxy.close();
+                mLegacyListProxy = null;
+            }
         }
         try {
             mTuner.close();
@@ -63,6 +70,7 @@ class TunerAdapter extends RadioTuner {
 
     @Override
     public int setConfiguration(RadioManager.BandConfig config) {
+        if (config == null) return RadioManager.STATUS_BAD_VALUE;
         try {
             mTuner.setConfiguration(config);
             mBand = config.getType();
@@ -226,26 +234,90 @@ class TunerAdapter extends RadioTuner {
     @Override
     public @NonNull List<RadioManager.ProgramInfo>
             getProgramList(@Nullable Map<String, String> vendorFilter) {
-        try {
-            return mTuner.getProgramList(vendorFilter);
-        } catch (RemoteException e) {
-            throw new RuntimeException("service died", e);
+        synchronized (mTuner) {
+            if (mLegacyListProxy == null || !Objects.equals(mLegacyListFilter, vendorFilter)) {
+                Log.i(TAG, "Program list filter has changed, requesting new list");
+                mLegacyListProxy = new ProgramList();
+                mLegacyListFilter = vendorFilter;
+
+                mCallback.clearLastCompleteList();
+                mCallback.setProgramListObserver(mLegacyListProxy, () -> { });
+                try {
+                    mTuner.startProgramListUpdates(new ProgramList.Filter(vendorFilter));
+                } catch (RemoteException ex) {
+                    throw new RuntimeException("service died", ex);
+                }
+            }
+
+            List<RadioManager.ProgramInfo> list = mCallback.getLastCompleteList();
+            if (list == null) throw new IllegalStateException("Program list is not ready yet");
+            return list;
+        }
+    }
+
+    @Override
+    public @Nullable ProgramList getDynamicProgramList(@Nullable ProgramList.Filter filter) {
+        synchronized (mTuner) {
+            if (mLegacyListProxy != null) {
+                mLegacyListProxy.close();
+                mLegacyListProxy = null;
+            }
+            mLegacyListFilter = null;
+
+            ProgramList list = new ProgramList();
+            mCallback.setProgramListObserver(list, () -> {
+                try {
+                    mTuner.stopProgramListUpdates();
+                } catch (RemoteException ex) {
+                    Log.e(TAG, "Couldn't stop program list updates", ex);
+                }
+            });
+
+            try {
+                mTuner.startProgramListUpdates(filter);
+            } catch (UnsupportedOperationException ex) {
+                return null;
+            } catch (RemoteException ex) {
+                mCallback.setProgramListObserver(null, () -> { });
+                throw new RuntimeException("service died", ex);
+            }
+
+            return list;
         }
     }
 
     @Override
     public boolean isAnalogForced() {
+        return isConfigFlagSet(RadioManager.CONFIG_FORCE_ANALOG);
+    }
+
+    @Override
+    public void setAnalogForced(boolean isForced) {
+        setConfigFlag(RadioManager.CONFIG_FORCE_ANALOG, isForced);
+    }
+
+    @Override
+    public boolean isConfigFlagSupported(@RadioManager.ConfigFlag int flag) {
         try {
-            return mTuner.isAnalogForced();
+            return mTuner.isConfigFlagSupported(flag);
         } catch (RemoteException e) {
             throw new RuntimeException("service died", e);
         }
     }
 
     @Override
-    public void setAnalogForced(boolean isForced) {
+    public boolean isConfigFlagSet(@RadioManager.ConfigFlag int flag) {
         try {
-            mTuner.setAnalogForced(isForced);
+            return mTuner.isConfigFlagSet(flag);
+        } catch (RemoteException e) {
+            throw new RuntimeException("service died", e);
+        }
+    }
+
+    @Override
+    public void setConfigFlag(@RadioManager.ConfigFlag int flag, boolean value) {
+        try {
+            mTuner.setConfigFlag(flag, value);
         } catch (RemoteException e) {
             throw new RuntimeException("service died", e);
         }

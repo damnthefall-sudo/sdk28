@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 The Android Open Source Project
+ * Copyright 2017 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +16,8 @@
 
 package android.support.v7.recyclerview.extensions;
 
-import android.arch.lifecycle.LiveData;
-import android.support.annotation.RestrictTo;
+import android.support.annotation.NonNull;
+import android.support.v7.util.AdapterListUpdateCallback;
 import android.support.v7.util.DiffUtil;
 import android.support.v7.util.ListUpdateCallback;
 import android.support.v7.widget.RecyclerView;
@@ -25,17 +25,18 @@ import android.support.v7.widget.RecyclerView;
 import java.util.List;
 
 /**
- * Helper object for displaying a List in {@link RecyclerView.Adapter RecyclerView.Adapter}, which
- * signals the adapter of changes when the List is changed by computing changes with DiffUtil in the
+ * Helper object for displaying a List in
+ * {@link android.support.v7.widget.RecyclerView.Adapter RecyclerView.Adapter}, which signals the
+ * adapter of changes when the List is changed by computing changes with DiffUtil in the
  * background.
  * <p>
  * For simplicity, the {@link ListAdapter} wrapper class can often be used instead of the
  * helper directly. This helper class is exposed for complex cases, and where overriding an adapter
  * base class to support List diffing isn't convenient.
  * <p>
- * The ListAdapterHelper can take a {@link LiveData} of List and present the data simply for an
- * adapter. It computes differences in List contents via DiffUtil on a background thread as new
- * Lists are received.
+ * The ListAdapterHelper can consume the values from a LiveData of <code>List</code> and present the
+ * data simply for an adapter. It computes differences in List contents via {@link DiffUtil} on a
+ * background thread as new <code>List</code>s are received.
  * <p>
  * It provides a simple list-like API with {@link #getItem(int)} and {@link #getItemCount()} for an
  * adapter to acquire and present data objects.
@@ -68,10 +69,8 @@ import java.util.List;
  * }
  *
  * class UserAdapter extends RecyclerView.Adapter&lt;UserViewHolder> {
- *     private final ListAdapterHelper&lt;User> mHelper;
- *     public UserAdapter(ListAdapterHelper.Builder&lt;User> builder) {
- *         mHelper = new ListAdapterHelper(this, User.DIFF_CALLBACK);
- *     }
+ *     private final ListAdapterHelper&lt;User> mHelper =
+ *             new ListAdapterHelper(this, DIFF_CALLBACK);
  *     {@literal @}Override
  *     public int getItemCount() {
  *         return mHelper.getItemCount();
@@ -84,7 +83,8 @@ import java.util.List;
  *         User user = mHelper.getItem(position);
  *         holder.bindTo(user);
  *     }
- *     public static final DiffCallback&lt;User> DIFF_CALLBACK = new DiffCallback&lt;User>() {
+ *     public static final DiffUtil.ItemCallback&lt;User> DIFF_CALLBACK
+ *             = new DiffUtil.ItemCallback&lt;User>() {
  *         {@literal @}Override
  *         public boolean areItemsTheSame(
  *                 {@literal @}NonNull User oldUser, {@literal @}NonNull User newUser) {
@@ -107,47 +107,37 @@ public class ListAdapterHelper<T> {
     private final ListUpdateCallback mUpdateCallback;
     private final ListAdapterConfig<T> mConfig;
 
-    @SuppressWarnings("WeakerAccess")
-    public ListAdapterHelper(ListUpdateCallback listUpdateCallback,
-            ListAdapterConfig<T> config) {
-        mUpdateCallback = listUpdateCallback;
-        mConfig = config;
+    /**
+     * Convenience for
+     * {@code PagedListAdapterHelper(new AdapterListUpdateCallback(adapter),
+     * new ListAdapterConfig.Builder().setDiffCallback(diffCallback).build());}
+     *
+     * @param adapter Adapter to dispatch position updates to.
+     * @param diffCallback ItemCallback that compares items to dispatch appropriate animations when
+     *
+     * @see DiffUtil.DiffResult#dispatchUpdatesTo(RecyclerView.Adapter)
+     */
+    public ListAdapterHelper(@NonNull RecyclerView.Adapter adapter,
+            @NonNull DiffUtil.ItemCallback<T> diffCallback) {
+        mUpdateCallback = new AdapterListUpdateCallback(adapter);
+        mConfig = new ListAdapterConfig.Builder<>(diffCallback).build();
     }
 
     /**
-     * Default ListUpdateCallback that dispatches directly to an adapter. Can be replaced by a
-     * custom ListUpdateCallback if e.g. your adapter has a header in it, and so has an offset
-     * between list positions and adapter positions.
+     * Create a ListAdapterHelper with the provided config, and ListUpdateCallback to dispatch
+     * updates to.
      *
-     * @hide
+     * @param listUpdateCallback Callback to dispatch updates to.
+     * @param config Config to define background work Executor, and DiffUtil.ItemCallback for
+     *               computing List diffs.
+     *
+     * @see DiffUtil.DiffResult#dispatchUpdatesTo(RecyclerView.Adapter)
      */
-    @RestrictTo(RestrictTo.Scope.LIBRARY_GROUP)
-    public static class AdapterCallback implements ListUpdateCallback {
-        private final RecyclerView.Adapter mAdapter;
-
-        public AdapterCallback(RecyclerView.Adapter adapter) {
-            mAdapter = adapter;
-        }
-
-        @Override
-        public void onInserted(int position, int count) {
-            mAdapter.notifyItemRangeInserted(position, count);
-        }
-
-        @Override
-        public void onRemoved(int position, int count) {
-            mAdapter.notifyItemRangeRemoved(position, count);
-        }
-
-        @Override
-        public void onMoved(int fromPosition, int toPosition) {
-            mAdapter.notifyItemMoved(fromPosition, toPosition);
-        }
-
-        @Override
-        public void onChanged(int position, int count, Object payload) {
-            mAdapter.notifyItemRangeChanged(position, count, payload);
-        }
+    @SuppressWarnings("WeakerAccess")
+    public ListAdapterHelper(@NonNull ListUpdateCallback listUpdateCallback,
+            @NonNull ListAdapterConfig<T> config) {
+        mUpdateCallback = listUpdateCallback;
+        mConfig = config;
     }
 
     private List<T> mList;
@@ -173,7 +163,8 @@ public class ListAdapterHelper<T> {
 
     /**
      * Get the number of items currently presented by this AdapterHelper. This value can be directly
-     * returned to {@link RecyclerView.Adapter#getItemCount()}.
+     * returned to {@link android.support.v7.widget.RecyclerView.Adapter#getItemCount()
+     * RecyclerView.Adapter.getItemCount()}.
      *
      * @return Number of items being presented.
      */

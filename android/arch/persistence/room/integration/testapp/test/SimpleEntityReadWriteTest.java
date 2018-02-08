@@ -267,6 +267,18 @@ public class SimpleEntityReadWriteTest {
     }
 
     @Test
+    public void returnBoolean() {
+        User user1 = TestUtil.createUser(1);
+        User user2 = TestUtil.createUser(2);
+        user1.setAdmin(true);
+        user2.setAdmin(false);
+        mUserDao.insert(user1);
+        mUserDao.insert(user2);
+        assertThat(mUserDao.isAdmin(1), is(true));
+        assertThat(mUserDao.isAdmin(2), is(false));
+    }
+
+    @Test
     public void findByCollateNoCase() {
         User user = TestUtil.createUser(3);
         user.setCustomField("abc");
@@ -480,6 +492,36 @@ public class SimpleEntityReadWriteTest {
         }
         assertTrue("SQLiteConstraintException expected", caught);
         assertThat(mUserDao.count(), is(0));
+    }
+
+    @Test
+    public void transactionByDefaultImplementation() {
+        Pet pet1 = TestUtil.createPet(1);
+        mPetDao.insertOrReplace(pet1);
+        assertThat(mPetDao.count(), is(1));
+        assertThat(mPetDao.allIds()[0], is(1));
+        Pet pet2 = TestUtil.createPet(2);
+        mPetDao.deleteAndInsert(pet1, pet2, false);
+        assertThat(mPetDao.count(), is(1));
+        assertThat(mPetDao.allIds()[0], is(2));
+    }
+
+    @Test
+    public void transactionByDefaultImplementation_failure() {
+        Pet pet1 = TestUtil.createPet(1);
+        mPetDao.insertOrReplace(pet1);
+        assertThat(mPetDao.count(), is(1));
+        assertThat(mPetDao.allIds()[0], is(1));
+        Pet pet2 = TestUtil.createPet(2);
+        Throwable throwable = null;
+        try {
+            mPetDao.deleteAndInsert(pet1, pet2, true);
+        } catch (Throwable t) {
+            throwable = t;
+        }
+        assertNotNull("Was expecting an exception", throwable);
+        assertThat(mPetDao.count(), is(1));
+        assertThat(mPetDao.allIds()[0], is(1));
     }
 
     @Test

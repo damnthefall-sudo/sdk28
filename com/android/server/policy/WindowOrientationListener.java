@@ -16,6 +16,9 @@
 
 package com.android.server.policy;
 
+import static com.android.server.wm.proto.WindowOrientationListenerProto.ENABLED;
+import static com.android.server.wm.proto.WindowOrientationListenerProto.ROTATION;
+
 import android.content.Context;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
@@ -24,12 +27,11 @@ import android.hardware.SensorManager;
 import android.os.Handler;
 import android.os.SystemClock;
 import android.os.SystemProperties;
-import android.text.TextUtils;
 import android.util.Slog;
+import android.util.proto.ProtoOutputStream;
 import android.view.Surface;
 
 import java.io.PrintWriter;
-import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -65,7 +67,7 @@ public abstract class WindowOrientationListener {
 
     /**
      * Creates a new WindowOrientationListener.
-     * 
+     *
      * @param context for the WindowOrientationListener.
      * @param handler Provides the Looper for receiving sensor updates.
      */
@@ -75,12 +77,12 @@ public abstract class WindowOrientationListener {
 
     /**
      * Creates a new WindowOrientationListener.
-     * 
+     *
      * @param context for the WindowOrientationListener.
      * @param handler Provides the Looper for receiving sensor updates.
      * @param rate at which sensor events are processed (see also
      * {@link android.hardware.SensorManager SensorManager}). Use the default
-     * value of {@link android.hardware.SensorManager#SENSOR_DELAY_NORMAL 
+     * value of {@link android.hardware.SensorManager#SENSOR_DELAY_NORMAL
      * SENSOR_DELAY_NORMAL} for simple screen orientation change detection.
      *
      * This constructor is private since no one uses it.
@@ -89,7 +91,28 @@ public abstract class WindowOrientationListener {
         mHandler = handler;
         mSensorManager = (SensorManager)context.getSystemService(Context.SENSOR_SERVICE);
         mRate = rate;
-        mSensor = mSensorManager.getDefaultSensor(Sensor.TYPE_DEVICE_ORIENTATION);
+        List<Sensor> l = mSensorManager.getSensorList(Sensor.TYPE_DEVICE_ORIENTATION);
+        Sensor wakeUpDeviceOrientationSensor = null;
+        Sensor nonWakeUpDeviceOrientationSensor = null;
+        /**
+         *  Prefer the wakeup form of the sensor if implemented.
+         *  It's OK to look for just two types of this sensor and use
+         *  the last found. Typical devices will only have one sensor of
+         *  this type.
+         */
+        for (Sensor s : l) {
+            if (s.isWakeUpSensor()) {
+                wakeUpDeviceOrientationSensor = s;
+            } else {
+                nonWakeUpDeviceOrientationSensor = s;
+            }
+        }
+
+        if (wakeUpDeviceOrientationSensor != null) {
+            mSensor = wakeUpDeviceOrientationSensor;
+        } else {
+            mSensor = nonWakeUpDeviceOrientationSensor;
+        }
 
         if (mSensor != null) {
             mOrientationJudge = new OrientationSensorJudge();
@@ -231,6 +254,15 @@ public abstract class WindowOrientationListener {
      * @see android.view.Surface
      */
     public abstract void onProposedRotationChanged(int rotation);
+
+    public void writeToProto(ProtoOutputStream proto, long fieldId) {
+        final long token = proto.start(fieldId);
+        synchronized (mLock) {
+            proto.write(ENABLED, mEnabled);
+            proto.write(ROTATION, mCurrentRotation);
+        }
+        proto.end(token);
+    }
 
     public void dump(PrintWriter pw, String prefix) {
         synchronized (mLock) {

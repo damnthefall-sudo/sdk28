@@ -18,6 +18,7 @@ package com.android.server.autofill;
 
 import static android.app.ActivityManagerInternal.ASSIST_KEY_RECEIVER_EXTRAS;
 import static android.app.ActivityManagerInternal.ASSIST_KEY_STRUCTURE;
+import static android.service.autofill.AutofillFieldClassificationService.EXTRA_SCORES;
 import static android.service.autofill.FillRequest.FLAG_MANUAL_REQUEST;
 import static android.service.autofill.FillRequest.INVALID_REQUEST_ID;
 import static android.view.autofill.AutofillManager.ACTION_START_SESSION;
@@ -29,7 +30,6 @@ import static com.android.server.autofill.Helper.sDebug;
 import static com.android.server.autofill.Helper.sPartitionMaxCount;
 import static com.android.server.autofill.Helper.sVerbose;
 import static com.android.server.autofill.Helper.toArray;
-import static com.android.server.autofill.ViewState.STATE_AUTOFILLED;
 import static com.android.server.autofill.ViewState.STATE_RESTARTED_SESSION;
 
 import android.annotation.NonNull;
@@ -51,10 +51,13 @@ import android.os.Binder;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.os.Parcelable;
+import android.os.RemoteCallback;
 import android.os.RemoteException;
 import android.os.SystemClock;
+import android.service.autofill.AutofillFieldClassificationService.Scores;
 import android.service.autofill.AutofillService;
 import android.service.autofill.Dataset;
+import android.service.autofill.FieldClassification;
 import android.service.autofill.FieldClassification.Match;
 import android.service.autofill.FillContext;
 import android.service.autofill.FillRequest;
@@ -65,7 +68,6 @@ import android.service.autofill.SaveInfo;
 import android.service.autofill.SaveRequest;
 import android.service.autofill.UserData;
 import android.service.autofill.ValueFinder;
-import android.service.autofill.FieldClassification;
 import android.util.ArrayMap;
 import android.util.ArraySet;
 import android.util.LocalLog;
@@ -90,6 +92,7 @@ import com.android.server.autofill.ui.PendingUi;
 import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -207,6 +210,9 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
     @GuardedBy("mLock")
     private final LocalLog mUiLatencyHistory;
 
+    @GuardedBy("mLock")
+    private final LocalLog mWtfHistory;
+
     /**
      * Receiver of assist data from the app's {@link Activity}.
      */
@@ -238,7 +244,13 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
                 // ONE_WAY warning because system_service could block on app calls. We need to
                 // change AssistStructure so it provides a "one-way" writeToParcel() method that
                 // sends all the data
-                structure.ensureData();
+                try {
+                    structure.ensureData();
+                } catch (RuntimeException e) {
+                    wtf(e, "Exception lazy loading assist structure for %s: %s",
+                            structure.getActivityComponent(), e);
+                    return;
+                }
 
                 // Sanitize structure before it's sent to service.
                 final ComponentName componentNameFromApp = structure.getActivityComponent();
@@ -444,6 +456,7 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
             @NonNull Context context, @NonNull HandlerCaller handlerCaller, int userId,
             @NonNull Object lock, int sessionId, int uid, @NonNull IBinder activityToken,
             @NonNull IBinder client, boolean hasCallback, @NonNull LocalLog uiLatencyHistory,
+            @NonNull LocalLog wtfHistory,
             @NonNull ComponentName serviceComponentName, @NonNull ComponentName componentName,
             int flags) {
         id = sessionId;
@@ -458,6 +471,7 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
         mActivityToken = activityToken;
         mHasCallback = hasCallback;
         mUiLatencyHistory = uiLatencyHistory;
+        mWtfHistory = wtfHistory;
         mComponentName = componentName;
         mClient = IAutoFillManagerClient.Stub.asInterface(client);
 
@@ -970,18 +984,6 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
 
         final UserData userData = mService.getUserData();
 
-        final ArrayList<AutofillId> detectedFieldIds;
-        final ArrayList<FieldClassification> detectedFieldClassifications;
-
-        if (userData != null) {
-            final int maxFieldsSize = UserData.getMaxFieldClassificationIdsSize();
-            detectedFieldIds = new ArrayList<>(maxFieldsSize);
-            detectedFieldClassifications = new ArrayList<>(maxFieldsSize);
-        } else {
-            detectedFieldIds = null;
-            detectedFieldClassifications = null;
-        }
-
         for (int i = 0; i < mViewStates.size(); i++) {
             final ViewState viewState = mViewStates.valueAt(i);
             final int state = viewState.getState();
@@ -1086,31 +1088,14 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
                         } // for j
                     }
 
-                    // Sets field classification score for field
-                    if (userData!= null) {
-                        setScore(detectedFieldIds, detectedFieldClassifications, userData,
-                                viewState.id, currentValue);
-                    }
                 } // else
             } // else
-        }
-
-        if (sVerbose) {
-            Slog.v(TAG, "logContextCommitted(): id=" + id
-                    + ", selectedDatasetids=" + mSelectedDatasetIds
-                    + ", ignoredDatasetIds=" + ignoredDatasets
-                    + ", changedAutofillIds=" + changedFieldIds
-                    + ", changedDatasetIds=" + changedDatasetIds
-                    + ", manuallyFilledIds=" + manuallyFilledIds
-                    + ", detectedFieldIds=" + detectedFieldIds
-                    + ", detectedFieldClassifications=" + detectedFieldClassifications
-                    );
         }
 
         ArrayList<AutofillId> manuallyFilledFieldIds = null;
         ArrayList<ArrayList<String>> manuallyFilledDatasetIds = null;
 
-        // Must "flatten" the map to the parcellable collection primitives
+        // Must "flatten" the map to the parcelable collection primitives
         if (manuallyFilledIds != null) {
             final int size = manuallyFilledIds.size();
             manuallyFilledFieldIds = new ArrayList<>(size);
@@ -1123,20 +1108,32 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
             }
         }
 
-        mService.logContextCommittedLocked(id, mClientState, mSelectedDatasetIds, ignoredDatasets,
-                changedFieldIds, changedDatasetIds,
-                manuallyFilledFieldIds, manuallyFilledDatasetIds,
-                detectedFieldIds, detectedFieldClassifications, mComponentName.getPackageName());
+        // Sets field classification scores
+        final FieldClassificationStrategy fcStrategy = mService.getFieldClassificationStrategy();
+        if (userData != null && fcStrategy != null) {
+            logFieldClassificationScoreLocked(fcStrategy, ignoredDatasets, changedFieldIds,
+                    changedDatasetIds, manuallyFilledFieldIds, manuallyFilledDatasetIds,
+                    userData, mViewStates.values());
+        } else {
+            mService.logContextCommittedLocked(id, mClientState, mSelectedDatasetIds,
+                    ignoredDatasets, changedFieldIds, changedDatasetIds,
+                    manuallyFilledFieldIds, manuallyFilledDatasetIds,
+                    mComponentName.getPackageName());
+        }
     }
 
     /**
      * Adds the matches to {@code detectedFieldsIds} and {@code detectedFieldClassifications} for
      * {@code fieldId} based on its {@code currentValue} and {@code userData}.
      */
-    private static void setScore(@NonNull ArrayList<AutofillId> detectedFieldIds,
-            @NonNull ArrayList<FieldClassification> detectedFieldClassifications,
-            @NonNull UserData userData, @NonNull AutofillId fieldId,
-            @NonNull AutofillValue currentValue) {
+    private void logFieldClassificationScoreLocked(
+            @NonNull FieldClassificationStrategy fcStrategy,
+            @NonNull ArraySet<String> ignoredDatasets,
+            @NonNull ArrayList<AutofillId> changedFieldIds,
+            @NonNull ArrayList<String> changedDatasetIds,
+            @NonNull ArrayList<AutofillId> manuallyFilledFieldIds,
+            @NonNull ArrayList<ArrayList<String>> manuallyFilledDatasetIds,
+            @NonNull UserData userData, @NonNull Collection<ViewState> viewStates) {
 
         final String[] userValues = userData.getValues();
         final String[] remoteIds = userData.getRemoteIds();
@@ -1150,26 +1147,80 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
             return;
         }
 
-        ArrayList<Match> matches = null;
-        for (int i = 0; i < userValues.length; i++) {
-            String remoteId = remoteIds[i];
-            final String value = userValues[i];
-            final float score = userData.getScorer().getScore(currentValue, value);
-            if (score > 0) {
-                if (sVerbose) {
-                    Slog.v(TAG, "adding score " + score + " at index " + i + " and id " + fieldId);
-                }
-                if (matches == null) {
-                    matches = new ArrayList<>(userValues.length);
-                }
-                matches.add(new Match(remoteId, score));
+        final int maxFieldsSize = UserData.getMaxFieldClassificationIdsSize();
+
+        final ArrayList<AutofillId> detectedFieldIds = new ArrayList<>(maxFieldsSize);
+        final ArrayList<FieldClassification> detectedFieldClassifications = new ArrayList<>(
+                maxFieldsSize);
+
+        final String algorithm = userData.getFieldClassificationAlgorithm();
+        final Bundle algorithmArgs = userData.getAlgorithmArgs();
+        final int viewsSize = viewStates.size();
+
+        // First, we get all scores.
+        final AutofillId[] fieldIds = new AutofillId[viewsSize];
+        final ArrayList<AutofillValue> currentValues = new ArrayList<>(viewsSize);
+        int k = 0;
+        for (ViewState viewState : viewStates) {
+            currentValues.add(viewState.getCurrentValue());
+            fieldIds[k++] = viewState.id;
+        }
+
+        // Then use the results, asynchronously
+        final RemoteCallback callback = new RemoteCallback((result) -> {
+            if (result == null) {
+                if (sDebug) Slog.d(TAG, "setFieldClassificationScore(): no results");
+                mService.logContextCommittedLocked(id, mClientState, mSelectedDatasetIds,
+                        ignoredDatasets, changedFieldIds, changedDatasetIds,
+                        manuallyFilledFieldIds, manuallyFilledDatasetIds,
+                        mComponentName.getPackageName());
+                return;
             }
-            else if (sVerbose) Slog.v(TAG, "skipping score 0 at index " + i + " and id " + fieldId);
-        }
-        if (matches != null) {
-            detectedFieldIds.add(fieldId);
-            detectedFieldClassifications.add(new FieldClassification(matches));
-        }
+            final Scores scores = result.getParcelable(EXTRA_SCORES);
+            if (scores == null) {
+                Slog.w(TAG, "No field classification score on " + result);
+                return;
+            }
+            int i = 0, j = 0;
+            try {
+                for (i = 0; i < viewsSize; i++) {
+                    final AutofillId fieldId = fieldIds[i];
+
+                    ArrayList<Match> matches = null;
+                    for (j = 0; j < userValues.length; j++) {
+                        String remoteId = remoteIds[j];
+                        final float score = scores.scores[i][j];
+                        if (score > 0) {
+                            if (sVerbose) {
+                                Slog.v(TAG, "adding score " + score + " at index " + j + " and id "
+                                        + fieldId);
+                            }
+                            if (matches == null) {
+                                matches = new ArrayList<>(userValues.length);
+                            }
+                            matches.add(new Match(remoteId, score));
+                        }
+                        else if (sVerbose) {
+                            Slog.v(TAG, "skipping score 0 at index " + j + " and id " + fieldId);
+                        }
+                    }
+                    if (matches != null) {
+                        detectedFieldIds.add(fieldId);
+                        detectedFieldClassifications.add(new FieldClassification(matches));
+                    }
+                }
+            } catch (ArrayIndexOutOfBoundsException e) {
+                wtf(e, "Error accessing FC score at [%d, %d] (%s): %s", i, j, scores, e);
+                return;
+            }
+
+            mService.logContextCommittedLocked(id, mClientState, mSelectedDatasetIds,
+                    ignoredDatasets, changedFieldIds, changedDatasetIds, manuallyFilledFieldIds,
+                    manuallyFilledDatasetIds, detectedFieldIds, detectedFieldClassifications,
+                    mComponentName.getPackageName());
+        });
+
+        fcStrategy.getScores(callback, algorithm, algorithmArgs, currentValues, userValues);
     }
 
     /**
@@ -1809,7 +1860,7 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
                 mUiLatencyHistory.log(historyLog.toString());
 
                 final LogMaker metricsLog = newLogMaker(MetricsEvent.AUTOFILL_UI_LATENCY)
-                        .setCounterValue((int) duration);
+                        .addTaggedData(MetricsEvent.FIELD_AUTOFILL_DURATION, duration);
                 mMetricsLogger.write(metricsLog);
             }
         }
@@ -2108,9 +2159,10 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
         final Intent fillInIntent = new Intent();
 
         final FillContext context = getFillContextByRequestIdLocked(requestId);
+
         if (context == null) {
-            Slog.wtf(TAG, "createAuthFillInIntentLocked(): no FillContext. requestId=" + requestId
-                    + "; mContexts= " + mContexts);
+            wtf(null, "createAuthFillInIntentLocked(): no FillContext. requestId=%d; mContexts=%s",
+                    requestId, mContexts);
             return null;
         }
         fillInIntent.putExtra(AutofillManager.EXTRA_ASSIST_STRUCTURE, context.getStructure());
@@ -2374,5 +2426,16 @@ final class Session implements RemoteFillService.FillServiceCallbacks, ViewState
 
     private void writeLog(int category) {
         mMetricsLogger.write(newLogMaker(category));
+    }
+
+    private void wtf(@Nullable Exception e, String fmt, Object...args) {
+        final String message = String.format(fmt, args);
+        mWtfHistory.log(message);
+
+        if (e != null) {
+            Slog.wtf(TAG, message, e);
+        } else {
+            Slog.wtf(TAG, message);
+        }
     }
 }

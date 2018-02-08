@@ -51,7 +51,8 @@ import java.util.List;
  */
 public class OverviewProxyService implements CallbackController<OverviewProxyListener>, Dumpable {
 
-    private static final String TAG = "OverviewProxyService";
+    public static final String TAG_OPS = "OverviewProxyService";
+    public static final boolean DEBUG_OVERVIEW_PROXY = false;
     private static final long BACKOFF_MILLIS = 5000;
 
     private final Context mContext;
@@ -76,6 +77,15 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
                 Binder.restoreCallingIdentity(token);
             }
         }
+
+        public void onRecentsAnimationStarted() {
+            long token = Binder.clearCallingIdentity();
+            try {
+                notifyRecentsAnimationStarted();
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
     };
 
     private final BroadcastReceiver mLauncherAddedReceiver = new BroadcastReceiver() {
@@ -96,12 +106,12 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
                 try {
                     service.linkToDeath(mOverviewServiceDeathRcpt, 0);
                 } catch (RemoteException e) {
-                    Log.e(TAG, "Lost connection to launcher service", e);
+                    Log.e(TAG_OPS, "Lost connection to launcher service", e);
                 }
                 try {
                     mOverviewProxy.onBind(mSysUiProxy);
                 } catch (RemoteException e) {
-                    Log.e(TAG, "Failed to call onBind()", e);
+                    Log.e(TAG_OPS, "Failed to call onBind()", e);
                 }
                 notifyConnectionChanged();
             }
@@ -146,6 +156,7 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
         filter.addDataScheme("package");
         filter.addDataSchemeSpecificPart(mLauncherComponentName.getPackageName(),
                 PatternMatcher.PATTERN_LITERAL);
+        filter.addAction(Intent.ACTION_PACKAGE_CHANGED);
         mContext.registerReceiver(mLauncherAddedReceiver, filter);
     }
 
@@ -193,6 +204,10 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
         return mOverviewProxy;
     }
 
+    public ComponentName getLauncherComponent() {
+        return mLauncherComponentName;
+    }
+
     private void disconnectFromLauncherService() {
         if (mOverviewProxy != null) {
             mOverviewProxy.asBinder().unlinkToDeath(mOverviewServiceDeathRcpt, 0);
@@ -208,9 +223,15 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
         }
     }
 
+    private void notifyRecentsAnimationStarted() {
+        for (int i = mConnectionCallbacks.size() - 1; i >= 0; --i) {
+            mConnectionCallbacks.get(i).onRecentsAnimationStarted();
+        }
+    }
+
     @Override
     public void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
-        pw.println(TAG + " state:");
+        pw.println(TAG_OPS + " state:");
         pw.print("  mConnectionBackoffAttempts="); pw.println(mConnectionBackoffAttempts);
         pw.print("  isCurrentUserSetup="); pw.println(mDeviceProvisionedController
                 .isCurrentUserSetup());
@@ -218,6 +239,7 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
     }
 
     public interface OverviewProxyListener {
-        void onConnectionChanged(boolean isConnected);
+        default void onConnectionChanged(boolean isConnected) {}
+        default void onRecentsAnimationStarted() {}
     }
 }

@@ -16,21 +16,20 @@
 
 package androidx.app.slice.widget;
 
-import static android.app.slice.Slice.HINT_LIST;
-import static android.app.slice.Slice.HINT_LIST_ITEM;
 import static android.app.slice.Slice.HINT_NO_TINT;
 import static android.app.slice.Slice.HINT_SELECTED;
-import static android.app.slice.Slice.HINT_TITLE;
-import static android.app.slice.Slice.SUBTYPE_COLOR;
 import static android.app.slice.SliceItem.FORMAT_ACTION;
 import static android.app.slice.SliceItem.FORMAT_IMAGE;
 import static android.app.slice.SliceItem.FORMAT_INT;
-import static android.app.slice.SliceItem.FORMAT_SLICE;
-import static android.app.slice.SliceItem.FORMAT_TEXT;
 import static android.app.slice.SliceItem.FORMAT_TIMESTAMP;
 
+import static androidx.app.slice.core.SliceHints.EXTRA_SLIDER_VALUE;
 import static androidx.app.slice.core.SliceHints.EXTRA_TOGGLE_STATE;
-import static androidx.app.slice.core.SliceHints.HINT_SUMMARY;
+import static androidx.app.slice.core.SliceHints.SUBTYPE_MAX;
+import static androidx.app.slice.core.SliceHints.SUBTYPE_PROGRESS;
+import static androidx.app.slice.core.SliceHints.SUBTYPE_TOGGLE;
+import static androidx.app.slice.widget.SliceView.MODE_LARGE;
+import static androidx.app.slice.widget.SliceView.MODE_SMALL;
 
 import android.annotation.TargetApi;
 import android.app.PendingIntent;
@@ -38,25 +37,25 @@ import android.app.PendingIntent.CanceledException;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.drawable.Icon;
-import android.os.AsyncTask;
+import android.support.annotation.ColorInt;
 import android.support.annotation.RestrictTo;
 import android.util.Log;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.CompoundButton;
-import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.SeekBar;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.ToggleButton;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.function.Predicate;
 
 import androidx.app.slice.Slice;
 import androidx.app.slice.SliceItem;
-import androidx.app.slice.core.SliceHints;
 import androidx.app.slice.core.SliceQuery;
 import androidx.app.slice.view.R;
 
@@ -68,29 +67,31 @@ import androidx.app.slice.view.R;
  */
 @RestrictTo(RestrictTo.Scope.LIBRARY)
 @TargetApi(23)
-public class RowView extends FrameLayout implements SliceView.SliceModeView,
-        LargeSliceAdapter.SliceListView, View.OnClickListener {
+public class RowView extends SliceChildView implements View.OnClickListener {
 
     private static final String TAG = "RowView";
 
     // The number of items that fit on the right hand side of a small slice
     private static final int MAX_END_ITEMS = 3;
 
-    private int mIconSize;
-    private int mPadding;
-    private boolean mInSmallMode;
-    private boolean mIsHeader;
-
     private LinearLayout mStartContainer;
     private LinearLayout mContent;
     private TextView mPrimaryText;
     private TextView mSecondaryText;
     private View mDivider;
-    private CompoundButton mToggle;
+    private ArrayList<CompoundButton> mToggles = new ArrayList<>();
     private LinearLayout mEndContainer;
+    private SeekBar mSeekBar;
+    private ProgressBar mProgressBar;
 
-    private SliceItem mColorItem;
+    private boolean mInSmallMode;
+    private int mRowIndex;
+    private RowContent mRowContent;
     private SliceItem mRowAction;
+    private boolean mIsHeader;
+
+    private int mIconSize;
+    private int mPadding;
 
     public RowView(Context context) {
         super(context);
@@ -104,31 +105,37 @@ public class RowView extends FrameLayout implements SliceView.SliceModeView,
         mSecondaryText = (TextView) findViewById(android.R.id.summary);
         mDivider = findViewById(R.id.divider);
         mEndContainer = (LinearLayout) findViewById(android.R.id.widget_frame);
-    }
-
-    @Override
-    public View getView() {
-        return this;
+        mSeekBar = (SeekBar) findViewById(R.id.seek_bar);
+        mProgressBar = (ProgressBar) findViewById(R.id.progress_bar);
     }
 
     @Override
     public @SliceView.SliceMode int getMode() {
-        return SliceView.MODE_SMALL;
+        return mInSmallMode ? MODE_SMALL : MODE_LARGE;
     }
 
     @Override
-    public void setColor(SliceItem color) {
-        mColorItem = color;
+    public void setTint(@ColorInt int tintColor) {
+        super.setTint(tintColor);
+        if (mRowContent != null) {
+            // TODO -- can be smarter about this
+            resetView();
+            populateViews();
+        }
     }
 
     /**
      * This is called when RowView is being used as a component in a large template.
      */
     @Override
-    public void setSliceItem(SliceItem slice, boolean isHeader) {
-        mIsHeader = isHeader;
+    public void setSliceItem(SliceItem slice, boolean isHeader, int index,
+            SliceView.OnSliceActionListener observer) {
+        setSliceActionListener(observer);
         mInSmallMode = false;
-        populateViews(slice, slice);
+        mRowIndex = index;
+        mIsHeader = isHeader;
+        mRowContent = new RowContent(slice, !mIsHeader /* showStartItem */);
+        populateViews();
     }
 
     /**
@@ -137,208 +144,144 @@ public class RowView extends FrameLayout implements SliceView.SliceModeView,
     @Override
     public void setSlice(Slice slice) {
         mInSmallMode = true;
-        Slice.Builder sb = new Slice.Builder(slice.getUri());
-        sb.addSubSlice(slice);
-        Slice parentSlice = sb.build();
-        populateViews(parentSlice.getItems().get(0), getSummaryItem(slice));
+        mRowIndex = 0;
+        mIsHeader = true;
+        ListContent lc = new ListContent(slice);
+        mRowContent = new RowContent(lc.getSummaryItem(), false /* showStartItem */);
+        populateViews();
     }
 
-    private SliceItem getSummaryItem(Slice slice) {
-        List<SliceItem> items = slice.getItems();
-        // See if a summary is specified
-        SliceItem summary = SliceQuery.find(slice, FORMAT_SLICE, HINT_SUMMARY, null);
-        if (summary != null) {
-            return summary;
+    private void populateViews() {
+        resetView();
+        boolean showStart = false;
+        final SliceItem startItem = mRowContent.getStartItem();
+        if (startItem != null) {
+            final EventInfo info = new EventInfo(getMode(),
+                    EventInfo.ACTION_TYPE_BUTTON,
+                    EventInfo.ROW_TYPE_LIST, mRowIndex);
+            info.setPosition(EventInfo.POSITION_START, 0, 1);
+            showStart = addItem(startItem, mTintColor, true /* isStart */, 0 /* padding */, info);
         }
-        // First fallback is using a header
-        SliceItem header = SliceQuery.find(slice, FORMAT_SLICE, null, HINT_LIST_ITEM);
-        if (header != null) {
-            return header;
-        }
-        // Otherwise use the first non-color item and use it if it's a slice
-        SliceItem firstSlice = null;
-        for (int i = 0; i < items.size(); i++) {
-            if (!FORMAT_INT.equals(items.get(i).getFormat())) {
-                firstSlice = items.get(i);
-                break;
-            }
-        }
-        if (firstSlice != null && FORMAT_SLICE.equals(firstSlice.getFormat())) {
-            // Check if this slice is appropriate to use to populate small template
-            if (firstSlice.hasHint(HINT_LIST)) {
-                // Check for header, use that if it exists
-                SliceItem listHeader = SliceQuery.find(firstSlice, FORMAT_SLICE,
-                        null,
-                        new String[] {
-                                HINT_LIST_ITEM, HINT_LIST
-                        });
-                if (listHeader != null) {
-                    return SliceQuery.findFirstSlice(listHeader);
-                } else {
-                    // Otherwise use the first list item
-                    SliceItem newFirst = firstSlice.getSlice().getItems().get(0);
-                    return SliceQuery.findFirstSlice(newFirst);
-                }
-            } else {
-                // Not a list, find first slice with non-slice children
-                return SliceQuery.findFirstSlice(firstSlice);
-            }
-        }
-        // Fallback, just use this and convert to SliceItem type slice
-        Slice.Builder sb = new Slice.Builder(slice.getUri());
-        Slice s = sb.addSubSlice(slice).build();
-        return s.getItems().get(0);
-    }
+        mStartContainer.setVisibility(showStart ? View.VISIBLE : View.GONE);
 
-    @TargetApi(24)
-    private void populateViews(SliceItem fullSlice, SliceItem sliceItem) {
-        resetViews();
-        ArrayList<SliceItem> items = new ArrayList<>();
-        if (FORMAT_SLICE.equals(sliceItem.getFormat())) {
-            items = new ArrayList<>(sliceItem.getSlice().getItems());
-        } else {
-            items.add(sliceItem);
-        }
-
-        // These are the things that can go in our small template
-        SliceItem startItem = null;
-        SliceItem titleItem = null;
-        SliceItem subTitle = null;
-        ArrayList<SliceItem> endItems = new ArrayList<>();
-
-        // If the first item is an action check if it should be used to populate the content
-        // or if it should be in the start position.
-        SliceItem firstSlice = items.size() > 0 ? items.get(0) : null;
-        if (firstSlice != null && FORMAT_ACTION.equals(firstSlice.getFormat())) {
-            if (!SliceQuery.isSimpleAction(firstSlice)) {
-                mRowAction = firstSlice;
-                items.remove(0);
-                // Populating with first action, bias to use slice associated with this action
-                items.addAll(0, mRowAction.getSlice().getItems());
-            }
-        }
-
-        // Look through our items and try to figure out main content
-        for (int i = 0; i < items.size(); i++) {
-            SliceItem item = items.get(i);
-            List<String> hints = item.getHints();
-            String itemType = item.getFormat();
-            if (i == 0 && SliceQuery.isStartType((item))) {
-                startItem = item;
-            } else if (hints.contains(HINT_TITLE)) {
-                // Things with these hints could go in the title / start position
-                if ((startItem == null || !startItem.hasHint(HINT_TITLE))
-                        && SliceQuery.isStartType(item)) {
-                    startItem = item;
-                } else if ((titleItem == null || !titleItem.hasHint(HINT_TITLE))
-                        && FORMAT_TEXT.equals(itemType)) {
-                    titleItem = item;
-                } else {
-                    endItems.add(item);
-                }
-            } else if (FORMAT_TEXT.equals(item.getFormat())) {
-                if (titleItem == null) {
-                    titleItem = item;
-                } else if (subTitle == null) {
-                    subTitle = item;
-                } else {
-                    endItems.add(item);
-                }
-            } else if (FORMAT_SLICE.equals(item.getFormat())) {
-                List<SliceItem> subItems = item.getSlice().getItems();
-                for (int j = 0; j < subItems.size(); j++) {
-                    endItems.add(subItems.get(j));
-                }
-            } else {
-                endItems.add(item);
-            }
-        }
-
-        SliceItem colorItem = SliceQuery.findSubtype(fullSlice, FORMAT_INT, SUBTYPE_COLOR);
-        int color = colorItem != null
-                ? colorItem.getInt()
-                : (mColorItem != null)
-                        ? mColorItem.getInt()
-                        : -1;
-        // Populate main part of the template
-        if (!mIsHeader && !mInSmallMode && startItem != null) {
-            startItem = addItem(startItem, color, mStartContainer, 0 /* padding */)
-                    ? startItem
-                    : null;
-            if (startItem != null) {
-                endItems.remove(startItem);
-            }
-        } else if (startItem != null) {
-            endItems.add(0, startItem);
-            startItem = null;
-        }
-        mStartContainer.setVisibility(startItem != null ? View.VISIBLE : View.GONE);
+        final SliceItem titleItem = mRowContent.getTitleItem();
         if (titleItem != null) {
             mPrimaryText.setText(titleItem.getText());
         }
         mPrimaryText.setVisibility(titleItem != null ? View.VISIBLE : View.GONE);
+
+        final SliceItem subTitle = mRowContent.getSubtitleItem();
         if (subTitle != null) {
             mSecondaryText.setText(subTitle.getText());
         }
         mSecondaryText.setVisibility(subTitle != null ? View.VISIBLE : View.GONE);
 
-        // Figure out what end items we're showing
-        // If we're showing an action in this row check if it's a toggle
-        if (mRowAction != null && SliceQuery.hasHints(mRowAction.getSlice(),
-                SliceHints.SUBTYPE_TOGGLE) && addToggle(mRowAction, color)) {
-            // Can't show more end actions if we have a toggle so we're done
-            makeClickable(this);
+        final SliceItem slider = mRowContent.getSlider();
+        if (slider != null) {
+            addSlider(slider);
             return;
         }
-        // Check if we have a toggle somewhere in our end items
-        SliceItem toggleItem = endItems.stream()
-                .filter(new Predicate<SliceItem>() {
-                    @Override
-                    public boolean test(SliceItem item) {
-                        return FORMAT_ACTION.equals(item.getFormat())
-                                && SliceQuery.hasHints(item.getSlice(), SliceHints.SUBTYPE_TOGGLE);
-                    }
-                }).findFirst().orElse(null);
-        if (toggleItem != null) {
-            if (addToggle(toggleItem, color)) {
-                mDivider.setVisibility(mRowAction != null ? View.VISIBLE : View.GONE);
-                makeClickable(mRowAction != null ? mContent : this);
-                // Can't show more end actions if we have a toggle so we're done
-                return;
-            }
+
+        mRowAction = mRowContent.getContentIntent();
+        ArrayList<SliceItem> endItems = mRowContent.getEndItems();
+        boolean hasRowAction = mRowAction != null;
+        if (endItems.isEmpty()) {
+            if (hasRowAction) setViewClickable(this, true);
+            return;
         }
-        boolean clickableEndItem = false;
+
+        // If we're here we might be able to show end items
         int itemCount = 0;
+        // Prefer to show actions as end items if possible; fall back to the first format type.
+        String desiredFormat = mRowContent.endItemsContainAction()
+                ? FORMAT_ACTION : endItems.get(0).getFormat();
+        boolean firstItemIsADefaultToggle = false;
         for (int i = 0; i < endItems.size(); i++) {
-            SliceItem item = endItems.get(i);
+            final SliceItem endItem = endItems.get(i);
+            final String endFormat = endItem.getFormat();
             // Only show one type of format at the end of the slice, use whatever is first
             if (itemCount <= MAX_END_ITEMS
-                    && item.getFormat().equals(endItems.get(0).getFormat())) {
-                if (FORMAT_ACTION.equals(item.getFormat())
-                        && itemCount == 0
-                        && SliceQuery.hasHints(item.getSlice(), SliceHints.SUBTYPE_TOGGLE)
-                        && addToggle(item, color)) {
-                    // If a toggle is added we're done
-                    break;
-                } else if (addItem(item, color, mEndContainer, mPadding)) {
+                    && (desiredFormat.equals(endFormat)
+                    || FORMAT_TIMESTAMP.equals(endFormat))) {
+                final EventInfo info = new EventInfo(getMode(),
+                        EventInfo.ACTION_TYPE_BUTTON,
+                        EventInfo.ROW_TYPE_LIST, mRowIndex);
+                info.setPosition(EventInfo.POSITION_END, i,
+                        Math.min(endItems.size(), MAX_END_ITEMS));
+                if (addItem(endItem, mTintColor, false /* isStart */, mPadding, info)) {
                     itemCount++;
+                    if (itemCount == 1) {
+                        firstItemIsADefaultToggle = !mToggles.isEmpty()
+                                && SliceQuery.find(endItem.getSlice(), FORMAT_IMAGE) == null;
+                    }
                 }
             }
         }
-        if (mRowAction != null) {
-            makeClickable(clickableEndItem ? mContent : this);
+
+        boolean hasEndItemAction = FORMAT_ACTION.contentEquals(desiredFormat);
+        // If there is a row action and the first end item is a default toggle, show the divider.
+        mDivider.setVisibility(hasRowAction && firstItemIsADefaultToggle
+                ? View.VISIBLE : View.GONE);
+        if (hasRowAction) {
+            if (itemCount > 0 && hasEndItemAction) {
+                setViewClickable(mContent, true);
+            } else {
+                setViewClickable(this, true);
+            }
+        } else {
+            // If the only end item is an action, make the whole row clickable.
+            if (mRowContent.endItemsContainAction() && itemCount == 1) {
+                setViewClickable(this, true);
+            }
+        }
+    }
+
+    private void addSlider(final SliceItem slider) {
+        final ProgressBar progressBar;
+        if (FORMAT_ACTION.equals(slider.getFormat())) {
+            // Seek bar
+            progressBar = mSeekBar;
+            mSeekBar.setVisibility(View.VISIBLE);
+            SliceItem thumb = SliceQuery.find(slider, FORMAT_IMAGE);
+            if (thumb != null) {
+                mSeekBar.setThumb(thumb.getIcon().loadDrawable(getContext()));
+            }
+            mSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                @Override
+                public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                    try {
+                        PendingIntent pi = slider.getAction();
+                        Intent i = new Intent().putExtra(EXTRA_SLIDER_VALUE, progress);
+                        // TODO: sending this PendingIntent should be rate limited.
+                        pi.send(getContext(), 0, i, null, null);
+                    } catch (CanceledException e) { }
+                }
+
+                @Override
+                public void onStartTrackingTouch(SeekBar seekBar) { }
+
+                @Override
+                public void onStopTrackingTouch(SeekBar seekBar) { }
+            });
+        } else {
+            // Progress bar
+            progressBar = mProgressBar;
+            mProgressBar.setVisibility(View.VISIBLE);
+        }
+        SliceItem max = SliceQuery.findSubtype(slider, FORMAT_INT, SUBTYPE_MAX);
+        if (max != null) {
+            progressBar.setMax(max.getInt());
+        }
+        SliceItem progress = SliceQuery.findSubtype(slider, FORMAT_INT, SUBTYPE_PROGRESS);
+        if (progress != null) {
+            progressBar.setProgress(progress.getInt());
         }
     }
 
     /**
-     * @return Whether a toggle was added.
+     * Add a toggle view to container.
      */
-    private boolean addToggle(final SliceItem toggleItem, int color) {
-        if (!FORMAT_ACTION.equals(toggleItem.getFormat())
-                || !SliceQuery.hasHints(toggleItem.getSlice(), SliceHints.SUBTYPE_TOGGLE)) {
-            return false;
-        }
-
+    private void addToggle(final SliceItem toggleItem, int color, ViewGroup container) {
         // Check if this is a custom toggle
         Icon checkedIcon = null;
         List<SliceItem> sliceItems = toggleItem.getSlice().getItems();
@@ -347,51 +290,63 @@ public class RowView extends FrameLayout implements SliceView.SliceModeView,
                     ? sliceItems.get(0).getIcon()
                     : null;
         }
+        final CompoundButton toggle;
         if (checkedIcon != null) {
             if (color != -1) {
-                // TODO - Should these be tinted? What if the app wants diff colors per state?
+                // TODO - Should custom toggle buttons be tinted? What if the app wants diff
+                // colors per state?
                 checkedIcon.setTint(color);
             }
-            mToggle = new ToggleButton(getContext());
-            ((ToggleButton) mToggle).setTextOff("");
-            ((ToggleButton) mToggle).setTextOn("");
-            mToggle.setBackground(checkedIcon.loadDrawable(getContext()));
-            mEndContainer.addView(mToggle);
-            LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) mToggle.getLayoutParams();
+            toggle = new ToggleButton(getContext());
+            ((ToggleButton) toggle).setTextOff("");
+            ((ToggleButton) toggle).setTextOn("");
+            toggle.setBackground(checkedIcon.loadDrawable(getContext()));
+            container.addView(toggle);
+            LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) toggle.getLayoutParams();
             lp.width = mIconSize;
             lp.height = mIconSize;
         } else {
-            mToggle = new Switch(getContext());
-            mEndContainer.addView(mToggle);
+            toggle = new Switch(getContext());
+            container.addView(toggle);
         }
-        mToggle.setChecked(SliceQuery.hasHints(toggleItem.getSlice(), HINT_SELECTED));
-        mToggle.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+        toggle.setChecked(SliceQuery.hasHints(toggleItem.getSlice(), HINT_SELECTED));
+        toggle.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override
             public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
                 try {
                     PendingIntent pi = toggleItem.getAction();
                     Intent i = new Intent().putExtra(EXTRA_TOGGLE_STATE, isChecked);
                     pi.send(getContext(), 0, i, null, null);
+                    if (mObserver != null) {
+                        final EventInfo info = new EventInfo(getMode(),
+                                EventInfo.ACTION_TYPE_TOGGLE,
+                                EventInfo.ROW_TYPE_LIST, mRowIndex);
+                        info.state = isChecked ? EventInfo.STATE_ON : EventInfo.STATE_OFF;
+                        mObserver.onSliceAction(info, toggleItem);
+                    }
                 } catch (CanceledException e) {
-                    mToggle.setSelected(!isChecked);
+                    toggle.setSelected(!isChecked);
                 }
             }
         });
-        return true;
+        mToggles.add(toggle);
     }
 
     /**
      * Adds simple items to a container. Simple items include actions with icons, images, or
      * timestamps.
-     *
-     * @return Whether an item was added to the view.
      */
-    private boolean addItem(SliceItem sliceItem, int color, LinearLayout container, int padding) {
+    private boolean addItem(SliceItem sliceItem, int color, boolean isStart, int padding,
+            final EventInfo info) {
         SliceItem image = null;
         SliceItem action = null;
         SliceItem timeStamp = null;
-        if (FORMAT_ACTION.equals(sliceItem.getFormat())
-                && !sliceItem.hasHint(SliceHints.SUBTYPE_TOGGLE)) {
+        ViewGroup container = isStart ? mStartContainer : mEndContainer;
+        if (FORMAT_ACTION.equals(sliceItem.getFormat())) {
+            if (SliceQuery.hasHints(sliceItem.getSlice(), SUBTYPE_TOGGLE)) {
+                addToggle(sliceItem, color, container);
+                return true;
+            }
             image = SliceQuery.find(sliceItem.getSlice(), FORMAT_IMAGE);
             timeStamp = SliceQuery.find(sliceItem.getSlice(), FORMAT_TIMESTAMP);
             action = sliceItem;
@@ -424,16 +379,14 @@ public class RowView extends FrameLayout implements SliceView.SliceModeView,
             addedView.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    AsyncTask.execute(new Runnable() {
-                        @Override
-                        public void run() {
-                            try {
-                                sliceAction.getAction().send();
-                            } catch (CanceledException e) {
-                                e.printStackTrace();
-                            }
+                    try {
+                        sliceAction.getAction().send();
+                        if (mObserver != null) {
+                            mObserver.onSliceAction(info, sliceAction);
                         }
-                    });
+                    } catch (CanceledException e) {
+                        e.printStackTrace();
+                    }
                 }
             });
             addedView.setBackground(SliceViewUtil.getDrawable(getContext(),
@@ -446,33 +399,41 @@ public class RowView extends FrameLayout implements SliceView.SliceModeView,
     public void onClick(View view) {
         if (mRowAction != null && FORMAT_ACTION.equals(mRowAction.getFormat())) {
             // Check for a row action
-            AsyncTask.execute(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        mRowAction.getAction().send();
-                    } catch (CanceledException e) {
-                        Log.w(TAG, "PendingIntent for slice cannot be sent", e);
-                    }
+            try {
+                mRowAction.getAction().send();
+                if (mObserver != null) {
+                    EventInfo info = new EventInfo(getMode(), EventInfo.ACTION_TYPE_CONTENT,
+                            EventInfo.ROW_TYPE_LIST, mRowIndex);
+                    mObserver.onSliceAction(info, mRowAction);
                 }
-            });
-        } else if (mToggle != null) {
-            // Or no row action so let's just toggle if we've got one
-            mToggle.toggle();
+            } catch (CanceledException e) {
+                Log.w(TAG, "PendingIntent for slice cannot be sent", e);
+            }
+        } else if (mToggles.size() == 1) {
+            // If there is only one toggle and no row action, just toggle it.
+            mToggles.get(0).toggle();
         }
     }
 
-    private void makeClickable(View layout) {
-        layout.setOnClickListener(this);
-        layout.setBackground(SliceViewUtil.getDrawable(getContext(),
-                android.R.attr.selectableItemBackground));
+    private void setViewClickable(View layout, boolean isClickable) {
+        layout.setOnClickListener(isClickable ? this : null);
+        layout.setBackground(isClickable ? SliceViewUtil.getDrawable(getContext(),
+                android.R.attr.selectableItemBackground) : null);
+        layout.setClickable(isClickable);
     }
 
-    private void resetViews() {
+    @Override
+    public void resetView() {
+        setViewClickable(this, false);
+        setViewClickable(mContent, false);
         mStartContainer.removeAllViews();
         mEndContainer.removeAllViews();
         mPrimaryText.setText(null);
         mSecondaryText.setText(null);
+        mToggles.clear();
+        mRowAction = null;
         mDivider.setVisibility(View.GONE);
+        mSeekBar.setVisibility(View.GONE);
+        mProgressBar.setVisibility(View.GONE);
     }
 }

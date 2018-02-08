@@ -266,8 +266,12 @@ public class NotificationTemplateViewWrapper extends NotificationHeaderViewWrapp
     }
 
     @Override
-    public boolean shouldClipToSidePaddings() {
-        return mActionsContainer != null && mActionsContainer.getVisibility() != View.GONE;
+    public boolean shouldClipToRounding(boolean topRounded, boolean bottomRounded) {
+        if (super.shouldClipToRounding(topRounded, bottomRounded)) {
+            return true;
+        }
+        return bottomRounded && mActionsContainer != null
+                && mActionsContainer.getVisibility() != View.GONE;
     }
 
     private void updateActionOffset() {

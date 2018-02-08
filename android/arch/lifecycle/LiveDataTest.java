@@ -30,6 +30,7 @@ import static org.mockito.Matchers.anyBoolean;
 import static org.mockito.Matchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.only;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
@@ -37,11 +38,12 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import android.arch.core.executor.ArchTaskExecutor;
-import android.arch.lifecycle.util.InstantTaskExecutor;
+import android.arch.core.executor.testing.InstantTaskExecutorRule;
 import android.support.annotation.Nullable;
 
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -52,6 +54,10 @@ import org.mockito.Mockito;
 @SuppressWarnings({"unchecked"})
 @RunWith(JUnit4.class)
 public class LiveDataTest {
+
+    @Rule
+    public InstantTaskExecutorRule mInstantTaskExecutorRule = new InstantTaskExecutorRule();
+
     private PublicLiveData<String> mLiveData;
     private MethodExec mActiveObserversChanged;
 
@@ -100,11 +106,6 @@ public class LiveDataTest {
         mLifecycle4 = mock(Lifecycle.class);
         mObserver4 = (Observer<String>) mock(Observer.class);
         when(mOwner4.getLifecycle()).thenReturn(mLifecycle4);
-    }
-
-    @Before
-    public void swapExecutorDelegate() {
-        ArchTaskExecutor.getInstance().setDelegate(new InstantTaskExecutor());
     }
 
     @After
@@ -777,6 +778,28 @@ public class LiveDataTest {
         verify(mActiveObserversChanged).onCall(true);
         verify(mObserver3).onChanged("1");
         verify(mObserver4, never()).onChanged(anyString());
+    }
+
+    @Test
+    public void nestedForeverObserver() {
+        mLiveData.setValue(".");
+        mLiveData.observeForever(new Observer<String>() {
+            @Override
+            public void onChanged(@Nullable String s) {
+                mLiveData.observeForever(mock(Observer.class));
+                mLiveData.removeObserver(this);
+            }
+        });
+        verify(mActiveObserversChanged, only()).onCall(true);
+    }
+
+    @Test
+    public void readdForeverObserver() {
+        Observer observer = mock(Observer.class);
+        mLiveData.observeForever(observer);
+        mLiveData.observeForever(observer);
+        mLiveData.removeObserver(observer);
+        assertThat(mLiveData.hasObservers(), is(false));
     }
 
     private GenericLifecycleObserver getGenericLifecycleObserver(Lifecycle lifecycle) {

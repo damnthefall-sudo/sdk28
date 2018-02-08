@@ -19,12 +19,16 @@ import android.annotation.UserIdInt;
 import android.app.admin.IDevicePolicyManager;
 import android.content.ComponentName;
 import android.os.PersistableBundle;
+import android.os.UserHandle;
 import android.security.keymaster.KeymasterCertificateChain;
 import android.security.keystore.ParcelableKeyGenParameterSpec;
+import android.telephony.data.ApnSetting;
 
 import com.android.internal.R;
 import com.android.server.SystemService;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -64,10 +68,15 @@ abstract class BaseIDevicePolicyManager extends IDevicePolicyManager.Stub {
 
     public void setSystemSetting(ComponentName who, String setting, String value){}
 
-    public void transferOwner(ComponentName admin, ComponentName target, PersistableBundle bundle) {}
+    public void transferOwnership(ComponentName admin, ComponentName target, PersistableBundle bundle) {}
+
+    public PersistableBundle getTransferOwnershipBundle() {
+        return null;
+    }
 
     public boolean generateKeyPair(ComponentName who, String callerPackage, String algorithm,
-            ParcelableKeyGenParameterSpec keySpec, KeymasterCertificateChain attestationChain) {
+            ParcelableKeyGenParameterSpec keySpec, int idAttestationFlags,
+            KeymasterCertificateChain attestationChain) {
         return false;
     }
 
@@ -94,6 +103,76 @@ abstract class BaseIDevicePolicyManager extends IDevicePolicyManager.Stub {
 
     public boolean setKeyPairCertificate(ComponentName who, String callerPackage, String alias,
             byte[] cert, byte[] chain, boolean isUserSelectable) {
+        return false;
+    }
+
+    @Override
+    public boolean startUserInBackground(ComponentName who, UserHandle userHandle) {
+        return false;
+    }
+
+    @Override
+    public void setStartUserSessionMessage(
+            ComponentName admin, CharSequence startUserSessionMessage) {}
+
+    @Override
+    public void setEndUserSessionMessage(ComponentName admin, CharSequence endUserSessionMessage) {}
+
+    @Override
+    public String getStartUserSessionMessage(ComponentName admin) {
+        return null;
+    }
+
+    @Override
+    public String getEndUserSessionMessage(ComponentName admin) {
+        return null;
+    }
+
+    @Override
+    public void setPrintingEnabled(ComponentName admin, boolean enabled) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public boolean isPrintingEnabled() {
+        return true;
+    }
+
+    @Override
+    public List<String> setMeteredDataDisabled(ComponentName admin, List<String> packageNames) {
+        return packageNames;
+    }
+
+    @Override
+    public List<String> getMeteredDataDisabled(ComponentName admin) {
+        return new ArrayList<>();
+    }
+
+    @Override
+    public int addOverrideApn(ComponentName admin, ApnSetting apnSetting) {
+        return -1;
+    }
+
+    @Override
+    public boolean updateOverrideApn(ComponentName admin, int apnId, ApnSetting apnSetting) {
+        return false;
+    }
+
+    @Override
+    public boolean removeOverrideApn(ComponentName admin, int apnId) {
+        return false;
+    }
+
+    @Override
+    public List<ApnSetting> getOverrideApns(ComponentName admin) {
+        return Collections.emptyList();
+    }
+
+    @Override
+    public void setOverrideApnsEnabled(ComponentName admin, boolean enabled) {}
+
+    @Override
+    public boolean isOverrideApnEnabled(ComponentName admin) {
         return false;
     }
 }

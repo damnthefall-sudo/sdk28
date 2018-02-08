@@ -15,15 +15,19 @@
  */
 package androidx.app.slice.compat;
 
+import static android.app.slice.Slice.HINT_LIST_ITEM;
 import static android.app.slice.SliceProvider.SLICE_TYPE;
 
 import android.Manifest.permission;
+import android.app.PendingIntent;
+import android.content.ComponentName;
 import android.content.ContentProvider;
 import android.content.ContentProviderClient;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.database.Cursor;
 import android.net.Uri;
@@ -37,6 +41,7 @@ import android.os.Process;
 import android.os.RemoteException;
 import android.os.StrictMode;
 import android.os.StrictMode.ThreadPolicy;
+import android.support.annotation.Nullable;
 import android.support.annotation.RestrictTo;
 import android.support.annotation.RestrictTo.Scope;
 import android.util.Log;
@@ -48,6 +53,7 @@ import java.util.concurrent.CountDownLatch;
 import androidx.app.slice.Slice;
 import androidx.app.slice.SliceProvider;
 import androidx.app.slice.SliceSpec;
+import androidx.app.slice.core.R;
 
 /**
  * @hide
@@ -60,21 +66,42 @@ public class SliceProviderCompat extends ContentProvider {
     public static final String EXTRA_BIND_URI = "slice_uri";
     public static final String METHOD_SLICE = "bind_slice";
     public static final String METHOD_MAP_INTENT = "map_slice";
+    public static final String METHOD_PIN = "pin_slice";
+    public static final String METHOD_UNPIN = "unpin_slice";
+    public static final String METHOD_GET_PINNED_SPECS = "get_specs";
+
     public static final String EXTRA_INTENT = "slice_intent";
     public static final String EXTRA_SLICE = "slice";
     public static final String EXTRA_SUPPORTED_SPECS = "specs";
     public static final String EXTRA_SUPPORTED_SPECS_REVS = "revs";
+    public static final String EXTRA_PKG = "pkg";
+    public static final String EXTRA_PROVIDER_PKG = "provider_pkg";
+    private static final String DATA_PREFIX = "slice_data_";
 
     private static final boolean DEBUG = false;
     private final Handler mHandler = new Handler(Looper.getMainLooper());
     private SliceProvider mSliceProvider;
+    private CompatPinnedList mPinnedList;
+    private String mBindingPkg;
 
     public SliceProviderCompat(SliceProvider provider) {
         mSliceProvider = provider;
     }
 
+    /**
+     * Return the package name of the caller that initiated the binding request
+     * currently happening. The returned package will have been
+     * verified to belong to the calling UID. Returns {@code null} if not
+     * currently performing an {@link SliceProvider#onBindSlice(Uri)}.
+     */
+    public final @Nullable String getBindingPackage() {
+        return mBindingPkg;
+    }
+
     @Override
     public boolean onCreate() {
+        mPinnedList = new CompatPinnedList(getContext(),
+                DATA_PREFIX + mSliceProvider.getClass().getName());
         return mSliceProvider.onCreateSliceProvider();
     }
 
@@ -136,7 +163,7 @@ public class SliceProviderCompat extends ContentProvider {
             }
             List<SliceSpec> specs = getSpecs(extras);
 
-            Slice s = handleBindSlice(uri, specs);
+            Slice s = handleBindSlice(uri, specs, getCallingPackage());
             Bundle b = new Bundle();
             b.putParcelable(EXTRA_SLICE, s.toBundle());
             return b;
@@ -150,26 +177,101 @@ public class SliceProviderCompat extends ContentProvider {
             Bundle b = new Bundle();
             if (uri != null) {
                 List<SliceSpec> specs = getSpecs(extras);
-                Slice s = handleBindSlice(uri, specs);
+                Slice s = handleBindSlice(uri, specs, getCallingPackage());
                 b.putParcelable(EXTRA_SLICE, s.toBundle());
             } else {
                 b.putParcelable(EXTRA_SLICE, null);
             }
             return b;
+        } else if (method.equals(METHOD_PIN)) {
+            Uri uri = extras.getParcelable(EXTRA_BIND_URI);
+            List<SliceSpec> specs = getSpecs(extras);
+            String pkg = extras.getString(EXTRA_PKG);
+            if (mPinnedList.addPin(uri, pkg, specs)) {
+                handleSlicePinned(uri);
+            }
+            return null;
+        } else if (method.equals(METHOD_UNPIN)) {
+            Uri uri = extras.getParcelable(EXTRA_BIND_URI);
+            String pkg = extras.getString(EXTRA_PKG);
+            if (mPinnedList.removePin(uri, pkg)) {
+                handleSliceUnpinned(uri);
+            }
+            return null;
+        } else if (method.equals(METHOD_GET_PINNED_SPECS)) {
+            Uri uri = extras.getParcelable(EXTRA_BIND_URI);
+            Bundle b = new Bundle();
+            addSpecs(b, mPinnedList.getSpecs(uri));
+            return b;
         }
         return super.call(method, arg, extras);
     }
 
-    private Slice handleBindSlice(final Uri sliceUri, final List<SliceSpec> specs) {
+    private void handleSlicePinned(final Uri sliceUri) {
         if (Looper.myLooper() == Looper.getMainLooper()) {
-            return onBindSliceStrict(sliceUri, specs);
+            mSliceProvider.onSlicePinned(sliceUri);
+        } else {
+            final CountDownLatch latch = new CountDownLatch(1);
+            mHandler.post(new Runnable() {
+                @Override
+                public void run() {
+                    mSliceProvider.onSlicePinned(sliceUri);
+                    latch.countDown();
+                }
+            });
+            try {
+                latch.await();
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+        }
+    }
+
+    private void handleSliceUnpinned(final Uri sliceUri) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            mSliceProvider.onSliceUnpinned(sliceUri);
+        } else {
+            final CountDownLatch latch = new CountDownLatch(1);
+            mHandler.post(new Runnable() {
+                @Override
+                public void run() {
+                    mSliceProvider.onSliceUnpinned(sliceUri);
+                    latch.countDown();
+                }
+            });
+            try {
+                latch.await();
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+        }
+    }
+
+    private Slice handleBindSlice(final Uri sliceUri, final List<SliceSpec> specs,
+            final String callingPkg) {
+        // This can be removed once Slice#bindSlice is removed and everyone is using
+        // SliceManager#bindSlice.
+        String pkg = callingPkg != null ? callingPkg
+                : getContext().getPackageManager().getNameForUid(Binder.getCallingUid());
+        if (Binder.getCallingUid() != Process.myUid()) {
+            try {
+                getContext().enforceUriPermission(sliceUri,
+                        Binder.getCallingPid(), Binder.getCallingUid(),
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                        "Slice binding requires write access to Uri");
+            } catch (SecurityException e) {
+                return createPermissionSlice(getContext(), sliceUri, pkg);
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            return onBindSliceStrict(sliceUri, specs, callingPkg);
         } else {
             final CountDownLatch latch = new CountDownLatch(1);
             final Slice[] output = new Slice[1];
             mHandler.post(new Runnable() {
                 @Override
                 public void run() {
-                    output[0] = onBindSliceStrict(sliceUri, specs);
+                    output[0] = onBindSliceStrict(sliceUri, specs, callingPkg);
                     latch.countDown();
                 }
             });
@@ -182,7 +284,54 @@ public class SliceProviderCompat extends ContentProvider {
         }
     }
 
-    private Slice onBindSliceStrict(Uri sliceUri, List<SliceSpec> specs) {
+    /**
+     * Generate a slice that contains a permission request.
+     */
+    public static Slice createPermissionSlice(Context context, Uri sliceUri,
+            String callingPackage) {
+        return new Slice.Builder(sliceUri)
+                .addAction(createPermissionIntent(context, sliceUri, callingPackage),
+                        new Slice.Builder(sliceUri.buildUpon().appendPath("permission").build())
+                                .addText(getPermissionString(context, callingPackage), null)
+                                .build(), null)
+                .addHints(HINT_LIST_ITEM)
+                .build();
+    }
+
+    /**
+     * Create a PendingIntent pointing at the permission dialog.
+     */
+    public static PendingIntent createPermissionIntent(Context context, Uri sliceUri,
+            String callingPackage) {
+        Intent intent = new Intent();
+        intent.setComponent(new ComponentName(context.getPackageName(),
+                "androidx.app.slice.compat.SlicePermissionActivity"));
+        intent.putExtra(EXTRA_BIND_URI, sliceUri);
+        intent.putExtra(EXTRA_PKG, callingPackage);
+        intent.putExtra(EXTRA_PROVIDER_PKG, context.getPackageName());
+        // Unique pending intent.
+        intent.setData(sliceUri.buildUpon().appendQueryParameter("package", callingPackage)
+                .build());
+
+        return PendingIntent.getActivity(context, 0, intent, 0);
+    }
+
+    /**
+     * Get string describing permission request.
+     */
+    public static CharSequence getPermissionString(Context context, String callingPackage) {
+        PackageManager pm = context.getPackageManager();
+        try {
+            return context.getString(R.string.abc_slices_permission_request,
+                    pm.getApplicationInfo(callingPackage, 0).loadLabel(pm),
+                    context.getApplicationInfo().loadLabel(pm));
+        } catch (PackageManager.NameNotFoundException e) {
+            // This shouldn't be possible since the caller is verified.
+            throw new RuntimeException("Unknown calling app", e);
+        }
+    }
+
+    private Slice onBindSliceStrict(Uri sliceUri, List<SliceSpec> specs, String callingPackage) {
         ThreadPolicy oldPolicy = StrictMode.getThreadPolicy();
         try {
             StrictMode.setThreadPolicy(new StrictMode.ThreadPolicy.Builder()
@@ -190,7 +339,13 @@ public class SliceProviderCompat extends ContentProvider {
                     .penaltyDeath()
                     .build());
             SliceProvider.setSpecs(specs);
-            return mSliceProvider.onBindSlice(sliceUri);
+            try {
+                mBindingPkg = callingPackage;
+                return mSliceProvider.onBindSlice(sliceUri);
+            } finally {
+                mBindingPkg = null;
+                SliceProvider.setSpecs(null);
+            }
         } finally {
             StrictMode.setThreadPolicy(oldPolicy);
         }
@@ -287,6 +442,80 @@ public class SliceProviderCompat extends ContentProvider {
                 return null;
             }
             return new Slice((Bundle) bundle);
+        } catch (RemoteException e) {
+            // Arbitrary and not worth documenting, as Activity
+            // Manager will kill this process shortly anyway.
+            return null;
+        } finally {
+            provider.close();
+        }
+    }
+
+    /**
+     * Compat version of {@link android.app.slice.SliceManager#pinSlice}.
+     */
+    public static void pinSlice(Context context, Uri uri,
+            List<SliceSpec> supportedSpecs) {
+        ContentProviderClient provider = context.getContentResolver()
+                .acquireContentProviderClient(uri);
+        if (provider == null) {
+            throw new IllegalArgumentException("Unknown URI " + uri);
+        }
+        try {
+            Bundle extras = new Bundle();
+            extras.putParcelable(EXTRA_BIND_URI, uri);
+            extras.putString(EXTRA_PKG, context.getPackageName());
+            addSpecs(extras, supportedSpecs);
+            provider.call(METHOD_PIN, null, extras);
+        } catch (RemoteException e) {
+            // Arbitrary and not worth documenting, as Activity
+            // Manager will kill this process shortly anyway.
+        } finally {
+            provider.close();
+        }
+    }
+
+    /**
+     * Compat version of {@link android.app.slice.SliceManager#unpinSlice}.
+     */
+    public static void unpinSlice(Context context, Uri uri,
+            List<SliceSpec> supportedSpecs) {
+        ContentProviderClient provider = context.getContentResolver()
+                .acquireContentProviderClient(uri);
+        if (provider == null) {
+            throw new IllegalArgumentException("Unknown URI " + uri);
+        }
+        try {
+            Bundle extras = new Bundle();
+            extras.putParcelable(EXTRA_BIND_URI, uri);
+            extras.putString(EXTRA_PKG, context.getPackageName());
+            addSpecs(extras, supportedSpecs);
+            provider.call(METHOD_UNPIN, null, extras);
+        } catch (RemoteException e) {
+            // Arbitrary and not worth documenting, as Activity
+            // Manager will kill this process shortly anyway.
+        } finally {
+            provider.close();
+        }
+    }
+
+    /**
+     * Compat version of {@link android.app.slice.SliceManager#getPinnedSpecs(Uri)}.
+     */
+    public static List<SliceSpec> getPinnedSpecs(Context context, Uri uri) {
+        ContentProviderClient provider = context.getContentResolver()
+                .acquireContentProviderClient(uri);
+        if (provider == null) {
+            throw new IllegalArgumentException("Unknown URI " + uri);
+        }
+        try {
+            Bundle extras = new Bundle();
+            extras.putParcelable(EXTRA_BIND_URI, uri);
+            final Bundle res = provider.call(METHOD_GET_PINNED_SPECS, null, extras);
+            if (res == null) {
+                return null;
+            }
+            return getSpecs(res);
         } catch (RemoteException e) {
             // Arbitrary and not worth documenting, as Activity
             // Manager will kill this process shortly anyway.

@@ -108,6 +108,12 @@ public class MockPackageManager extends PackageManager {
         throw new UnsupportedOperationException();
     }
 
+    /** @hide */
+    @Override
+    public Intent getCarLaunchIntentForPackage(String packageName) {
+        throw new UnsupportedOperationException();
+    }
+
     @Override
     public int[] getPackageGids(String packageName) throws NameNotFoundException {
         throw new UnsupportedOperationException();
@@ -1090,15 +1096,6 @@ public class MockPackageManager extends PackageManager {
      * @hide
      */
     @Override
-    public void installPackage(Uri packageURI, PackageInstallObserver observer,
-            int flags, String installerPackageName) {
-        throw new UnsupportedOperationException();
-    }
-
-    /**
-     * @hide
-     */
-    @Override
     public void addCrossProfileIntentFilter(IntentFilter filter, int sourceUserId, int targetUserId,
             int flags) {
         throw new UnsupportedOperationException();
@@ -1183,4 +1180,33 @@ public class MockPackageManager extends PackageManager {
     public ArtManager getArtManager() {
         throw new UnsupportedOperationException();
     }
+
+    /**
+     * @hide
+     */
+    @Override
+    public void setHarmfulAppWarning(String packageName, CharSequence warning) {
+        throw new UnsupportedOperationException();
+    }
+
+    /**
+     * @hide
+     */
+    @Override
+    public CharSequence getHarmfulAppWarning(String packageName) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public boolean hasSigningCertificate(
+            String packageName, byte[] certificate, @PackageManager.CertificateInputType int type) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public boolean hasSigningCertificate(
+            int uid, byte[] certificate, @PackageManager.CertificateInputType int type) {
+        throw new UnsupportedOperationException();
+    }
+
 }

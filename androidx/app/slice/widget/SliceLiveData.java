@@ -15,20 +15,23 @@
  */
 package androidx.app.slice.widget;
 
+import static android.support.annotation.RestrictTo.Scope.LIBRARY;
+
 import android.arch.lifecycle.LiveData;
 import android.content.Context;
 import android.content.Intent;
-import android.database.ContentObserver;
 import android.net.Uri;
 import android.os.AsyncTask;
-import android.os.Handler;
 import android.support.annotation.NonNull;
+import android.support.annotation.RestrictTo;
 
 import java.util.Arrays;
 import java.util.List;
 
 import androidx.app.slice.Slice;
+import androidx.app.slice.SliceManager;
 import androidx.app.slice.SliceSpec;
+import androidx.app.slice.SliceSpecs;
 
 /**
  * Class with factory methods for creating LiveData that observes slices.
@@ -38,7 +41,12 @@ import androidx.app.slice.SliceSpec;
  */
 public final class SliceLiveData {
 
-    private static final List<SliceSpec> SUPPORTED_SPECS = Arrays.asList();
+    /**
+     * @hide
+     */
+    @RestrictTo(LIBRARY)
+    public static final List<SliceSpec> SUPPORTED_SPECS = Arrays.asList(SliceSpecs.BASIC,
+            SliceSpecs.LIST);
 
     /**
      * Produces an {@link LiveData} that tracks a Slice for a given Uri. To use
@@ -59,13 +67,13 @@ public final class SliceLiveData {
     }
 
     private static class SliceLiveDataImpl extends LiveData<Slice> {
-        private final Context mContext;
         private final Intent mIntent;
+        private final SliceManager mSliceManager;
         private Uri mUri;
 
         private SliceLiveDataImpl(Context context, Uri uri) {
             super();
-            mContext = context;
+            mSliceManager = SliceManager.get(context);
             mUri = uri;
             mIntent = null;
             // TODO: Check if uri points at a Slice?
@@ -73,7 +81,7 @@ public final class SliceLiveData {
 
         private SliceLiveDataImpl(Context context, Intent intent) {
             super();
-            mContext = context;
+            mSliceManager = SliceManager.get(context);
             mUri = null;
             mIntent = intent;
         }
@@ -82,35 +90,34 @@ public final class SliceLiveData {
         protected void onActive() {
             AsyncTask.execute(mUpdateSlice);
             if (mUri != null) {
-                mContext.getContentResolver().registerContentObserver(mUri, false, mObserver);
+                mSliceManager.registerSliceCallback(mUri, mSliceCallback);
             }
         }
 
         @Override
         protected void onInactive() {
             if (mUri != null) {
-                mContext.getContentResolver().unregisterContentObserver(mObserver);
+                mSliceManager.unregisterSliceCallback(mUri, mSliceCallback);
             }
         }
 
         private final Runnable mUpdateSlice = new Runnable() {
             @Override
             public void run() {
-                Slice s = mUri != null ? Slice.bindSlice(mContext, mUri)
-                        : Slice.bindSlice(mContext, mIntent);
+                Slice s = mUri != null ? mSliceManager.bindSlice(mUri)
+                        : mSliceManager.bindSlice(mIntent);
                 if (mUri == null && s != null) {
-                    mContext.getContentResolver().registerContentObserver(s.getUri(),
-                            false, mObserver);
                     mUri = s.getUri();
+                    mSliceManager.registerSliceCallback(mUri, mSliceCallback);
                 }
                 postValue(s);
             }
         };
 
-        private final ContentObserver mObserver = new ContentObserver(new Handler()) {
+        private final SliceManager.SliceCallback mSliceCallback = new SliceManager.SliceCallback() {
             @Override
-            public void onChange(boolean selfChange) {
-                AsyncTask.execute(mUpdateSlice);
+            public void onSliceUpdated(@NonNull Slice s) {
+                postValue(s);
             }
         };
     }

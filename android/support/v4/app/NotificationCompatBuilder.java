@@ -248,6 +248,15 @@ class NotificationCompatBuilder implements NotificationBuilderWithBuilderAccesso
             if (Build.VERSION.SDK_INT >= 24) {
                 actionBuilder.setAllowGeneratedReplies(action.getAllowGeneratedReplies());
             }
+
+            actionExtras.putInt(NotificationCompat.Action.EXTRA_SEMANTIC_ACTION,
+                    action.getSemanticAction());
+            if (Build.VERSION.SDK_INT >= 28) {
+                actionBuilder.setSemanticAction(action.getSemanticAction());
+            }
+
+            actionExtras.putBoolean(NotificationCompat.Action.EXTRA_SHOWS_USER_INTERFACE,
+                    action.getShowsUserInterface());
             actionBuilder.addExtras(actionExtras);
             mBuilder.addAction(actionBuilder.build());
         } else if (Build.VERSION.SDK_INT >= 16) {

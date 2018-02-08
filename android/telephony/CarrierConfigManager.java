@@ -39,13 +39,29 @@ public class CarrierConfigManager {
     private final static String TAG = "CarrierConfigManager";
 
     /**
+     * Extra included in {@link #ACTION_CARRIER_CONFIG_CHANGED} to indicate the slot index that the
+     * broadcast is for.
+     */
+    public static final String EXTRA_SLOT_INDEX = "android.telephony.extra.SLOT_INDEX";
+
+    /**
+     * Optional extra included in {@link #ACTION_CARRIER_CONFIG_CHANGED} to indicate the
+     * subscription index that the broadcast is for, if a valid one is available.
+     */
+    public static final String EXTRA_SUBSCRIPTION_INDEX =
+            SubscriptionManager.EXTRA_SUBSCRIPTION_INDEX;
+
+    /**
      * @hide
      */
     public CarrierConfigManager() {
     }
 
     /**
-     * This intent is broadcast by the system when carrier config changes.
+     * This intent is broadcast by the system when carrier config changes. An int is specified in
+     * {@link #EXTRA_SLOT_INDEX} to indicate the slot index that this is for. An optional int extra
+     * {@link #EXTRA_SUBSCRIPTION_INDEX} is included to indicate the subscription index if a valid
+     * one is available for the slot index.
      */
     public static final String
             ACTION_CARRIER_CONFIG_CHANGED = "android.telephony.action.CARRIER_CONFIG_CHANGED";
@@ -275,7 +291,6 @@ public class CarrierConfigManager {
      *
      * @see SubscriptionManager#getSubscriptionPlans(int)
      * @see SubscriptionManager#setSubscriptionPlans(int, java.util.List)
-     * @hide
      */
     @SystemApi
     public static final String KEY_CONFIG_PLANS_PACKAGE_OVERRIDE_STRING =
@@ -335,6 +350,19 @@ public class CarrierConfigManager {
      */
     public static final String KEY_NOTIFY_HANDOVER_VIDEO_FROM_WIFI_TO_LTE_BOOL =
             "notify_handover_video_from_wifi_to_lte_bool";
+
+    /**
+     * Flag specifying whether the carrier wants to notify the user when a VT call has been handed
+     * over from LTE to WIFI.
+     * <p>
+     * The handover notification is sent as a
+     * {@link TelephonyManager#EVENT_HANDOVER_VIDEO_FROM_LTE_TO_WIFI}
+     * {@link android.telecom.Connection} event, which an {@link android.telecom.InCallService}
+     * should use to trigger the display of a user-facing message.
+     * @hide
+     */
+    public static final String KEY_NOTIFY_HANDOVER_VIDEO_FROM_LTE_TO_WIFI_BOOL =
+            "notify_handover_video_from_lte_to_wifi_bool";
 
     /**
      * Flag specifying whether the carrier supports downgrading a video call (tx, rx or tx/rx)
@@ -947,8 +975,9 @@ public class CarrierConfigManager {
     public static final String KEY_CARRIER_NAME_OVERRIDE_BOOL = "carrier_name_override_bool";
 
     /**
-     * String to identify carrier name in CarrierConfig app. This string is used only if
-     * #KEY_CARRIER_NAME_OVERRIDE_BOOL is true
+     * String to identify carrier name in CarrierConfig app. This string overrides SPN if
+     * #KEY_CARRIER_NAME_OVERRIDE_BOOL is true; otherwise, it will be used if its value is provided
+     * and SPN is unavailable
      * @hide
      */
     public static final String KEY_CARRIER_NAME_STRING = "carrier_name_string";
@@ -1002,6 +1031,13 @@ public class CarrierConfigManager {
      */
     public static final String KEY_ALWAYS_SHOW_DATA_RAT_ICON_BOOL =
             "always_show_data_rat_icon_bool";
+
+    /**
+     * Boolean to decide whether to show precise call failed cause to user
+     * @hide
+     */
+    public static final String KEY_SHOW_PRECISE_FAILED_CAUSE_BOOL =
+            "show_precise_failed_cause_bool";
 
     // These variables are used by the MMS service and exposed through another API, {@link
     // SmsManager}. The variable names and string values are copied from there.
@@ -1623,6 +1659,13 @@ public class CarrierConfigManager {
             "roaming_operator_string_array";
 
     /**
+     * Controls whether Assisted Dialing is enabled and the preference is shown. This feature
+     * transforms numbers when the user is roaming.
+     */
+    public static final String KEY_ASSISTED_DIALING_ENABLED_BOOL =
+            "assisted_dialing_enabled_bool";
+
+    /**
      * URL from which the proto containing the public key of the Carrier used for
      * IMSI encryption will be downloaded.
      * @hide
@@ -1724,6 +1767,22 @@ public class CarrierConfigManager {
      */
     public static final String KEY_CARRIER_CONFIG_APPLIED_BOOL = "carrier_config_applied_bool";
 
+    /**
+     * Determines whether we should show a warning asking the user to check with their carrier
+     * on pricing when the user enabled data roaming.
+     * default to false.
+     * @hide
+     */
+    public static final String KEY_CHECK_PRICING_WITH_CARRIER_FOR_DATA_ROAMING_BOOL =
+            "check_pricing_with_carrier_data_roaming_bool";
+
+    /**
+     * List of thresholds of RSRP for determining the display level of LTE signal bar.
+     * @hide
+     */
+    public static final String KEY_LTE_RSRP_THRESHOLDS_INT_ARRAY =
+            "lte_rsrp_thresholds_int_array";
+
     /** The default value for every variable. */
     private final static PersistableBundle sDefaults;
 
@@ -1740,6 +1799,7 @@ public class CarrierConfigManager {
         sDefaults.putBoolean(KEY_CARRIER_VOLTE_AVAILABLE_BOOL, false);
         sDefaults.putBoolean(KEY_CARRIER_VT_AVAILABLE_BOOL, false);
         sDefaults.putBoolean(KEY_NOTIFY_HANDOVER_VIDEO_FROM_WIFI_TO_LTE_BOOL, false);
+        sDefaults.putBoolean(KEY_NOTIFY_HANDOVER_VIDEO_FROM_LTE_TO_WIFI_BOOL, false);
         sDefaults.putBoolean(KEY_SUPPORT_DOWNGRADE_VT_TO_AUDIO_BOOL, true);
         sDefaults.putString(KEY_DEFAULT_VM_NUMBER_STRING, "");
         sDefaults.putBoolean(KEY_CONFIG_TELEPHONY_USE_OWN_NUMBER_FOR_VOICEMAIL_BOOL, false);
@@ -2002,14 +2062,26 @@ public class CarrierConfigManager {
                 false);
         sDefaults.putStringArray(KEY_NON_ROAMING_OPERATOR_STRING_ARRAY, null);
         sDefaults.putStringArray(KEY_ROAMING_OPERATOR_STRING_ARRAY, null);
+        sDefaults.putBoolean(KEY_ASSISTED_DIALING_ENABLED_BOOL, true);
         sDefaults.putBoolean(KEY_SHOW_IMS_REGISTRATION_STATUS_BOOL, false);
         sDefaults.putBoolean(KEY_RTT_SUPPORTED_BOOL, false);
         sDefaults.putBoolean(KEY_DISABLE_CHARGE_INDICATION_BOOL, false);
         sDefaults.putStringArray(KEY_FEATURE_ACCESS_CODES_STRING_ARRAY, null);
         sDefaults.putBoolean(KEY_IDENTIFY_HIGH_DEFINITION_CALLS_IN_CALL_LOG_BOOL, false);
+        sDefaults.putBoolean(KEY_SHOW_PRECISE_FAILED_CAUSE_BOOL, false);
         sDefaults.putBoolean(KEY_SPN_DISPLAY_RULE_USE_ROAMING_FROM_SERVICE_STATE_BOOL, false);
         sDefaults.putBoolean(KEY_ALWAYS_SHOW_DATA_RAT_ICON_BOOL, false);
         sDefaults.putBoolean(KEY_CARRIER_CONFIG_APPLIED_BOOL, false);
+        sDefaults.putBoolean(KEY_CHECK_PRICING_WITH_CARRIER_FOR_DATA_ROAMING_BOOL, false);
+        sDefaults.putIntArray(KEY_LTE_RSRP_THRESHOLDS_INT_ARRAY,
+                new int[] {
+                        -140, /* SIGNAL_STRENGTH_NONE_OR_UNKNOWN */
+                        -128, /* SIGNAL_STRENGTH_POOR */
+                        -118, /* SIGNAL_STRENGTH_MODERATE */
+                        -108, /* SIGNAL_STRENGTH_GOOD */
+                        -98,  /* SIGNAL_STRENGTH_GREAT */
+                        -44
+                });
     }
 
     /**

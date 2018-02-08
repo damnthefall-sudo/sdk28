@@ -235,6 +235,8 @@ public final class Choreographer {
         for (int i = 0; i <= CALLBACK_LAST; i++) {
             mCallbackQueues[i] = new CallbackQueue();
         }
+        // b/68769804: For low FPS experiments.
+        setFPSDivisor(SystemProperties.getInt(ThreadedRenderer.DEBUG_FPS_DIVISOR, 1));
     }
 
     private static float getRefreshRate() {
@@ -371,6 +373,7 @@ public final class Choreographer {
      * @see #removeCallbacks
      * @hide
      */
+    @TestApi
     public void postCallback(int callbackType, Runnable action, Object token) {
         postCallbackDelayed(callbackType, action, token, 0);
     }
@@ -389,6 +392,7 @@ public final class Choreographer {
      * @see #removeCallback
      * @hide
      */
+    @TestApi
     public void postCallbackDelayed(int callbackType,
             Runnable action, Object token, long delayMillis) {
         if (action == null) {
@@ -438,6 +442,7 @@ public final class Choreographer {
      * @see #postCallbackDelayed
      * @hide
      */
+    @TestApi
     public void removeCallbacks(int callbackType, Runnable action, Object token) {
         if (callbackType < 0 || callbackType > CALLBACK_LAST) {
             throw new IllegalArgumentException("callbackType is invalid");
@@ -605,6 +610,7 @@ public final class Choreographer {
     void setFPSDivisor(int divisor) {
         if (divisor <= 0) divisor = 1;
         mFPSDivisor = divisor;
+        ThreadedRenderer.setFPSDivisor(divisor);
     }
 
     void doFrame(long frameTimeNanos, int frame) {

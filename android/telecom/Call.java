@@ -419,7 +419,6 @@ public final class Call {
         /**
          * Indicates the call used Assisted Dialing.
          * See also {@link Connection#PROPERTY_ASSISTED_DIALING_USED}
-         * @hide
          */
         public static final int PROPERTY_ASSISTED_DIALING_USED = 0x00000200;
 
@@ -1408,7 +1407,7 @@ public final class Call {
      * @param extras Bundle containing extra information associated with the event.
      */
     public void sendCallEvent(String event, Bundle extras) {
-        mInCallAdapter.sendCallEvent(mTelecomCallId, event, extras);
+        mInCallAdapter.sendCallEvent(mTelecomCallId, event, mTargetSdkVersion, extras);
     }
 
     /**
@@ -1958,6 +1957,15 @@ public final class Call {
             final Call call = this;
             final Callback callback = record.getCallback();
             record.getHandler().post(() -> callback.onHandoverFailed(call, error));
+        }
+    }
+
+    /** {@hide} */
+    final void internalOnHandoverComplete() {
+        for (CallbackRecord<Callback> record : mCallbackRecords) {
+            final Call call = this;
+            final Callback callback = record.getCallback();
+            record.getHandler().post(() -> callback.onHandoverComplete(call));
         }
     }
 

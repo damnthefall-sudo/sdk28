@@ -87,7 +87,7 @@ public class StaticLayout_Delegate {
         builder.mLineWidth = new LineWidth(firstWidth, firstWidthLineCount, restWidth);
         builder.mTabStopCalculator = new TabStops(variableTabStops, defaultTabStop);
 
-        MeasuredText_Delegate.computeRuns(measuredTextPtr, builder);
+        MeasuredParagraph_Delegate.computeRuns(measuredTextPtr, builder);
 
         // compute all possible breakpoints.
         BreakIterator it = BreakIterator.getLineInstance();

@@ -16,23 +16,22 @@
 
 package com.android.server.net.watchlist;
 
+import android.annotation.Nullable;
 import android.content.Context;
-import android.content.pm.PackageManager;
-import android.content.pm.PackageManager.NameNotFoundException;
 import android.net.IIpConnectivityMetrics;
 import android.net.INetdEventCallback;
-import android.net.NetworkWatchlistManager;
 import android.net.metrics.IpConnectivityLog;
 import android.os.Binder;
 import android.os.Process;
-import android.os.SharedMemory;
 import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.os.SystemProperties;
+import android.provider.Settings;
 import android.text.TextUtils;
 import android.util.Slog;
 
 import com.android.internal.R;
+import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.DumpUtils;
 import com.android.internal.net.INetworkWatchlistManager;
@@ -40,9 +39,7 @@ import com.android.server.ServiceThread;
 import com.android.server.SystemService;
 
 import java.io.FileDescriptor;
-import java.io.IOException;
 import java.io.PrintWriter;
-import java.util.List;
 
 /**
  * Implementation of network watchlist service.
@@ -51,9 +48,6 @@ public class NetworkWatchlistService extends INetworkWatchlistManager.Stub {
 
     private static final String TAG = NetworkWatchlistService.class.getSimpleName();
     static final boolean DEBUG = false;
-
-    private static final String PROPERTY_NETWORK_WATCHLIST_ENABLED =
-            "ro.network_watchlist_enabled";
 
     private static final int MAX_NUM_OF_WATCHLIST_DIGESTS = 10000;
 
@@ -66,8 +60,10 @@ public class NetworkWatchlistService extends INetworkWatchlistManager.Stub {
 
         @Override
         public void onStart() {
-            if (!SystemProperties.getBoolean(PROPERTY_NETWORK_WATCHLIST_ENABLED, false)) {
+            if (Settings.Global.getInt(getContext().getContentResolver(),
+                    Settings.Global.NETWORK_WATCHLIST_ENABLED, 0) == 0) {
                 // Watchlist service is disabled
+                Slog.i(TAG, "Network Watchlist service is disabled");
                 return;
             }
             mService = new NetworkWatchlistService(getContext());
@@ -76,11 +72,13 @@ public class NetworkWatchlistService extends INetworkWatchlistManager.Stub {
 
         @Override
         public void onBootPhase(int phase) {
-            if (!SystemProperties.getBoolean(PROPERTY_NETWORK_WATCHLIST_ENABLED, false)) {
-                // Watchlist service is disabled
-                return;
-            }
             if (phase == SystemService.PHASE_ACTIVITY_MANAGER_READY) {
+                if (Settings.Global.getInt(getContext().getContentResolver(),
+                        Settings.Global.NETWORK_WATCHLIST_ENABLED, 0) == 0) {
+                    // Watchlist service is disabled
+                    Slog.i(TAG, "Network Watchlist service is disabled");
+                    return;
+                }
                 try {
                     mService.initIpConnectivityMetrics();
                     mService.startWatchlistLogging();
@@ -92,10 +90,11 @@ public class NetworkWatchlistService extends INetworkWatchlistManager.Stub {
         }
     }
 
+    @GuardedBy("mLoggingSwitchLock")
     private volatile boolean mIsLoggingEnabled = false;
     private final Object mLoggingSwitchLock = new Object();
 
-    private final WatchlistSettings mSettings;
+    private final WatchlistConfig mConfig;
     private final Context mContext;
 
     // Separate thread to handle expensive watchlist logging work.
@@ -108,7 +107,7 @@ public class NetworkWatchlistService extends INetworkWatchlistManager.Stub {
 
     public NetworkWatchlistService(Context context) {
         mContext = context;
-        mSettings = WatchlistSettings.getInstance();
+        mConfig = WatchlistConfig.getInstance();
         mHandlerThread = new ServiceThread(TAG, Process.THREAD_PRIORITY_BACKGROUND,
                         /* allowIo */ false);
         mHandlerThread.start();
@@ -122,7 +121,7 @@ public class NetworkWatchlistService extends INetworkWatchlistManager.Stub {
     NetworkWatchlistService(Context context, ServiceThread handlerThread,
             WatchlistLoggingHandler handler, IIpConnectivityMetrics ipConnectivityMetrics) {
         mContext = context;
-        mSettings = WatchlistSettings.getInstance();
+        mConfig = WatchlistConfig.getInstance();
         mHandlerThread = handlerThread;
         mNetworkWatchlistHandler = handler;
         mIpConnectivityMetrics = ipConnectivityMetrics;
@@ -212,6 +211,12 @@ public class NetworkWatchlistService extends INetworkWatchlistManager.Stub {
         return stopWatchlistLoggingImpl();
     }
 
+    @Nullable
+    @Override
+    public byte[] getWatchlistConfigHash() {
+        return mConfig.getWatchlistConfigHash();
+    }
+
     private void enforceWatchlistLoggingPermission() {
         final int uid = Binder.getCallingUid();
         if (uid != Process.SYSTEM_UID) {
@@ -220,36 +225,11 @@ public class NetworkWatchlistService extends INetworkWatchlistManager.Stub {
         }
     }
 
-    /**
-     * Set a new network watchlist.
-     * This method should be called by ConfigUpdater only.
-     *
-     * @return True if network watchlist is updated.
-     */
-    public boolean setNetworkSecurityWatchlist(List<byte[]> domainsCrc32Digests,
-            List<byte[]> domainsSha256Digests,
-            List<byte[]> ipAddressesCrc32Digests,
-            List<byte[]> ipAddressesSha256Digests) {
-        Slog.i(TAG, "Setting network watchlist");
-        if (domainsCrc32Digests == null || domainsSha256Digests == null
-                || ipAddressesCrc32Digests == null || ipAddressesSha256Digests == null) {
-            Slog.e(TAG, "Parameters cannot be null");
-            return false;
-        }
-        if (domainsCrc32Digests.size() != domainsSha256Digests.size()
-                || ipAddressesCrc32Digests.size() != ipAddressesSha256Digests.size()) {
-            Slog.e(TAG, "Must need to have the same number of CRC32 and SHA256 digests");
-            return false;
-        }
-        if (domainsSha256Digests.size() + ipAddressesSha256Digests.size()
-                > MAX_NUM_OF_WATCHLIST_DIGESTS) {
-            Slog.e(TAG, "Total watchlist size cannot exceed " + MAX_NUM_OF_WATCHLIST_DIGESTS);
-            return false;
-        }
-        mSettings.writeSettingsToDisk(domainsCrc32Digests, domainsSha256Digests,
-                ipAddressesCrc32Digests, ipAddressesSha256Digests);
-        Slog.i(TAG, "Set network watchlist: Success");
-        return true;
+    @Override
+    public void reloadWatchlist() throws RemoteException {
+        enforceWatchlistLoggingPermission();
+        Slog.i(TAG, "Reloading watchlist");
+        mConfig.reloadConfig();
     }
 
     @Override
@@ -261,7 +241,7 @@ public class NetworkWatchlistService extends INetworkWatchlistManager.Stub {
     @Override
     protected void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
         if (!DumpUtils.checkDumpPermission(mContext, TAG, pw)) return;
-        mSettings.dump(fd, pw, args);
+        mConfig.dump(fd, pw, args);
     }
 
 }

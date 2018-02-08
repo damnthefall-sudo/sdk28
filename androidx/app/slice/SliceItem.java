@@ -52,7 +52,6 @@ import java.util.List;
  * <li>{@link android.app.slice.SliceItem#FORMAT_ACTION}</li>
  * <li>{@link android.app.slice.SliceItem#FORMAT_INT}</li>
  * <li>{@link android.app.slice.SliceItem#FORMAT_TIMESTAMP}</li>
- * <li>{@link android.app.slice.SliceItem#FORMAT_REMOTE_INPUT}</li>
  * <p>
  * The hints that a {@link SliceItem} are a set of strings which annotate
  * the content. The hints that are guaranteed to be understood by the system
@@ -94,6 +93,15 @@ public class SliceItem {
         mFormat = format;
         mSubType = subType;
         mObj = obj;
+    }
+
+    /**
+     * @hide
+     */
+    @RestrictTo(Scope.LIBRARY)
+    public SliceItem(Object obj, @SliceType String format, String subType,
+            @Slice.SliceHint List<String> hints) {
+        this (obj, format, subType, hints.toArray(new String[hints.size()]));
     }
 
     /**
@@ -186,8 +194,10 @@ public class SliceItem {
     /**
      * @return The remote input held by this {@link android.app.slice.SliceItem#FORMAT_REMOTE_INPUT}
      * SliceItem
+     * @hide
      */
     @RequiresApi(20)
+    @RestrictTo(RestrictTo.Scope.LIBRARY_GROUP)
     public RemoteInput getRemoteInput() {
         return (RemoteInput) mObj;
     }
@@ -347,5 +357,35 @@ public class SliceItem {
                 return "RemoteInput";
         }
         return "Unrecognized format: " + format;
+    }
+
+    /**
+     * @hide
+     * @return A string representation of this slice item.
+     */
+    @RestrictTo(Scope.LIBRARY)
+    @Override
+    public String toString() {
+        return toString("");
+    }
+
+    private String toString(String indent) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(indent);
+        if (FORMAT_SLICE.equals(mFormat)) {
+            sb.append("slice:\n");
+            sb.append(getSlice().toString(indent + "   "));
+        } else if (FORMAT_ACTION.equals(mFormat)) {
+            sb.append("action:\n");
+            sb.append(getSlice().toString(indent + "   "));
+        } else if (FORMAT_TEXT.equals(mFormat)) {
+            sb.append("text: ");
+            sb.append(getText());
+            sb.append("\n");
+        } else {
+            sb.append(SliceItem.typeToString(getFormat()));
+            sb.append("\n");
+        }
+        return sb.toString();
     }
 }

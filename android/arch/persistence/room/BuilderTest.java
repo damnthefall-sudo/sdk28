@@ -30,6 +30,7 @@ import android.arch.persistence.db.SupportSQLiteOpenHelper;
 import android.arch.persistence.db.framework.FrameworkSQLiteOpenHelperFactory;
 import android.arch.persistence.room.migration.Migration;
 import android.content.Context;
+import android.support.annotation.NonNull;
 
 import org.hamcrest.CoreMatchers;
 import org.junit.Test;
@@ -108,12 +109,116 @@ public class BuilderTest {
     }
 
     @Test
+    public void migrationDowngrade() {
+        Migration m1_2 = new EmptyMigration(1, 2);
+        Migration m2_3 = new EmptyMigration(2, 3);
+        Migration m3_4 = new EmptyMigration(3, 4);
+        Migration m3_2 = new EmptyMigration(3, 2);
+        Migration m2_1 = new EmptyMigration(2, 1);
+        TestDatabase db = Room.databaseBuilder(mock(Context.class), TestDatabase.class, "foo")
+                .addMigrations(m1_2, m2_3, m3_4, m3_2, m2_1).build();
+        DatabaseConfiguration config = ((BuilderTest_TestDatabase_Impl) db).mConfig;
+        RoomDatabase.MigrationContainer migrations = config.migrationContainer;
+        assertThat(migrations.findMigrationPath(3, 2), is(asList(m3_2)));
+        assertThat(migrations.findMigrationPath(3, 1), is(asList(m3_2, m2_1)));
+    }
+
+    @Test
     public void skipMigration() {
         Context context = mock(Context.class);
+
         TestDatabase db = Room.inMemoryDatabaseBuilder(context, TestDatabase.class)
-                .fallbackToDestructiveMigration().build();
+                .fallbackToDestructiveMigration()
+                .build();
+
         DatabaseConfiguration config = ((BuilderTest_TestDatabase_Impl) db).mConfig;
         assertThat(config.requireMigration, is(false));
+    }
+
+    @Test
+    public void fallbackToDestructiveMigrationFrom_calledOnce_migrationsNotRequiredForValues() {
+        Context context = mock(Context.class);
+
+        TestDatabase db = Room.inMemoryDatabaseBuilder(context, TestDatabase.class)
+                .fallbackToDestructiveMigrationFrom(1, 2).build();
+
+        DatabaseConfiguration config = ((BuilderTest_TestDatabase_Impl) db).mConfig;
+        assertThat(config.isMigrationRequiredFrom(1), is(false));
+        assertThat(config.isMigrationRequiredFrom(2), is(false));
+    }
+
+    @Test
+    public void fallbackToDestructiveMigrationFrom_calledTwice_migrationsNotRequiredForValues() {
+        Context context = mock(Context.class);
+        TestDatabase db = Room.inMemoryDatabaseBuilder(context, TestDatabase.class)
+                .fallbackToDestructiveMigrationFrom(1, 2)
+                .fallbackToDestructiveMigrationFrom(3, 4)
+                .build();
+        DatabaseConfiguration config = ((BuilderTest_TestDatabase_Impl) db).mConfig;
+
+        assertThat(config.isMigrationRequiredFrom(1), is(false));
+        assertThat(config.isMigrationRequiredFrom(2), is(false));
+        assertThat(config.isMigrationRequiredFrom(3), is(false));
+        assertThat(config.isMigrationRequiredFrom(4), is(false));
+    }
+
+    @Test
+    public void isMigrationRequiredFrom_fallBackToDestructiveCalled_alwaysReturnsFalse() {
+        Context context = mock(Context.class);
+
+        TestDatabase db = Room.inMemoryDatabaseBuilder(context, TestDatabase.class)
+                .fallbackToDestructiveMigration()
+                .build();
+
+        DatabaseConfiguration config = ((BuilderTest_TestDatabase_Impl) db).mConfig;
+        assertThat(config.isMigrationRequiredFrom(0), is(false));
+        assertThat(config.isMigrationRequiredFrom(1), is(false));
+        assertThat(config.isMigrationRequiredFrom(5), is(false));
+        assertThat(config.isMigrationRequiredFrom(12), is(false));
+        assertThat(config.isMigrationRequiredFrom(132), is(false));
+    }
+
+    @Test
+    public void isMigrationRequiredFrom_byDefault_alwaysReturnsTrue() {
+        Context context = mock(Context.class);
+
+        TestDatabase db = Room.inMemoryDatabaseBuilder(context, TestDatabase.class)
+                .build();
+
+        DatabaseConfiguration config = ((BuilderTest_TestDatabase_Impl) db).mConfig;
+        assertThat(config.isMigrationRequiredFrom(0), is(true));
+        assertThat(config.isMigrationRequiredFrom(1), is(true));
+        assertThat(config.isMigrationRequiredFrom(5), is(true));
+        assertThat(config.isMigrationRequiredFrom(12), is(true));
+        assertThat(config.isMigrationRequiredFrom(132), is(true));
+    }
+
+    @Test
+    public void isMigrationRequiredFrom_fallBackToDestFromCalled_falseForProvidedValues() {
+        Context context = mock(Context.class);
+
+        TestDatabase db = Room.inMemoryDatabaseBuilder(context, TestDatabase.class)
+                .fallbackToDestructiveMigrationFrom(1, 4, 81)
+                .build();
+
+        DatabaseConfiguration config = ((BuilderTest_TestDatabase_Impl) db).mConfig;
+        assertThat(config.isMigrationRequiredFrom(1), is(false));
+        assertThat(config.isMigrationRequiredFrom(4), is(false));
+        assertThat(config.isMigrationRequiredFrom(81), is(false));
+    }
+
+    @Test
+    public void isMigrationRequiredFrom_fallBackToDestFromCalled_trueForNonProvidedValues() {
+        Context context = mock(Context.class);
+
+        TestDatabase db = Room.inMemoryDatabaseBuilder(context, TestDatabase.class)
+                .fallbackToDestructiveMigrationFrom(1, 4, 81)
+                .build();
+
+        DatabaseConfiguration config = ((BuilderTest_TestDatabase_Impl) db).mConfig;
+        assertThat(config.isMigrationRequiredFrom(2), is(true));
+        assertThat(config.isMigrationRequiredFrom(3), is(true));
+        assertThat(config.isMigrationRequiredFrom(73), is(true));
     }
 
     @Test
@@ -163,7 +268,7 @@ public class BuilderTest {
         }
 
         @Override
-        public void migrate(SupportSQLiteDatabase database) {
+        public void migrate(@NonNull SupportSQLiteDatabase database) {
         }
     }
 

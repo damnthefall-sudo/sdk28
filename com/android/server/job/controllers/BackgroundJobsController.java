@@ -17,17 +17,17 @@
 package com.android.server.job.controllers;
 
 import android.content.Context;
-import android.os.IDeviceIdleController;
-import android.os.ServiceManager;
 import android.os.SystemClock;
 import android.os.UserHandle;
 import android.util.Slog;
+import android.util.proto.ProtoOutputStream;
 
-import com.android.internal.util.ArrayUtils;
 import com.android.server.ForceAppStandbyTracker;
 import com.android.server.ForceAppStandbyTracker.Listener;
 import com.android.server.job.JobSchedulerService;
 import com.android.server.job.JobStore;
+import com.android.server.job.StateControllerProto;
+import com.android.server.job.StateControllerProto.BackgroundJobsController.TrackedJob;
 
 import java.io.PrintWriter;
 
@@ -41,7 +41,6 @@ public final class BackgroundJobsController extends StateController {
     private static volatile BackgroundJobsController sController;
 
     private final JobSchedulerService mJobSchedulerService;
-    private final IDeviceIdleController mDeviceIdleController;
 
     private final ForceAppStandbyTracker mForceAppStandbyTracker;
 
@@ -59,8 +58,6 @@ public final class BackgroundJobsController extends StateController {
     private BackgroundJobsController(JobSchedulerService service, Context context, Object lock) {
         super(service, context, lock);
         mJobSchedulerService = service;
-        mDeviceIdleController = IDeviceIdleController.Stub.asInterface(
-                ServiceManager.getService(Context.DEVICE_IDLE_CONTROLLER));
 
         mForceAppStandbyTracker = ForceAppStandbyTracker.getInstance(context);
 
@@ -90,6 +87,7 @@ public final class BackgroundJobsController extends StateController {
                 return;
             }
             final int uid = jobStatus.getSourceUid();
+            final String sourcePkg = jobStatus.getSourcePackageName();
             pw.print("  #");
             jobStatus.printUniqueId(pw);
             pw.print(" from ");
@@ -100,11 +98,10 @@ public final class BackgroundJobsController extends StateController {
                 pw.print(", whitelisted");
             }
             pw.print(": ");
-            pw.print(jobStatus.getSourcePackageName());
+            pw.print(sourcePkg);
 
             pw.print(" [RUN_ANY_IN_BACKGROUND ");
-            pw.print(mForceAppStandbyTracker.isRunAnyInBackgroundAppOpsAllowed(
-                    jobStatus.getSourceUid(), jobStatus.getSourcePackageName())
+            pw.print(mForceAppStandbyTracker.isRunAnyInBackgroundAppOpsAllowed(uid, sourcePkg)
                     ? "allowed]" : "disallowed]");
 
             if ((jobStatus.satisfiedConstraints
@@ -114,6 +111,51 @@ public final class BackgroundJobsController extends StateController {
                 pw.println(" WAITING");
             }
         });
+    }
+
+    @Override
+    public void dumpControllerStateLocked(ProtoOutputStream proto, long fieldId, int filterUid) {
+        final long token = proto.start(fieldId);
+        final long mToken = proto.start(StateControllerProto.BACKGROUND);
+
+        mForceAppStandbyTracker.dumpProto(proto,
+                StateControllerProto.BackgroundJobsController.FORCE_APP_STANDBY_TRACKER);
+
+        mJobSchedulerService.getJobStore().forEachJob((jobStatus) -> {
+            if (!jobStatus.shouldDump(filterUid)) {
+                return;
+            }
+            final long jsToken =
+                    proto.start(StateControllerProto.BackgroundJobsController.TRACKED_JOBS);
+
+            jobStatus.writeToShortProto(proto,
+                    TrackedJob.INFO);
+            final int sourceUid = jobStatus.getSourceUid();
+            proto.write(TrackedJob.SOURCE_UID, sourceUid);
+            final String sourcePkg = jobStatus.getSourcePackageName();
+            proto.write(TrackedJob.SOURCE_PACKAGE_NAME, sourcePkg);
+
+            proto.write(TrackedJob.IS_IN_FOREGROUND,
+                    mForceAppStandbyTracker.isInForeground(sourceUid));
+            proto.write(TrackedJob.IS_WHITELISTED,
+                    mForceAppStandbyTracker.isUidPowerSaveWhitelisted(sourceUid) ||
+                    mForceAppStandbyTracker.isUidTempPowerSaveWhitelisted(sourceUid));
+
+            proto.write(
+                    TrackedJob.CAN_RUN_ANY_IN_BACKGROUND,
+                    mForceAppStandbyTracker.isRunAnyInBackgroundAppOpsAllowed(
+                            sourceUid, sourcePkg));
+
+            proto.write(
+                    TrackedJob.ARE_CONSTRAINTS_SATISFIED,
+                    (jobStatus.satisfiedConstraints &
+                            JobStatus.CONSTRAINT_BACKGROUND_NOT_RESTRICTED) != 0);
+
+            proto.end(jsToken);
+        });
+
+        proto.end(mToken);
+        proto.end(token);
     }
 
     private void updateAllJobRestrictionsLocked() {
@@ -155,7 +197,9 @@ public final class BackgroundJobsController extends StateController {
         final int uid = jobStatus.getSourceUid();
         final String packageName = jobStatus.getSourcePackageName();
 
-        final boolean canRun = !mForceAppStandbyTracker.areJobsRestricted(uid, packageName);
+        final boolean canRun = !mForceAppStandbyTracker.areJobsRestricted(uid, packageName,
+                (jobStatus.getInternalFlags() & JobStatus.INTERNAL_FLAG_HAS_FOREGROUND_EXEMPTION)
+                        != 0);
 
         return jobStatus.setBackgroundNotRestrictedConstraintSatisfied(canRun);
     }
@@ -187,17 +231,23 @@ public final class BackgroundJobsController extends StateController {
     private final Listener mForceAppStandbyListener = new Listener() {
         @Override
         public void updateAllJobs() {
-            updateAllJobRestrictionsLocked();
+            synchronized (mLock) {
+                updateAllJobRestrictionsLocked();
+            }
         }
 
         @Override
         public void updateJobsForUid(int uid) {
-            updateJobRestrictionsForUidLocked(uid);
+            synchronized (mLock) {
+                updateJobRestrictionsForUidLocked(uid);
+            }
         }
 
         @Override
         public void updateJobsForUidPackage(int uid, String packageName) {
-            updateJobRestrictionsForUidLocked(uid);
+            synchronized (mLock) {
+                updateJobRestrictionsForUidLocked(uid);
+            }
         }
     };
 }

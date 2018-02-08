@@ -47,7 +47,6 @@ import android.content.res.Resources;
 import android.content.res.XmlResourceParser;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
-import android.net.Uri;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -134,6 +133,7 @@ public abstract class PackageManager {
             GET_SERVICES,
             GET_SHARED_LIBRARY_FILES,
             GET_SIGNATURES,
+            GET_SIGNING_CERTIFICATES,
             GET_URI_PERMISSION_PATTERNS,
             MATCH_UNINSTALLED_PACKAGES,
             MATCH_DISABLED_COMPONENTS,
@@ -273,7 +273,10 @@ public abstract class PackageManager {
     /**
      * {@link PackageInfo} flag: return information about the
      * signatures included in the package.
+     *
+     * @deprecated use {@code GET_SIGNING_CERTIFICATES} instead
      */
+    @Deprecated
     public static final int GET_SIGNATURES          = 0x00000040;
 
     /**
@@ -487,6 +490,14 @@ public abstract class PackageManager {
      * @hide
      */
     public static final int MATCH_STATIC_SHARED_LIBRARIES = 0x04000000;
+
+    /**
+     * {@link PackageInfo} flag: return the signing certificates associated with
+     * this package.  Each entry is a signing certificate that the package
+     * has proven it is authorized to use, usually a past signing certificate from
+     * which it has rotated.
+     */
+    public static final int GET_SIGNING_CERTIFICATES = 0x08000000;
 
     /**
      * Internal flag used to indicate that a system component has done their
@@ -788,7 +799,8 @@ public abstract class PackageManager {
 
     /**
      * Flag parameter for {@link #installPackage} to indicate that this package is an
-     * upgrade to a package that refers to the SDK via release letter.
+     * upgrade to a package that refers to the SDK via release letter or is targeting an SDK via
+     * release letter that the current build does not support.
      *
      * @hide
      */
@@ -1297,6 +1309,15 @@ public abstract class PackageManager {
      */
     public static final int INSTALL_FAILED_INSTANT_APP_INVALID = -116;
 
+    /**
+     * Installation parse return code: this is passed in the
+     * {@link PackageInstaller#EXTRA_LEGACY_STATUS} if the dex metadata file is invalid or
+     * if there was no matching apk file for a dex metadata file.
+     *
+     * @hide
+     */
+    public static final int INSTALL_FAILED_BAD_DEX_METADATA = -117;
+
     /** @hide */
     @IntDef(flag = true, prefix = { "DELETE_" }, value = {
             DELETE_KEEP_DATA,
@@ -1743,6 +1764,16 @@ public abstract class PackageManager {
     @SdkConstant(SdkConstantType.FEATURE)
     public static final String FEATURE_CAMERA_CAPABILITY_RAW =
             "android.hardware.camera.capability.raw";
+
+    /**
+     * Feature for {@link #getSystemAvailableFeatures} and {@link #hasSystemFeature}: At least one
+     * of the cameras on the device supports the
+     * {@link android.hardware.camera2.CameraMetadata#REQUEST_AVAILABLE_CAPABILITIES_MOTION_TRACKING
+     * MOTION_TRACKING} capability level.
+     */
+    @SdkConstant(SdkConstantType.FEATURE)
+    public static final String FEATURE_CAMERA_AR =
+            "android.hardware.camera.ar";
 
     /**
      * Feature for {@link #getSystemAvailableFeatures} and
@@ -2328,8 +2359,6 @@ public abstract class PackageManager {
     /**
      * Feature for {@link #getSystemAvailableFeatures} and
      * {@link #hasSystemFeature}: The device supports Wi-Fi RTT (IEEE 802.11mc).
-     *
-     * @hide RTT_API
      */
     @SdkConstant(SdkConstantType.FEATURE)
     public static final String FEATURE_WIFI_RTT = "android.hardware.wifi.rtt";
@@ -2480,9 +2509,16 @@ public abstract class PackageManager {
             = "android.software.securely_removes_users";
 
     /** {@hide} */
+    @TestApi
     @SdkConstant(SdkConstantType.FEATURE)
     public static final String FEATURE_FILE_BASED_ENCRYPTION
             = "android.software.file_based_encryption";
+
+    /** {@hide} */
+    @TestApi
+    @SdkConstant(SdkConstantType.FEATURE)
+    public static final String FEATURE_ADOPTABLE_STORAGE
+            = "android.software.adoptable_storage";
 
     /**
      * Feature for {@link #getSystemAvailableFeatures} and {@link #hasSystemFeature}:
@@ -2530,31 +2566,22 @@ public abstract class PackageManager {
      * Devices declaring this feature must include an application implementing a
      * {@link android.service.vr.VrListenerService} that can be targeted by VR applications via
      * {@link android.app.Activity#setVrModeEnabled}.
+     * @deprecated use {@link #FEATURE_VR_MODE_HIGH_PERFORMANCE} instead.
      */
+    @Deprecated
     @SdkConstant(SdkConstantType.FEATURE)
     public static final String FEATURE_VR_MODE = "android.software.vr.mode";
 
     /**
      * Feature for {@link #getSystemAvailableFeatures} and {@link #hasSystemFeature}:
-     * The device implements {@link #FEATURE_VR_MODE} but additionally meets extra CDD requirements
-     * to provide a high-quality VR experience.  In general, devices declaring this feature will
-     * additionally:
-     * <ul>
-     *   <li>Deliver consistent performance at a high framerate over an extended period of time
-     *   for typical VR application CPU/GPU workloads with a minimal number of frame drops for VR
-     *   applications that have called
-     *   {@link android.view.Window#setSustainedPerformanceMode}.</li>
-     *   <li>Implement {@link #FEATURE_HIFI_SENSORS} and have a low sensor latency.</li>
-     *   <li>Include optimizations to lower display persistence while running VR applications.</li>
-     *   <li>Implement an optimized render path to minimize latency to draw to the device's main
-     *   display.</li>
-     *   <li>Include the following EGL extensions: EGL_ANDROID_create_native_client_buffer,
-     *   EGL_ANDROID_front_buffer_auto_refresh, EGL_EXT_protected_content,
-     *   EGL_KHR_mutable_render_buffer, EGL_KHR_reusable_sync, and EGL_KHR_wait_sync.</li>
-     *   <li>Provide at least one CPU core that is reserved for use solely by the top, foreground
-     *   VR application process for critical render threads while such an application is
-     *   running.</li>
-     * </ul>
+     * The device implements an optimized mode for virtual reality (VR) applications that handles
+     * stereoscopic rendering of notifications, disables most monocular system UI components
+     * while a VR application has user focus and meets extra CDD requirements to provide a
+     * high-quality VR experience.
+     * Devices declaring this feature must include an application implementing a
+     * {@link android.service.vr.VrListenerService} that can be targeted by VR applications via
+     * {@link android.app.Activity#setVrModeEnabled}.
+     * and must meet CDD requirements to provide a high-quality VR experience.
      */
     @SdkConstant(SdkConstantType.FEATURE)
     public static final String FEATURE_VR_MODE_HIGH_PERFORMANCE
@@ -3037,6 +3064,21 @@ public abstract class PackageManager {
      *         does not contain such an activity.
      */
     public abstract @Nullable Intent getLeanbackLaunchIntentForPackage(@NonNull String packageName);
+
+    /**
+     * Return a "good" intent to launch a front-door Car activity in a
+     * package, for use for example to implement an "open" button when browsing
+     * through packages. The current implementation will look for a main
+     * activity in the category {@link Intent#CATEGORY_CAR_LAUNCHER}, or
+     * return null if no main car activities are found.
+     *
+     * @param packageName The name of the package to inspect.
+     * @return Returns either a fully-qualified Intent that can be used to launch
+     *         the main Car activity in the package, or null if the package
+     *         does not contain such an activity.
+     * @hide
+     */
+    public abstract @Nullable Intent getCarLaunchIntentForPackage(@NonNull String packageName);
 
     /**
      * Return an array of all of the POSIX secondary group IDs that have been
@@ -3761,7 +3803,7 @@ public abstract class PackageManager {
     public abstract int getInstantAppCookieMaxBytes();
 
     /**
-     * @deprecated
+     * deprecated
      * @hide
      */
     public abstract int getInstantAppCookieMaxSize();
@@ -4718,17 +4760,6 @@ public abstract class PackageManager {
     }
 
     /**
-     * @deprecated replaced by {@link PackageInstaller}
-     * @hide
-     */
-    @Deprecated
-    public abstract void installPackage(
-            Uri packageURI,
-            PackageInstallObserver observer,
-            @InstallFlags int flags,
-            String installerPackageName);
-
-    /**
      * If there is already an application with the given package name installed
      * on the system for other users, also install it for the calling user.
      * @hide
@@ -5633,6 +5664,8 @@ public abstract class PackageManager {
             case INSTALL_FAILED_DUPLICATE_PERMISSION: return "INSTALL_FAILED_DUPLICATE_PERMISSION";
             case INSTALL_FAILED_NO_MATCHING_ABIS: return "INSTALL_FAILED_NO_MATCHING_ABIS";
             case INSTALL_FAILED_ABORTED: return "INSTALL_FAILED_ABORTED";
+            case INSTALL_FAILED_BAD_DEX_METADATA:
+                return "INSTALL_FAILED_BAD_DEX_METADATA";
             default: return Integer.toString(status);
         }
     }
@@ -5677,6 +5710,7 @@ public abstract class PackageManager {
             case INSTALL_PARSE_FAILED_BAD_SHARED_USER_ID: return PackageInstaller.STATUS_FAILURE_INVALID;
             case INSTALL_PARSE_FAILED_MANIFEST_MALFORMED: return PackageInstaller.STATUS_FAILURE_INVALID;
             case INSTALL_PARSE_FAILED_MANIFEST_EMPTY: return PackageInstaller.STATUS_FAILURE_INVALID;
+            case INSTALL_FAILED_BAD_DEX_METADATA: return PackageInstaller.STATUS_FAILURE_INVALID;
             case INSTALL_FAILED_INTERNAL_ERROR: return PackageInstaller.STATUS_FAILURE;
             case INSTALL_FAILED_USER_RESTRICTED: return PackageInstaller.STATUS_FAILURE_INCOMPATIBLE;
             case INSTALL_FAILED_DUPLICATE_PERMISSION: return PackageInstaller.STATUS_FAILURE_CONFLICT;
@@ -5868,5 +5902,94 @@ public abstract class PackageManager {
     @SystemApi
     public @NonNull ArtManager getArtManager() {
         throw new UnsupportedOperationException("getArtManager not implemented in subclass");
+    }
+
+    /**
+     * Sets or clears the harmful app warning details for the given app.
+     *
+     * When set, any attempt to launch an activity in this package will be intercepted and a
+     * warning dialog will be shown to the user instead, with the given warning. The user
+     * will have the option to proceed with the activity launch, or to uninstall the application.
+     *
+     * @param packageName The full name of the package to warn on.
+     * @param warning A warning string to display to the user describing the threat posed by the
+     *                application, or null to clear the warning.
+     *
+     * @hide
+     */
+    @RequiresPermission(Manifest.permission.SET_HARMFUL_APP_WARNINGS)
+    @SystemApi
+    public void setHarmfulAppWarning(@NonNull String packageName, @Nullable CharSequence warning) {
+        throw new UnsupportedOperationException("setHarmfulAppWarning not implemented in subclass");
+    }
+
+    /**
+     * Returns the harmful app warning string for the given app, or null if there is none set.
+     *
+     * @param packageName The full name of the desired package.
+     *
+     * @hide
+     */
+    @RequiresPermission(Manifest.permission.SET_HARMFUL_APP_WARNINGS)
+    @Nullable
+    @SystemApi
+    public CharSequence getHarmfulAppWarning(@NonNull String packageName) {
+        throw new UnsupportedOperationException("getHarmfulAppWarning not implemented in subclass");
+    }
+
+    /** @hide */
+    @IntDef(prefix = { "CERT_INPUT_" }, value = {
+            CERT_INPUT_RAW_X509,
+            CERT_INPUT_SHA256
+    })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface CertificateInputType {}
+
+    /**
+     * Certificate input bytes: the input bytes represent an encoded X.509 Certificate which could
+     * be generated using an {@code CertificateFactory}
+     */
+    public static final int CERT_INPUT_RAW_X509 = 0;
+
+    /**
+     * Certificate input bytes: the input bytes represent the SHA256 output of an encoded X.509
+     * Certificate.
+     */
+    public static final int CERT_INPUT_SHA256 = 1;
+
+    /**
+     * Searches the set of signing certificates by which the given package has proven to have been
+     * signed.  This should be used instead of {@code getPackageInfo} with {@code GET_SIGNATURES}
+     * since it takes into account the possibility of signing certificate rotation, except in the
+     * case of packages that are signed by multiple certificates, for which signing certificate
+     * rotation is not supported.
+     *
+     * @param packageName package whose signing certificates to check
+     * @param certificate signing certificate for which to search
+     * @param type representation of the {@code certificate}
+     * @return true if this package was or is signed by exactly the certificate {@code certificate}
+     */
+    public boolean hasSigningCertificate(
+            String packageName, byte[] certificate, @CertificateInputType int type) {
+        throw new UnsupportedOperationException(
+                "hasSigningCertificate not implemented in subclass");
+    }
+
+    /**
+     * Searches the set of signing certificates by which the given uid has proven to have been
+     * signed.  This should be used instead of {@code getPackageInfo} with {@code GET_SIGNATURES}
+     * since it takes into account the possibility of signing certificate rotation, except in the
+     * case of packages that are signed by multiple certificates, for which signing certificate
+     * rotation is not supported.
+     *
+     * @param uid package whose signing certificates to check
+     * @param certificate signing certificate for which to search
+     * @param type representation of the {@code certificate}
+     * @return true if this package was or is signed by exactly the certificate {@code certificate}
+     */
+    public boolean hasSigningCertificate(
+            int uid, byte[] certificate, @CertificateInputType int type) {
+        throw new UnsupportedOperationException(
+                "hasSigningCertificate not implemented in subclass");
     }
 }

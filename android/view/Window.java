@@ -1339,9 +1339,9 @@ public abstract class Window {
 
     /**
      * Finds a view that was identified by the {@code android:id} XML attribute
-     * that was processed in {@link android.app.Activity#onCreate}. This will
-     * implicitly call {@link #getDecorView} with all of the associated
-     * side-effects.
+     * that was processed in {@link android.app.Activity#onCreate}.
+     * <p>
+     * This will implicitly call {@link #getDecorView} with all of the associated side-effects.
      * <p>
      * <strong>Note:</strong> In most cases -- depending on compiler support --
      * the resulting view is automatically cast to the target class type. If
@@ -1351,10 +1351,34 @@ public abstract class Window {
      * @param id the ID to search for
      * @return a view with given ID if found, or {@code null} otherwise
      * @see View#findViewById(int)
+     * @see Window#requireViewById(int)
      */
     @Nullable
     public <T extends View> T findViewById(@IdRes int id) {
         return getDecorView().findViewById(id);
+    }
+    /**
+     * Finds a view that was identified by the {@code android:id} XML attribute
+     * that was processed in {@link android.app.Activity#onCreate}, or throws an
+     * IllegalArgumentException if the ID is invalid, or there is no matching view in the hierarchy.
+     * <p>
+     * <strong>Note:</strong> In most cases -- depending on compiler support --
+     * the resulting view is automatically cast to the target class type. If
+     * the target class type is unconstrained, an explicit cast may be
+     * necessary.
+     *
+     * @param id the ID to search for
+     * @return a view with given ID
+     * @see View#requireViewById(int)
+     * @see Window#findViewById(int)
+     */
+    @NonNull
+    public final <T extends View> T requireViewById(@IdRes int id) {
+        T view = findViewById(id);
+        if (view == null) {
+            throw new IllegalArgumentException("ID does not reference a View inside this Window");
+        }
+        return view;
     }
 
     /**
@@ -2244,8 +2268,35 @@ public abstract class Window {
      * <p>
      * The transitionName for the view background will be "android:navigation:background".
      * </p>
+     * @attr ref android.R.styleable#Window_navigationBarColor
      */
     public abstract void setNavigationBarColor(@ColorInt int color);
+
+    /**
+     * Shows a thin line of the specified color between the navigation bar and the app
+     * content.
+     * <p>
+     * For this to take effect,
+     * the window must be drawing the system bar backgrounds with
+     * {@link android.view.WindowManager.LayoutParams#FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS} and
+     * {@link android.view.WindowManager.LayoutParams#FLAG_TRANSLUCENT_NAVIGATION} must not be set.
+     *
+     * @param dividerColor The color of the thin line.
+     * @attr ref android.R.styleable#Window_navigationBarDividerColor
+     */
+    public void setNavigationBarDividerColor(@ColorInt int dividerColor) {
+    }
+
+    /**
+     * Retrieves the color of the navigation bar divider.
+     *
+     * @return The color of the navigation bar divider color.
+     * @see #setNavigationBarColor(int)
+     * @attr ref android.R.styleable#Window_navigationBarDividerColor
+     */
+    public @ColorInt int getNavigationBarDividerColor() {
+        return 0;
+    }
 
     /** @hide */
     public void setTheme(int resId) {

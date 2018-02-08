@@ -29,6 +29,7 @@ import android.os.IRemoteCallback;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
 import android.util.DisplayMetrics;
+import android.view.RemoteAnimationAdapter;
 
 import com.android.internal.os.IResultReceiver;
 import com.android.internal.policy.IKeyguardDismissCallback;
@@ -74,6 +75,11 @@ public class IWindowManagerImpl implements IWindowManager {
     }
 
     // ---- unused implementation of IWindowManager ----
+
+    @Override
+    public int getNavBarPosition() throws RemoteException {
+        return 0;
+    }
 
     @Override
     public void addWindowToken(IBinder arg0, int arg1, int arg2) throws RemoteException {
@@ -234,6 +240,10 @@ public class IWindowManagerImpl implements IWindowManager {
     public void overridePendingAppTransitionMultiThumb(AppTransitionAnimationSpec[] specs,
             IRemoteCallback callback0, IRemoteCallback callback1, boolean scaleUp) {
         // TODO Auto-generated method stub
+    }
+
+    @Override
+    public void overridePendingAppTransitionRemote(RemoteAnimationAdapter adapter) {
     }
 
     @Override
@@ -416,7 +426,8 @@ public class IWindowManagerImpl implements IWindowManager {
     }
 
     @Override
-    public void dismissKeyguard(IKeyguardDismissCallback callback) throws RemoteException {
+    public void dismissKeyguard(IKeyguardDismissCallback callback, CharSequence message)
+            throws RemoteException {
     }
 
     @Override
@@ -536,5 +547,18 @@ public class IWindowManagerImpl implements IWindowManager {
     @Override
     public void unregisterWallpaperVisibilityListener(IWallpaperVisibilityListener listener,
             int displayId) throws RemoteException {
+    }
+
+    @Override
+    public void startWindowTrace() throws RemoteException {
+    }
+
+    @Override
+    public void stopWindowTrace() throws RemoteException {
+    }
+
+    @Override
+    public boolean isWindowTraceEnabled() throws RemoteException {
+        return false;
     }
 }

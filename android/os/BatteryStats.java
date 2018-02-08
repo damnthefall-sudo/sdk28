@@ -35,6 +35,7 @@ import android.util.proto.ProtoOutputStream;
 import android.view.Display;
 
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.internal.location.gnssmetrics.GnssMetrics;
 import com.android.internal.os.BatterySipper;
 import com.android.internal.os.BatteryStatsHelper;
 
@@ -180,6 +181,11 @@ public abstract class BatteryStats implements Parcelable {
     public static final int FOREGROUND_SERVICE = 22;
 
     /**
+     * A constant indicating an aggregate wifi multicast timer
+     */
+     public static final int WIFI_AGGREGATE_MULTICAST_ENABLED = 23;
+
+    /**
      * Include all of the data in the stats, including previously saved data.
      */
     public static final int STATS_SINCE_CHARGED = 0;
@@ -230,8 +236,11 @@ public abstract class BatteryStats implements Parcelable {
      * New in version 29:
      *   - Process states re-ordered. TOP_SLEEPING now below BACKGROUND. HEAVY_WEIGHT introduced.
      *   - CPU times per UID process state
+     * New in version 30:
+     *   - Uid.PROCESS_STATE_FOREGROUND_SERVICE only tracks
+     *   ActivityManager.PROCESS_STATE_FOREGROUND_SERVICE.
      */
-    static final int CHECKIN_VERSION = 29;
+    static final int CHECKIN_VERSION = 30;
 
     /**
      * Old version, we hit 9 and ran out of room, need to remove.
@@ -327,6 +336,9 @@ public abstract class BatteryStats implements Parcelable {
     private final StringBuilder mFormatBuilder = new StringBuilder(32);
     private final Formatter mFormatter = new Formatter(mFormatBuilder);
 
+    private static final String CELLULAR_CONTROLLER_NAME = "Cellular";
+    private static final String WIFI_CONTROLLER_NAME = "WiFi";
+
     /**
      * Indicates times spent by the uid at each cpu frequency in all process states.
      *
@@ -401,6 +413,13 @@ public abstract class BatteryStats implements Parcelable {
          * idle state.
          */
         public abstract LongCounter getIdleTimeCounter();
+
+        /**
+         * @return a non-null {@link LongCounter} representing time spent (milliseconds) in the
+         * scan state.
+         */
+        public abstract LongCounter getScanTimeCounter();
+
 
         /**
          * @return a non-null {@link LongCounter} representing time spent (milliseconds) in the
@@ -520,8 +539,8 @@ public abstract class BatteryStats implements Parcelable {
             return ActivityManager.PROCESS_STATE_NONEXISTENT;
         } else if (procState == ActivityManager.PROCESS_STATE_TOP) {
             return Uid.PROCESS_STATE_TOP;
-        } else if (procState <= ActivityManager.PROCESS_STATE_FOREGROUND_SERVICE) {
-            // Persistent and other foreground states go here.
+        } else if (procState == ActivityManager.PROCESS_STATE_FOREGROUND_SERVICE) {
+            // State when app has put itself in the foreground.
             return Uid.PROCESS_STATE_FOREGROUND_SERVICE;
         } else if (procState <= ActivityManager.PROCESS_STATE_IMPORTANT_FOREGROUND) {
             // Persistent and other foreground states go here.
@@ -675,6 +694,14 @@ public abstract class BatteryStats implements Parcelable {
 
         public abstract long[] getCpuFreqTimes(int which);
         public abstract long[] getScreenOffCpuFreqTimes(int which);
+        /**
+         * Returns cpu active time of an uid.
+         */
+        public abstract long getCpuActiveTime();
+        /**
+         * Returns cpu times of an uid on each cluster
+         */
+        public abstract long[] getCpuClusterTimes();
 
         /**
          * Returns cpu times of an uid at a particular process state.
@@ -689,17 +716,17 @@ public abstract class BatteryStats implements Parcelable {
         // total time a uid has had any processes running at all.
 
         /**
-         * Time this uid has any processes in the top state (or above such as persistent).
+         * Time this uid has any processes in the top state.
          */
         public static final int PROCESS_STATE_TOP = 0;
         /**
-         * Time this uid has any process with a started out bound foreground service, but
+         * Time this uid has any process with a started foreground service, but
          * none in the "top" state.
          */
         public static final int PROCESS_STATE_FOREGROUND_SERVICE = 1;
         /**
          * Time this uid has any process in an active foreground state, but none in the
-         * "top sleeping" or better state.
+         * "foreground service" or better state. Persistent and other foreground states go here.
          */
         public static final int PROCESS_STATE_FOREGROUND = 2;
         /**
@@ -1492,6 +1519,10 @@ public abstract class BatteryStats implements Parcelable {
         public static final int STATE2_WIFI_SIGNAL_STRENGTH_SHIFT = 4;
         public static final int STATE2_WIFI_SIGNAL_STRENGTH_MASK =
                 0x7 << STATE2_WIFI_SIGNAL_STRENGTH_SHIFT;
+        // Values for NUM_GPS_SIGNAL_QUALITY_LEVELS
+        public static final int STATE2_GPS_SIGNAL_QUALITY_SHIFT = 7;
+        public static final int STATE2_GPS_SIGNAL_QUALITY_MASK =
+            0x1 << STATE2_GPS_SIGNAL_QUALITY_SHIFT;
 
         public static final int STATE2_POWER_SAVE_FLAG = 1<<31;
         public static final int STATE2_VIDEO_ON_FLAG = 1<<30;
@@ -2080,6 +2111,23 @@ public abstract class BatteryStats implements Parcelable {
      */
     public abstract int getNumConnectivityChange(int which);
 
+
+    /**
+     * Returns the time in microseconds that the phone has been running with
+     * the given GPS signal quality level
+     *
+     * {@hide}
+     */
+    public abstract long getGpsSignalQualityTime(int strengthBin,
+        long elapsedRealtimeUs, int which);
+
+    /**
+     * Returns the GPS battery drain in mA-ms
+     *
+     * {@hide}
+     */
+    public abstract long getGpsBatteryDrainMaMs();
+
     /**
      * Returns the time in microseconds that the phone has been on while the device was
      * running on battery.
@@ -2304,6 +2352,9 @@ public abstract class BatteryStats implements Parcelable {
                 WIFI_SUPPL_STATE_NAMES, WIFI_SUPPL_STATE_SHORT_NAMES),
         new BitDescription(HistoryItem.STATE2_CAMERA_FLAG, "camera", "ca"),
         new BitDescription(HistoryItem.STATE2_BLUETOOTH_SCAN_FLAG, "ble_scan", "bles"),
+        new BitDescription(HistoryItem.STATE2_GPS_SIGNAL_QUALITY_MASK,
+            HistoryItem.STATE2_GPS_SIGNAL_QUALITY_SHIFT, "gps_signal_quality", "Gss",
+            new String[] { "poor", "good"}, new String[] { "poor", "good"}),
     };
 
     public static final String[] HISTORY_EVENT_NAMES = new String[] {
@@ -2334,12 +2385,36 @@ public abstract class BatteryStats implements Parcelable {
     };
 
     /**
+     * Returns total time for WiFi Multicast Wakelock timer.
+     * Note that this may be different from the sum of per uid timer values.
+     *
+     *  {@hide}
+     */
+    public abstract long getWifiMulticastWakelockTime(long elapsedRealtimeUs, int which);
+
+    /**
+     * Returns total time for WiFi Multicast Wakelock timer
+     * Note that this may be different from the sum of per uid timer values.
+     *
+     * {@hide}
+     */
+    public abstract int getWifiMulticastWakelockCount(int which);
+
+    /**
      * Returns the time in microseconds that wifi has been on while the device was
      * running on battery.
      *
      * {@hide}
      */
     public abstract long getWifiOnTime(long elapsedRealtimeUs, int which);
+
+    /**
+     * Returns the time in microseconds that wifi has been active while the device was
+     * running on battery.
+     *
+     * {@hide}
+     */
+    public abstract long getWifiActiveTime(long elapsedRealtimeUs, int which);
 
     /**
      * Returns the time in microseconds that wifi has been on and the driver has
@@ -3288,6 +3363,20 @@ public abstract class BatteryStats implements Parcelable {
         final long sleepTimeMs
             = totalControllerActivityTimeMs - (idleTimeMs + rxTimeMs + totalTxTimeMs);
 
+        if (controllerName.equals(WIFI_CONTROLLER_NAME)) {
+            final long scanTimeMs = counter.getScanTimeCounter().getCountLocked(which);
+            sb.setLength(0);
+            sb.append(prefix);
+            sb.append("     ");
+            sb.append(controllerName);
+            sb.append(" Scan time:  ");
+            formatTimeMs(sb, scanTimeMs);
+            sb.append("(");
+            sb.append(formatRatioLocked(scanTimeMs, totalControllerActivityTimeMs));
+            sb.append(")");
+            pw.println(sb.toString());
+        }
+
         sb.setLength(0);
         sb.append(prefix);
         sb.append("     ");
@@ -3329,7 +3418,7 @@ public abstract class BatteryStats implements Parcelable {
 
         String [] powerLevel;
         switch(controllerName) {
-            case "Cellular":
+            case CELLULAR_CONTROLLER_NAME:
                 powerLevel = new String[] {
                     "   less than 0dBm: ",
                     "   0dBm to 8dBm: ",
@@ -3442,16 +3531,13 @@ public abstract class BatteryStats implements Parcelable {
                 screenDozeTime / 1000);
 
 
-        // Calculate both wakelock and wifi multicast wakelock times across all uids.
+        // Calculate wakelock times across all uids.
         long fullWakeLockTimeTotal = 0;
         long partialWakeLockTimeTotal = 0;
-        long multicastWakeLockTimeTotalMicros = 0;
-        int multicastWakeLockCountTotal = 0;
 
         for (int iu = 0; iu < NU; iu++) {
             final Uid u = uidStats.valueAt(iu);
 
-            // First calculating the wakelock stats
             final ArrayMap<String, ? extends BatteryStats.Uid.Wakelock> wakelocks
                     = u.getWakelockStats();
             for (int iw=wakelocks.size()-1; iw>=0; iw--) {
@@ -3468,13 +3554,6 @@ public abstract class BatteryStats implements Parcelable {
                     partialWakeLockTimeTotal += partialWakeTimer.getTotalTimeLocked(
                         rawRealtime, which);
                 }
-            }
-
-            // Now calculating the wifi multicast wakelock stats
-            final Timer mcTimer = u.getMulticastWakelockStats();
-            if (mcTimer != null) {
-                multicastWakeLockTimeTotalMicros += mcTimer.getTotalTimeLocked(rawRealtime, which);
-                multicastWakeLockCountTotal += mcTimer.getCountLocked(which);
             }
         }
 
@@ -3592,6 +3671,9 @@ public abstract class BatteryStats implements Parcelable {
         dumpLine(pw, 0 /* uid */, category, WIFI_SIGNAL_STRENGTH_COUNT_DATA, args);
 
         // Dump Multicast total stats
+        final long multicastWakeLockTimeTotalMicros =
+                getWifiMulticastWakelockTime(rawRealtime, which);
+        final int multicastWakeLockCountTotal = getWifiMulticastWakelockCount(which);
         dumpLine(pw, 0 /* uid */, category, WIFI_MULTICAST_TOTAL_DATA,
                 multicastWakeLockTimeTotalMicros / 1000,
                 multicastWakeLockCountTotal);
@@ -4456,18 +4538,15 @@ public abstract class BatteryStats implements Parcelable {
             pw.print("  Connectivity changes: "); pw.println(connChanges);
         }
 
-        // Calculate both wakelock and wifi multicast wakelock times across all uids.
+        // Calculate wakelock times across all uids.
         long fullWakeLockTimeTotalMicros = 0;
         long partialWakeLockTimeTotalMicros = 0;
-        long multicastWakeLockTimeTotalMicros = 0;
-        int multicastWakeLockCountTotal = 0;
 
         final ArrayList<TimerEntry> timers = new ArrayList<>();
 
         for (int iu = 0; iu < NU; iu++) {
             final Uid u = uidStats.valueAt(iu);
 
-            // First calculate wakelock statistics
             final ArrayMap<String, ? extends BatteryStats.Uid.Wakelock> wakelocks
                     = u.getWakelockStats();
             for (int iw=wakelocks.size()-1; iw>=0; iw--) {
@@ -4494,13 +4573,6 @@ public abstract class BatteryStats implements Parcelable {
                         partialWakeLockTimeTotalMicros += totalTimeMicros;
                     }
                 }
-            }
-
-            // Next calculate wifi multicast wakelock statistics
-            final Timer mcTimer = u.getMulticastWakelockStats();
-            if (mcTimer != null) {
-                multicastWakeLockTimeTotalMicros += mcTimer.getTotalTimeLocked(rawRealtime, which);
-                multicastWakeLockCountTotal += mcTimer.getCountLocked(which);
             }
         }
 
@@ -4531,6 +4603,9 @@ public abstract class BatteryStats implements Parcelable {
             pw.println(sb.toString());
         }
 
+        final long multicastWakeLockTimeTotalMicros =
+                getWifiMulticastWakelockTime(rawRealtime, which);
+        final int multicastWakeLockCountTotal = getWifiMulticastWakelockCount(which);
         if (multicastWakeLockTimeTotalMicros != 0) {
             sb.setLength(0);
             sb.append(prefix);
@@ -4631,13 +4706,23 @@ public abstract class BatteryStats implements Parcelable {
         if (!didOne) sb.append(" (no activity)");
         pw.println(sb.toString());
 
-        printControllerActivity(pw, sb, prefix, "Cellular",
+        printControllerActivity(pw, sb, prefix, CELLULAR_CONTROLLER_NAME,
             getModemControllerActivity(), which);
 
         pw.print(prefix);
         sb.setLength(0);
         sb.append(prefix);
         sb.append("  Wifi Statistics:");
+        pw.println(sb.toString());
+
+        pw.print(prefix);
+        sb.setLength(0);
+        sb.append(prefix);
+        sb.append("     Wifi kernel active time: ");
+        final long wifiActiveTime = getWifiActiveTime(rawRealtime, which);
+        formatTimeMs(sb, wifiActiveTime / 1000);
+        sb.append("("); sb.append(formatRatioLocked(wifiActiveTime, whichBatteryRealtime));
+        sb.append(")");
         pw.println(sb.toString());
 
         pw.print("     Wifi data received: "); pw.println(formatBytesLocked(wifiRxTotalBytes));
@@ -4717,7 +4802,45 @@ public abstract class BatteryStats implements Parcelable {
         if (!didOne) sb.append(" (no activity)");
         pw.println(sb.toString());
 
-        printControllerActivity(pw, sb, prefix, "WiFi", getWifiControllerActivity(), which);
+        printControllerActivity(pw, sb, prefix, WIFI_CONTROLLER_NAME,
+            getWifiControllerActivity(), which);
+
+        pw.print(prefix);
+        sb.setLength(0);
+        sb.append(prefix);
+        sb.append("  GPS Statistics:");
+        pw.println(sb.toString());
+
+        sb.setLength(0);
+        sb.append(prefix);
+        sb.append("     GPS signal quality (Top 4 Average CN0):");
+        final String[] gpsSignalQualityDescription = new String[]{
+            "poor (less than 20 dBHz): ",
+            "good (greater than 20 dBHz): "};
+        final int numGpsSignalQualityBins = Math.min(GnssMetrics.NUM_GPS_SIGNAL_QUALITY_LEVELS,
+            gpsSignalQualityDescription.length);
+        for (int i=0; i<numGpsSignalQualityBins; i++) {
+            final long time = getGpsSignalQualityTime(i, rawRealtime, which);
+            sb.append("\n    ");
+            sb.append(prefix);
+            sb.append("  ");
+            sb.append(gpsSignalQualityDescription[i]);
+            formatTimeMs(sb, time/1000);
+            sb.append("(");
+            sb.append(formatRatioLocked(time, whichBatteryRealtime));
+            sb.append(") ");
+        }
+        pw.println(sb.toString());
+
+        final long gpsBatteryDrainMaMs = getGpsBatteryDrainMaMs();
+        if (gpsBatteryDrainMaMs > 0) {
+            pw.print(prefix);
+            sb.setLength(0);
+            sb.append(prefix);
+            sb.append("     Battery Drain (mAh): ");
+            sb.append(Double.toString(((double) gpsBatteryDrainMaMs)/(3600 * 1000)));
+            pw.println(sb.toString());
+        }
 
         pw.print(prefix);
         sb.setLength(0);
@@ -5158,8 +5281,8 @@ public abstract class BatteryStats implements Parcelable {
                 pw.println(sb.toString());
             }
 
-            printControllerActivityIfInteresting(pw, sb, prefix + "  ", "Modem",
-                    u.getModemControllerActivity(), which);
+            printControllerActivityIfInteresting(pw, sb, prefix + "  ",
+                CELLULAR_CONTROLLER_NAME, u.getModemControllerActivity(), which);
 
             if (wifiRxBytes > 0 || wifiTxBytes > 0 || wifiRxPackets > 0 || wifiTxPackets > 0) {
                 pw.print(prefix); pw.print("    Wi-Fi network: ");
@@ -5213,7 +5336,7 @@ public abstract class BatteryStats implements Parcelable {
                 pw.println(sb.toString());
             }
 
-            printControllerActivityIfInteresting(pw, sb, prefix + "  ", "WiFi",
+            printControllerActivityIfInteresting(pw, sb, prefix + "  ", WIFI_CONTROLLER_NAME,
                     u.getWifiControllerActivity(), which);
 
             if (btRxBytes > 0 || btTxBytes > 0) {
@@ -7051,6 +7174,28 @@ public abstract class BatteryStats implements Parcelable {
                     }
                 }
             }
+
+            for (int procState = 0; procState < Uid.NUM_PROCESS_STATE; ++procState) {
+                final long[] timesMs = u.getCpuFreqTimes(which, procState);
+                if (timesMs != null && timesMs.length == cpuFreqs.length) {
+                    long[] screenOffTimesMs = u.getScreenOffCpuFreqTimes(which, procState);
+                    if (screenOffTimesMs == null) {
+                        screenOffTimesMs = new long[timesMs.length];
+                    }
+                    final long procToken = proto.start(UidProto.Cpu.BY_PROCESS_STATE);
+                    proto.write(UidProto.Cpu.ByProcessState.PROCESS_STATE, procState);
+                    for (int ic = 0; ic < timesMs.length; ++ic) {
+                        long cToken = proto.start(UidProto.Cpu.ByProcessState.BY_FREQUENCY);
+                        proto.write(UidProto.Cpu.ByFrequency.FREQUENCY_INDEX, ic + 1);
+                        proto.write(UidProto.Cpu.ByFrequency.TOTAL_DURATION_MS,
+                                timesMs[ic]);
+                        proto.write(UidProto.Cpu.ByFrequency.SCREEN_OFF_DURATION_MS,
+                                screenOffTimesMs[ic]);
+                        proto.end(cToken);
+                    }
+                    proto.end(procToken);
+                }
+            }
             proto.end(cpuToken);
 
             // Flashlight (FLASHLIGHT_DATA)
@@ -7535,22 +7680,9 @@ public abstract class BatteryStats implements Parcelable {
         proto.end(mToken);
 
         // Wifi multicast wakelock total stats (WIFI_MULTICAST_WAKELOCK_TOTAL_DATA)
-        // Calculate multicast wakelock stats across all uids.
-        long multicastWakeLockTimeTotalUs = 0;
-        int multicastWakeLockCountTotal = 0;
-
-        for (int iu = 0; iu < uidStats.size(); iu++) {
-            final Uid u = uidStats.valueAt(iu);
-
-            final Timer mcTimer = u.getMulticastWakelockStats();
-
-            if (mcTimer != null) {
-                multicastWakeLockTimeTotalUs +=
-                        mcTimer.getTotalTimeLocked(rawRealtimeUs, which);
-                multicastWakeLockCountTotal += mcTimer.getCountLocked(which);
-            }
-        }
-
+        final long multicastWakeLockTimeTotalUs =
+                getWifiMulticastWakelockTime(rawRealtimeUs, which);
+        final int multicastWakeLockCountTotal = getWifiMulticastWakelockCount(which);
         final long wmctToken = proto.start(SystemProto.WIFI_MULTICAST_WAKELOCK_TOTAL);
         proto.write(SystemProto.WifiMulticastWakelockTotal.DURATION_MS,
                 multicastWakeLockTimeTotalUs / 1000);

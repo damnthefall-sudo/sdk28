@@ -18,7 +18,6 @@ package com.android.layoutlib.bridge.android;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
-import android.app.PackageInstallObserver;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -51,7 +50,6 @@ import android.content.res.XmlResourceParser;
 import android.graphics.Rect;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
-import android.net.Uri;
 import android.os.Handler;
 import android.os.UserHandle;
 import android.os.storage.VolumeInfo;
@@ -108,6 +106,11 @@ public class BridgePackageManager extends PackageManager {
 
     @Override
     public Intent getLeanbackLaunchIntentForPackage(String packageName) {
+        return null;
+    }
+
+    @Override
+    public Intent getCarLaunchIntentForPackage(String packageName) {
         return null;
     }
 
@@ -608,11 +611,6 @@ public class BridgePackageManager extends PackageManager {
     public Resources getResourcesForApplicationAsUser(String appPackageName, int userId)
             throws NameNotFoundException {
         return null;
-    }
-
-    @Override
-    public void installPackage(Uri packageURI, PackageInstallObserver observer, int flags,
-            String installerPackageName) {
     }
 
     @Override

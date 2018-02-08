@@ -24,8 +24,12 @@ import android.annotation.SystemService;
 import android.content.ComponentName;
 import android.content.Context;
 import android.media.AudioManager;
+import android.media.IMediaSession2;
 import android.media.IRemoteVolumeController;
-import android.media.session.ISessionManager;
+import android.media.MediaSession2;
+import android.media.MediaSessionService2;
+import android.media.SessionToken2;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.RemoteException;
@@ -38,6 +42,7 @@ import android.util.Log;
 import android.view.KeyEvent;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -328,6 +333,101 @@ public final class MediaSessionManager {
         } catch (RemoteException e) {
             Log.e(TAG, "Failed to send adjust volume.", e);
         }
+    }
+
+    /**
+     * Called when a {@link MediaSession2} is created.
+     *
+     * @hide
+     */
+    // TODO(jaewan): System API
+    public SessionToken2 createSessionToken(@NonNull String callingPackage, @NonNull String id,
+            @NonNull IMediaSession2 binder) {
+        try {
+            Bundle bundle = mService.createSessionToken(callingPackage, id, binder);
+            return SessionToken2.fromBundle(bundle);
+        } catch (RemoteException e) {
+            Log.wtf(TAG, "Cannot communicate with the service.", e);
+        }
+        return null;
+    }
+
+    /**
+     * Get {@link List} of {@link SessionToken2} whose sessions are active now. This list represents
+     * active sessions regardless of whether they're {@link MediaSession2} or
+     * {@link MediaSessionService2}.
+     *
+     * @return list of Tokens
+     * @hide
+     */
+    // TODO(jaewan): Unhide
+    // TODO(jaewan): Protect this with permission.
+    // TODO(jaewna): Add listener for change in lists.
+    public List<SessionToken2> getActiveSessionTokens() {
+        try {
+            List<Bundle> bundles = mService.getSessionTokens(
+                    /* activeSessionOnly */ true, /* sessionServiceOnly */ false);
+            return toTokenList(bundles);
+        } catch (RemoteException e) {
+            Log.wtf(TAG, "Cannot communicate with the service.", e);
+            return Collections.emptyList();
+        }
+    }
+
+    /**
+     * Get {@link List} of {@link SessionToken2} for {@link MediaSessionService2} regardless of their
+     * activeness. This list represents media apps that support background playback.
+     *
+     * @return list of Tokens
+     * @hide
+     */
+    // TODO(jaewan): Unhide
+    // TODO(jaewna): Add listener for change in lists.
+    public List<SessionToken2> getSessionServiceTokens() {
+        try {
+            List<Bundle> bundles = mService.getSessionTokens(
+                    /* activeSessionOnly */ false, /* sessionServiceOnly */ true);
+            return toTokenList(bundles);
+        } catch (RemoteException e) {
+            Log.wtf(TAG, "Cannot communicate with the service.", e);
+            return Collections.emptyList();
+        }
+    }
+
+    /**
+     * Get all {@link SessionToken2}s. This is the combined list of {@link #getActiveSessionTokens()}
+     * and {@link #getSessionServiceTokens}.
+     *
+     * @return list of Tokens
+     * @see #getActiveSessionTokens
+     * @see #getSessionServiceTokens
+     * @hide
+     */
+    // TODO(jaewan): Unhide
+    // TODO(jaewan): Protect this with permission.
+    // TODO(jaewna): Add listener for change in lists.
+    public List<SessionToken2> getAllSessionTokens() {
+        try {
+            List<Bundle> bundles = mService.getSessionTokens(
+                    /* activeSessionOnly */ false, /* sessionServiceOnly */ false);
+            return toTokenList(bundles);
+        } catch (RemoteException e) {
+            Log.wtf(TAG, "Cannot communicate with the service.", e);
+            return Collections.emptyList();
+        }
+    }
+
+    private static List<SessionToken2> toTokenList(List<Bundle> bundles) {
+        List<SessionToken2> tokens = new ArrayList<>();
+        if (bundles != null) {
+            for (int i = 0; i < bundles.size(); i++) {
+                SessionToken2 token = SessionToken2.fromBundle(bundles.get(i));
+                if (token != null) {
+                    tokens.add(token);
+                }
+            }
+        }
+        return tokens;
     }
 
     /**

@@ -714,7 +714,7 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
             } else if (toStackWindowingMode == WINDOWING_MODE_FREEFORM) {
                 Rect bounds = getLaunchBounds();
                 if (bounds == null) {
-                    mService.mStackSupervisor.getLaunchingBoundsController().layoutTask(this, null);
+                    mService.mStackSupervisor.getLaunchParamsController().layoutTask(this, null);
                     bounds = configBounds;
                 }
                 kept = resize(bounds, RESIZE_MODE_FORCED, !mightReplaceWindow, deferResume);
@@ -749,12 +749,7 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
         supervisor.handleNonResizableTaskIfNeeded(this, preferredStack.getWindowingMode(),
                 DEFAULT_DISPLAY, toStack);
 
-        boolean successful = (preferredStack == toStack);
-        if (successful && toStack.getWindowingMode() == WINDOWING_MODE_SPLIT_SCREEN_PRIMARY) {
-            // If task moved to docked stack - show recents if needed.
-            mService.mWindowManager.showRecentApps(false /* fromHome */);
-        }
-        return successful;
+        return (preferredStack == toStack);
     }
 
     /**
@@ -1838,7 +1833,7 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
             if (mLastNonFullscreenBounds != null) {
                 updateOverrideConfiguration(mLastNonFullscreenBounds);
             } else {
-                mService.mStackSupervisor.getLaunchingBoundsController().layoutTask(this, null);
+                mService.mStackSupervisor.getLaunchParamsController().layoutTask(this, null);
             }
         } else {
             updateOverrideConfiguration(inStack.getOverrideBounds());

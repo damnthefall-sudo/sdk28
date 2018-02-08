@@ -26,6 +26,9 @@ import android.graphics.Paint;
 import android.graphics.drawable.Drawable;
 import android.net.Uri;
 import android.provider.Settings;
+import android.text.Layout;
+import android.text.TextUtils;
+import android.text.TextUtils.TruncateAt;
 import android.util.AttributeSet;
 import android.util.Log;
 import android.view.View;
@@ -40,6 +43,7 @@ import com.android.systemui.R;
 import com.android.systemui.keyguard.KeyguardSliceProvider;
 import com.android.systemui.tuner.TunerService;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.function.Consumer;
@@ -98,9 +102,6 @@ public class KeyguardSliceView extends LinearLayout implements View.OnClickListe
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
 
-        // Set initial content
-        showSlice(Slice.bindSlice(getContext(), mKeyguardSliceUri));
-
         // Make sure we always have the most current slice
         mLiveData.observeForever(this);
     }
@@ -132,11 +133,25 @@ public class KeyguardSliceView extends LinearLayout implements View.OnClickListe
                     android.app.slice.SliceItem.FORMAT_TEXT,
                     new String[]{android.app.slice.Slice.HINT_TITLE},
                     null /* nonHints */);
-            mTitle.setText(mainTitle.getText());
+            CharSequence title = mainTitle.getText();
+            mTitle.setText(title);
+
+            // Check if we're already ellipsizing the text.
+            // We're going to figure out the best possible line break if not.
+            Layout layout = mTitle.getLayout();
+            if (layout != null){
+                final int lineCount = layout.getLineCount();
+                if (lineCount > 0) {
+                    if (layout.getEllipsisCount(lineCount - 1) == 0) {
+                        mTitle.setText(findBestLineBreak(title));
+                    }
+                }
+            }
         }
 
         mClickActions.clear();
         final int subItemsCount = subItems.size();
+        final int blendedColor = getTextColor();
 
         for (int i = 0; i < subItemsCount; i++) {
             SliceItem item = subItems.get(i);
@@ -145,7 +160,7 @@ public class KeyguardSliceView extends LinearLayout implements View.OnClickListe
             KeyguardSliceButton button = mRow.findViewWithTag(itemTag);
             if (button == null) {
                 button = new KeyguardSliceButton(mContext);
-                button.setTextColor(mTextColor);
+                button.setTextColor(blendedColor);
                 button.setTag(itemTag);
             } else {
                 mRow.removeView(button);
@@ -198,13 +213,53 @@ public class KeyguardSliceView extends LinearLayout implements View.OnClickListe
         mListener.accept(mHasHeader);
     }
 
+    /**
+     * Breaks a string in 2 lines where both have similar character count
+     * but first line is always longer.
+     *
+     * @param charSequence Original text.
+     * @return Optimal string.
+     */
+    private CharSequence findBestLineBreak(CharSequence charSequence) {
+        if (TextUtils.isEmpty(charSequence)) {
+            return charSequence;
+        }
+
+        String source = charSequence.toString();
+        // Ignore if there is only 1 word,
+        // or if line breaks were manually set.
+        if (source.contains("\n") || !source.contains(" ")) {
+            return source;
+        }
+
+        final String[] words = source.split(" ");
+        final StringBuilder optimalString = new StringBuilder(source.length());
+        int current = 0;
+        while (optimalString.length() < source.length() - optimalString.length()) {
+            optimalString.append(words[current]);
+            if (current < words.length - 1) {
+                optimalString.append(" ");
+            }
+            current++;
+        }
+        optimalString.append("\n");
+        for (int i = current; i < words.length; i++) {
+            optimalString.append(words[i]);
+            if (current < words.length - 1) {
+                optimalString.append(" ");
+            }
+        }
+
+        return optimalString.toString();
+    }
+
     public void setDark(float darkAmount) {
         mDarkAmount = darkAmount;
         updateTextColors();
     }
 
     private void updateTextColors() {
-        final int blendedColor = ColorUtils.blendARGB(mTextColor, Color.WHITE, mDarkAmount);
+        final int blendedColor = getTextColor();
         mTitle.setTextColor(blendedColor);
         int childCount = mRow.getChildCount();
         for (int i = 0; i < childCount; i++) {
@@ -265,8 +320,11 @@ public class KeyguardSliceView extends LinearLayout implements View.OnClickListe
 
         if (wasObserving) {
             mLiveData.observeForever(this);
-            showSlice(Slice.bindSlice(getContext(), mKeyguardSliceUri));
         }
+    }
+
+    public int getTextColor() {
+        return ColorUtils.blendARGB(mTextColor, Color.WHITE, mDarkAmount);
     }
 
     /**
@@ -275,6 +333,7 @@ public class KeyguardSliceView extends LinearLayout implements View.OnClickListe
      */
     private class KeyguardSliceButton extends Button {
 
+        private static final float SEPARATOR_HEIGHT = 0.7f;
         private final Paint mPaint;
         private boolean mHasDivider;
 
@@ -291,6 +350,9 @@ public class KeyguardSliceView extends LinearLayout implements View.OnClickListe
             setPadding(horizontalPadding, 0, horizontalPadding, 0);
             setCompoundDrawablePadding((int) context.getResources()
                     .getDimension(R.dimen.widget_icon_padding));
+            setMaxWidth(KeyguardSliceView.this.getWidth() / 2);
+            setMaxLines(1);
+            setEllipsize(TruncateAt.END);
         }
 
         public void setHasDivider(boolean hasDivider) {
@@ -308,7 +370,9 @@ public class KeyguardSliceView extends LinearLayout implements View.OnClickListe
             super.onDraw(canvas);
             if (mHasDivider) {
                 final int lineX = getLayoutDirection() == LAYOUT_DIRECTION_RTL ? 0 : getWidth();
-                canvas.drawLine(lineX, 0, lineX, getHeight(), mPaint);
+                final int height = (int) (getHeight() * SEPARATOR_HEIGHT);
+                final int startY = getHeight() / 2 - height / 2;
+                canvas.drawLine(lineX, startY, lineX, startY + height, mPaint);
             }
         }
     }

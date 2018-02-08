@@ -16,6 +16,7 @@
 
 package com.android.internal.telephony.uicc;
 
+import android.app.ActivityManager;
 import android.app.AlertDialog;
 import android.app.usage.UsageStatsManager;
 import android.content.Context;
@@ -31,11 +32,17 @@ import android.os.AsyncResult;
 import android.os.Binder;
 import android.os.Handler;
 import android.os.Message;
+import android.os.PersistableBundle;
 import android.os.Registrant;
 import android.os.RegistrantList;
+import android.os.UserHandle;
 import android.preference.PreferenceManager;
 import android.provider.Settings;
+import android.telephony.CarrierConfigManager;
 import android.telephony.Rlog;
+import android.telephony.ServiceState;
+import android.telephony.SubscriptionInfo;
+import android.telephony.SubscriptionManager;
 import android.telephony.TelephonyManager;
 import android.text.TextUtils;
 import android.util.LocalLog;
@@ -43,8 +50,16 @@ import android.view.WindowManager;
 
 import com.android.internal.R;
 import com.android.internal.telephony.CommandsInterface;
+import com.android.internal.telephony.IccCard;
+import com.android.internal.telephony.IccCardConstants;
+import com.android.internal.telephony.MccTable;
+import com.android.internal.telephony.Phone;
+import com.android.internal.telephony.PhoneConstants;
+import com.android.internal.telephony.PhoneFactory;
+import com.android.internal.telephony.SubscriptionController;
 import com.android.internal.telephony.cat.CatService;
 import com.android.internal.telephony.uicc.IccCardApplicationStatus.AppType;
+import com.android.internal.telephony.uicc.IccCardStatus.CardState;
 import com.android.internal.telephony.uicc.IccCardStatus.PinState;
 
 import java.io.FileDescriptor;
@@ -65,9 +80,11 @@ import java.util.List;
  *
  * {@hide}
  */
-public class UiccProfile {
+public class UiccProfile extends Handler implements IccCard {
     protected static final String LOG_TAG = "UiccProfile";
     protected static final boolean DBG = true;
+    private static final boolean VDBG = false; //STOPSHIP if true
+    private static final boolean ICC_CARD_PROXY_REMOVED = true;
 
     private static final String OPERATOR_BRAND_OVERRIDE_PREFIX = "operator_branding_";
 
@@ -83,6 +100,7 @@ public class UiccProfile {
     private UiccCard mUiccCard; //parent
     private CatService mCatService;
     private UiccCarrierPrivilegeRules mCarrierPrivilegeRules;
+    private boolean mDisposed = false;
 
     private RegistrantList mCarrierPrivilegeRegistrants = new RegistrantList();
 
@@ -97,12 +115,50 @@ public class UiccProfile {
 
     private final int mPhoneId;
 
+    /*----------------------------------------------------*/
+    // logic moved over from IccCardProxy
+    private static final int EVENT_RADIO_OFF_OR_UNAVAILABLE = 1;
+    private static final int EVENT_ICC_LOCKED = 5;
+    private static final int EVENT_APP_READY = 6;
+    private static final int EVENT_RECORDS_LOADED = 7;
+    private static final int EVENT_NETWORK_LOCKED = 9;
+
+    private static final int EVENT_ICC_RECORD_EVENTS = 500;
+
+    private TelephonyManager mTelephonyManager;
+
+    private RegistrantList mNetworkLockedRegistrants = new RegistrantList();
+
+    private int mCurrentAppType = UiccController.APP_FAM_3GPP; //default to 3gpp?
+    private UiccCardApplication mUiccApplication = null;
+    private IccRecords mIccRecords = null;
+    private IccCardConstants.State mExternalState = IccCardConstants.State.UNKNOWN;
+
+    public static final String ACTION_INTERNAL_SIM_STATE_CHANGED =
+            "android.intent.action.internal_sim_state_changed";
+
+    /*----------------------------------------------------*/
+
     public UiccProfile(Context c, CommandsInterface ci, IccCardStatus ics, int phoneId,
             UiccCard uiccCard) {
         if (DBG) log("Creating profile");
         mUiccCard = uiccCard;
         mPhoneId = phoneId;
+        if (ICC_CARD_PROXY_REMOVED) {
+            // set current app type based on phone type - do this before calling update() as that
+            // calls updateIccAvailability() which uses mCurrentAppType
+            Phone phone = PhoneFactory.getPhone(phoneId);
+            if (phone != null) {
+                setCurrentAppType(phone.getPhoneType() == PhoneConstants.PHONE_TYPE_GSM);
+            }
+        }
         update(c, ci, ics);
+
+        if (ICC_CARD_PROXY_REMOVED) {
+            ci.registerForOffOrNotAvailable(this, EVENT_RADIO_OFF_OR_UNAVAILABLE, null);
+
+            resetProperties();
+        }
     }
 
     /**
@@ -111,6 +167,14 @@ public class UiccProfile {
     public void dispose() {
         synchronized (mLock) {
             if (DBG) log("Disposing profile");
+
+            unregisterAllAppEvents();
+            unregisterCurrAppEvents();
+
+            if (ICC_CARD_PROXY_REMOVED) {
+                mCi.unregisterForOffOrNotAvailable(this);
+            }
+
             if (mCatService != null) mCatService.dispose();
             for (UiccCardApplication app : mUiccApplications) {
                 if (app != null) {
@@ -120,6 +184,591 @@ public class UiccProfile {
             mCatService = null;
             mUiccApplications = null;
             mCarrierPrivilegeRules = null;
+            mDisposed = true;
+        }
+    }
+
+    /**
+     * The card application that the external world sees will be based on the
+     * voice radio technology only!
+     */
+    public void setVoiceRadioTech(int radioTech) {
+        synchronized (mLock) {
+            if (DBG) {
+                log("Setting radio tech " + ServiceState.rilRadioTechnologyToString(radioTech));
+            }
+            setCurrentAppType(ServiceState.isGsm(radioTech));
+            updateIccAvailability(false);
+        }
+    }
+
+    private void setCurrentAppType(boolean isGsm) {
+        if (VDBG) log("setCurrentAppType");
+        synchronized (mLock) {
+            boolean isLteOnCdmaMode = TelephonyManager.getLteOnCdmaModeStatic()
+                    == PhoneConstants.LTE_ON_CDMA_TRUE;
+            if (isGsm || isLteOnCdmaMode) {
+                mCurrentAppType = UiccController.APP_FAM_3GPP;
+            } else {
+                mCurrentAppType = UiccController.APP_FAM_3GPP2;
+            }
+        }
+    }
+
+    @Override
+    public void handleMessage(Message msg) {
+        if (mDisposed) {
+            loge("handleMessage: Received " + msg.what + " after dispose(); ignoring the message");
+            return;
+        }
+        switch (msg.what) {
+            case EVENT_RADIO_OFF_OR_UNAVAILABLE:
+                updateExternalState();
+                break;
+
+            case EVENT_ICC_LOCKED:
+                processLockedState();
+                break;
+
+            case EVENT_APP_READY:
+                if (VDBG) log("EVENT_APP_READY");
+                if (areAllApplicationsReady()) {
+                    if (areAllRecordsLoaded() && areCarrierPriviligeRulesLoaded()) {
+                        setExternalState(IccCardConstants.State.LOADED);
+                    } else {
+                        setExternalState(IccCardConstants.State.READY);
+                    }
+                }
+                break;
+
+            case EVENT_RECORDS_LOADED:
+                if (VDBG) log("EVENT_RECORDS_LOADED");
+                if (!areAllRecordsLoaded()) {
+                    break;
+                }
+                // Update the MCC/MNC.
+                if (mIccRecords != null) {
+                    String operator = mIccRecords.getOperatorNumeric();
+                    log("operator=" + operator + " mPhoneId=" + mPhoneId);
+
+                    if (!TextUtils.isEmpty(operator)) {
+                        mTelephonyManager.setSimOperatorNumericForPhone(mPhoneId, operator);
+                        String countryCode = operator.substring(0, 3);
+                        if (countryCode != null) {
+                            mTelephonyManager.setSimCountryIsoForPhone(mPhoneId,
+                                    MccTable.countryCodeForMcc(Integer.parseInt(countryCode)));
+                        } else {
+                            loge("EVENT_RECORDS_LOADED Country code is null");
+                        }
+                    } else {
+                        loge("EVENT_RECORDS_LOADED Operator name is null");
+                    }
+                }
+                if (areCarrierPriviligeRulesLoaded()) {
+                    setExternalState(IccCardConstants.State.LOADED);
+                }
+                break;
+
+            case EVENT_NETWORK_LOCKED:
+                mNetworkLockedRegistrants.notifyRegistrants();
+                setExternalState(IccCardConstants.State.NETWORK_LOCKED);
+                break;
+
+            case EVENT_ICC_RECORD_EVENTS:
+                if ((mCurrentAppType == UiccController.APP_FAM_3GPP) && (mIccRecords != null)) {
+                    AsyncResult ar = (AsyncResult) msg.obj;
+                    int eventCode = (Integer) ar.result;
+                    if (eventCode == SIMRecords.EVENT_SPN) {
+                        mTelephonyManager.setSimOperatorNameForPhone(
+                                mPhoneId, mIccRecords.getServiceProviderName());
+                    }
+                }
+                break;
+
+            case EVENT_CARRIER_PRIVILEGES_LOADED:
+                if (VDBG) log("EVENT_CARRIER_PRIVILEGES_LOADED");
+                onCarrierPriviligesLoadedMessage();
+                if (areAllRecordsLoaded()) {
+                    setExternalState(IccCardConstants.State.LOADED);
+                }
+                break;
+
+            case EVENT_OPEN_LOGICAL_CHANNEL_DONE:
+            case EVENT_CLOSE_LOGICAL_CHANNEL_DONE:
+            case EVENT_TRANSMIT_APDU_LOGICAL_CHANNEL_DONE:
+            case EVENT_TRANSMIT_APDU_BASIC_CHANNEL_DONE:
+            case EVENT_SIM_IO_DONE:
+                AsyncResult ar = (AsyncResult) msg.obj;
+                if (ar.exception != null) {
+                    loglocal("Exception: " + ar.exception);
+                    log("Error in SIM access with exception" + ar.exception);
+                }
+                AsyncResult.forMessage((Message) ar.userObj, ar.result, ar.exception);
+                ((Message) ar.userObj).sendToTarget();
+                break;
+
+            default:
+                loge("Unhandled message with number: " + msg.what);
+                break;
+        }
+    }
+
+    private void updateIccAvailability(boolean allAppsChanged) {
+        synchronized (mLock) {
+            UiccCardApplication newApp;
+            IccRecords newRecords = null;
+            newApp = getApplication(mCurrentAppType);
+            if (newApp != null) {
+                newRecords = newApp.getIccRecords();
+            }
+
+            if (allAppsChanged) {
+                unregisterAllAppEvents();
+                registerAllAppEvents();
+            }
+
+            if (mIccRecords != newRecords || mUiccApplication != newApp) {
+                if (DBG) log("Icc changed. Reregistering.");
+                unregisterCurrAppEvents();
+                mUiccApplication = newApp;
+                mIccRecords = newRecords;
+                registerCurrAppEvents();
+            }
+            updateExternalState();
+        }
+    }
+
+    void resetProperties() {
+        if (mCurrentAppType == UiccController.APP_FAM_3GPP) {
+            log("update icc_operator_numeric=" + "");
+            mTelephonyManager.setSimOperatorNumericForPhone(mPhoneId, "");
+            mTelephonyManager.setSimCountryIsoForPhone(mPhoneId, "");
+            mTelephonyManager.setSimOperatorNameForPhone(mPhoneId, "");
+        }
+    }
+
+    private void updateExternalState() {
+
+        if (mUiccCard.getCardState() == IccCardStatus.CardState.CARDSTATE_ERROR) {
+            setExternalState(IccCardConstants.State.CARD_IO_ERROR);
+            return;
+        }
+
+        if (mUiccCard.getCardState() == IccCardStatus.CardState.CARDSTATE_RESTRICTED) {
+            setExternalState(IccCardConstants.State.CARD_RESTRICTED);
+            return;
+        }
+
+        if (mUiccApplication == null || !areAllApplicationsReady()) {
+            setExternalState(IccCardConstants.State.NOT_READY);
+            return;
+        }
+
+        // By process of elimination, the UICC Card State = PRESENT
+        switch (mUiccApplication.getState()) {
+            case APPSTATE_UNKNOWN:
+                /*
+                 * APPSTATE_UNKNOWN is a catch-all state reported whenever the app
+                 * is not explicitly in one of the other states. To differentiate the
+                 * case where we know that there is a card present, but the APP is not
+                 * ready, we choose NOT_READY here instead of unknown. This is possible
+                 * in at least two cases:
+                 * 1) A transient during the process of the SIM bringup
+                 * 2) There is no valid App on the SIM to load, which can be the case with an
+                 *    eSIM/soft SIM.
+                 */
+                setExternalState(IccCardConstants.State.NOT_READY);
+                break;
+            case APPSTATE_SUBSCRIPTION_PERSO:
+                if (mUiccApplication.getPersoSubState()
+                        == IccCardApplicationStatus.PersoSubState.PERSOSUBSTATE_SIM_NETWORK) {
+                    setExternalState(IccCardConstants.State.NETWORK_LOCKED);
+                }
+                // Otherwise don't change external SIM state.
+                break;
+            case APPSTATE_READY:
+                if (areAllApplicationsReady()) {
+                    if (areAllRecordsLoaded() && areCarrierPriviligeRulesLoaded()) {
+                        setExternalState(IccCardConstants.State.LOADED);
+                    } else {
+                        setExternalState(IccCardConstants.State.READY);
+                    }
+                } else {
+                    setExternalState(IccCardConstants.State.NOT_READY);
+                }
+                break;
+        }
+    }
+
+    private void registerAllAppEvents() {
+        // todo: all of these should be notified to UiccProfile directly without needing to register
+        for (UiccCardApplication app : mUiccApplications) {
+            if (app != null) {
+                if (VDBG) log("registerUiccCardEvents: registering for EVENT_APP_READY");
+                app.registerForReady(this, EVENT_APP_READY, null);
+                IccRecords ir = app.getIccRecords();
+                if (ir != null) {
+                    if (VDBG) log("registerUiccCardEvents: registering for EVENT_RECORDS_LOADED");
+                    ir.registerForRecordsLoaded(this, EVENT_RECORDS_LOADED, null);
+                    ir.registerForRecordsEvents(this, EVENT_ICC_RECORD_EVENTS, null);
+                }
+            }
+        }
+    }
+
+    private void unregisterAllAppEvents() {
+        for (UiccCardApplication app : mUiccApplications) {
+            if (app != null) {
+                app.unregisterForReady(this);
+                IccRecords ir = app.getIccRecords();
+                if (ir != null) {
+                    ir.unregisterForRecordsLoaded(this);
+                    ir.unregisterForRecordsEvents(this);
+                }
+            }
+        }
+    }
+
+    private void registerCurrAppEvents() {
+        // In case of locked, only listen to the current application.
+        if (mIccRecords != null) {
+            mIccRecords.registerForLockedRecordsLoaded(this, EVENT_ICC_LOCKED, null);
+            mIccRecords.registerForNetworkLockedRecordsLoaded(this, EVENT_NETWORK_LOCKED, null);
+        }
+    }
+
+    private void unregisterCurrAppEvents() {
+        if (mIccRecords != null) {
+            mIccRecords.unregisterForLockedRecordsLoaded(this);
+            mIccRecords.unregisterForNetworkLockedRecordsLoaded(this);
+        }
+    }
+
+    private void broadcastInternalIccStateChangedIntent(String value, String reason) {
+        synchronized (mLock) {
+            Intent intent = new Intent(ACTION_INTERNAL_SIM_STATE_CHANGED);
+            intent.addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT
+                    | Intent.FLAG_RECEIVER_FOREGROUND);
+            intent.putExtra(PhoneConstants.PHONE_NAME_KEY, "Phone");
+            intent.putExtra(IccCardConstants.INTENT_KEY_ICC_STATE, value);
+            intent.putExtra(IccCardConstants.INTENT_KEY_LOCKED_REASON, reason);
+            intent.putExtra(PhoneConstants.PHONE_KEY, mPhoneId);  // SubId may not be valid.
+            log("Sending intent ACTION_INTERNAL_SIM_STATE_CHANGED value=" + value
+                    + " for mPhoneId : " + mPhoneId);
+            ActivityManager.broadcastStickyIntent(intent, UserHandle.USER_ALL);
+        }
+    }
+
+    private void setExternalState(IccCardConstants.State newState, boolean override) {
+        synchronized (mLock) {
+            if (!SubscriptionManager.isValidSlotIndex(mPhoneId)) {
+                loge("setExternalState: mPhoneId=" + mPhoneId + " is invalid; Return!!");
+                return;
+            }
+
+            if (!override && newState == mExternalState) {
+                log("setExternalState: !override and newstate unchanged from " + newState);
+                return;
+            }
+            mExternalState = newState;
+            log("setExternalState: set mPhoneId=" + mPhoneId + " mExternalState=" + mExternalState);
+            mTelephonyManager.setSimStateForPhone(mPhoneId, getState().toString());
+
+            broadcastInternalIccStateChangedIntent(getIccStateIntentString(mExternalState),
+                    getIccStateReason(mExternalState));
+        }
+    }
+
+    private void processLockedState() {
+        synchronized (mLock) {
+            if (mUiccApplication == null) {
+                //Don't need to do anything if non-existent application is locked
+                return;
+            }
+            PinState pin1State = mUiccApplication.getPin1State();
+            if (pin1State == PinState.PINSTATE_ENABLED_PERM_BLOCKED) {
+                setExternalState(IccCardConstants.State.PERM_DISABLED);
+                return;
+            }
+
+            IccCardApplicationStatus.AppState appState = mUiccApplication.getState();
+            switch (appState) {
+                case APPSTATE_PIN:
+                    setExternalState(IccCardConstants.State.PIN_REQUIRED);
+                    break;
+                case APPSTATE_PUK:
+                    setExternalState(IccCardConstants.State.PUK_REQUIRED);
+                    break;
+                case APPSTATE_DETECTED:
+                case APPSTATE_READY:
+                case APPSTATE_SUBSCRIPTION_PERSO:
+                case APPSTATE_UNKNOWN:
+                    // Neither required
+                    break;
+            }
+        }
+    }
+
+    private void setExternalState(IccCardConstants.State newState) {
+        setExternalState(newState, false);
+    }
+
+    /**
+     * Function to check if all ICC records have been loaded
+     * @return true if all ICC records have been loaded, false otherwise.
+     */
+    public boolean getIccRecordsLoaded() {
+        synchronized (mLock) {
+            if (mIccRecords != null) {
+                return mIccRecords.getRecordsLoaded();
+            }
+            return false;
+        }
+    }
+
+    private String getIccStateIntentString(IccCardConstants.State state) {
+        switch (state) {
+            case ABSENT: return IccCardConstants.INTENT_VALUE_ICC_ABSENT;
+            case PIN_REQUIRED: return IccCardConstants.INTENT_VALUE_ICC_LOCKED;
+            case PUK_REQUIRED: return IccCardConstants.INTENT_VALUE_ICC_LOCKED;
+            case NETWORK_LOCKED: return IccCardConstants.INTENT_VALUE_ICC_LOCKED;
+            case READY: return IccCardConstants.INTENT_VALUE_ICC_READY;
+            case NOT_READY: return IccCardConstants.INTENT_VALUE_ICC_NOT_READY;
+            case PERM_DISABLED: return IccCardConstants.INTENT_VALUE_ICC_LOCKED;
+            case CARD_IO_ERROR: return IccCardConstants.INTENT_VALUE_ICC_CARD_IO_ERROR;
+            case CARD_RESTRICTED: return IccCardConstants.INTENT_VALUE_ICC_CARD_RESTRICTED;
+            case LOADED: return IccCardConstants.INTENT_VALUE_ICC_LOADED;
+            default: return IccCardConstants.INTENT_VALUE_ICC_UNKNOWN;
+        }
+    }
+
+    /**
+     * Locked state have a reason (PIN, PUK, NETWORK, PERM_DISABLED, CARD_IO_ERROR)
+     * @return reason
+     */
+    private String getIccStateReason(IccCardConstants.State state) {
+        switch (state) {
+            case PIN_REQUIRED: return IccCardConstants.INTENT_VALUE_LOCKED_ON_PIN;
+            case PUK_REQUIRED: return IccCardConstants.INTENT_VALUE_LOCKED_ON_PUK;
+            case NETWORK_LOCKED: return IccCardConstants.INTENT_VALUE_LOCKED_NETWORK;
+            case PERM_DISABLED: return IccCardConstants.INTENT_VALUE_ABSENT_ON_PERM_DISABLED;
+            case CARD_IO_ERROR: return IccCardConstants.INTENT_VALUE_ICC_CARD_IO_ERROR;
+            case CARD_RESTRICTED: return IccCardConstants.INTENT_VALUE_ICC_CARD_RESTRICTED;
+            default: return null;
+        }
+    }
+
+    /* IccCard interface implementation */
+    @Override
+    public IccCardConstants.State getState() {
+        synchronized (mLock) {
+            return mExternalState;
+        }
+    }
+
+    @Override
+    public IccRecords getIccRecords() {
+        synchronized (mLock) {
+            return mIccRecords;
+        }
+    }
+
+    /**
+     * Notifies handler of any transition into State.NETWORK_LOCKED
+     */
+    @Override
+    public void registerForNetworkLocked(Handler h, int what, Object obj) {
+        synchronized (mLock) {
+            Registrant r = new Registrant(h, what, obj);
+
+            mNetworkLockedRegistrants.add(r);
+
+            if (getState() == IccCardConstants.State.NETWORK_LOCKED) {
+                r.notifyRegistrant();
+            }
+        }
+    }
+
+    @Override
+    public void unregisterForNetworkLocked(Handler h) {
+        synchronized (mLock) {
+            mNetworkLockedRegistrants.remove(h);
+        }
+    }
+
+    @Override
+    public void supplyPin(String pin, Message onComplete) {
+        synchronized (mLock) {
+            if (mUiccApplication != null) {
+                mUiccApplication.supplyPin(pin, onComplete);
+            } else if (onComplete != null) {
+                Exception e = new RuntimeException("ICC card is absent.");
+                AsyncResult.forMessage(onComplete).exception = e;
+                onComplete.sendToTarget();
+                return;
+            }
+        }
+    }
+
+    @Override
+    public void supplyPuk(String puk, String newPin, Message onComplete) {
+        synchronized (mLock) {
+            if (mUiccApplication != null) {
+                mUiccApplication.supplyPuk(puk, newPin, onComplete);
+            } else if (onComplete != null) {
+                Exception e = new RuntimeException("ICC card is absent.");
+                AsyncResult.forMessage(onComplete).exception = e;
+                onComplete.sendToTarget();
+                return;
+            }
+        }
+    }
+
+    @Override
+    public void supplyPin2(String pin2, Message onComplete) {
+        synchronized (mLock) {
+            if (mUiccApplication != null) {
+                mUiccApplication.supplyPin2(pin2, onComplete);
+            } else if (onComplete != null) {
+                Exception e = new RuntimeException("ICC card is absent.");
+                AsyncResult.forMessage(onComplete).exception = e;
+                onComplete.sendToTarget();
+                return;
+            }
+        }
+    }
+
+    @Override
+    public void supplyPuk2(String puk2, String newPin2, Message onComplete) {
+        synchronized (mLock) {
+            if (mUiccApplication != null) {
+                mUiccApplication.supplyPuk2(puk2, newPin2, onComplete);
+            } else if (onComplete != null) {
+                Exception e = new RuntimeException("ICC card is absent.");
+                AsyncResult.forMessage(onComplete).exception = e;
+                onComplete.sendToTarget();
+                return;
+            }
+        }
+    }
+
+    @Override
+    public void supplyNetworkDepersonalization(String pin, Message onComplete) {
+        synchronized (mLock) {
+            if (mUiccApplication != null) {
+                mUiccApplication.supplyNetworkDepersonalization(pin, onComplete);
+            } else if (onComplete != null) {
+                Exception e = new RuntimeException("CommandsInterface is not set.");
+                AsyncResult.forMessage(onComplete).exception = e;
+                onComplete.sendToTarget();
+                return;
+            }
+        }
+    }
+
+    @Override
+    public boolean getIccLockEnabled() {
+        synchronized (mLock) {
+            /* defaults to false, if ICC is absent/deactivated */
+            return mUiccApplication != null && mUiccApplication.getIccLockEnabled();
+        }
+    }
+
+    @Override
+    public boolean getIccFdnEnabled() {
+        synchronized (mLock) {
+            return mUiccApplication != null && mUiccApplication.getIccFdnEnabled();
+        }
+    }
+
+    @Override
+    public boolean getIccPin2Blocked() {
+        /* defaults to disabled */
+        return mUiccApplication != null && mUiccApplication.getIccPin2Blocked();
+    }
+
+    @Override
+    public boolean getIccPuk2Blocked() {
+        /* defaults to disabled */
+        return mUiccApplication != null && mUiccApplication.getIccPuk2Blocked();
+    }
+
+    @Override
+    public void setIccLockEnabled(boolean enabled, String password, Message onComplete) {
+        synchronized (mLock) {
+            if (mUiccApplication != null) {
+                mUiccApplication.setIccLockEnabled(enabled, password, onComplete);
+            } else if (onComplete != null) {
+                Exception e = new RuntimeException("ICC card is absent.");
+                AsyncResult.forMessage(onComplete).exception = e;
+                onComplete.sendToTarget();
+                return;
+            }
+        }
+    }
+
+    @Override
+    public void setIccFdnEnabled(boolean enabled, String password, Message onComplete) {
+        synchronized (mLock) {
+            if (mUiccApplication != null) {
+                mUiccApplication.setIccFdnEnabled(enabled, password, onComplete);
+            } else if (onComplete != null) {
+                Exception e = new RuntimeException("ICC card is absent.");
+                AsyncResult.forMessage(onComplete).exception = e;
+                onComplete.sendToTarget();
+                return;
+            }
+        }
+    }
+
+    @Override
+    public void changeIccLockPassword(String oldPassword, String newPassword, Message onComplete) {
+        synchronized (mLock) {
+            if (mUiccApplication != null) {
+                mUiccApplication.changeIccLockPassword(oldPassword, newPassword, onComplete);
+            } else if (onComplete != null) {
+                Exception e = new RuntimeException("ICC card is absent.");
+                AsyncResult.forMessage(onComplete).exception = e;
+                onComplete.sendToTarget();
+                return;
+            }
+        }
+    }
+
+    @Override
+    public void changeIccFdnPassword(String oldPassword, String newPassword, Message onComplete) {
+        synchronized (mLock) {
+            if (mUiccApplication != null) {
+                mUiccApplication.changeIccFdnPassword(oldPassword, newPassword, onComplete);
+            } else if (onComplete != null) {
+                Exception e = new RuntimeException("ICC card is absent.");
+                AsyncResult.forMessage(onComplete).exception = e;
+                onComplete.sendToTarget();
+                return;
+            }
+        }
+    }
+
+    @Override
+    public String getServiceProviderName() {
+        synchronized (mLock) {
+            if (mIccRecords != null) {
+                return mIccRecords.getServiceProviderName();
+            }
+            return null;
+        }
+    }
+
+    @Override
+    public boolean hasIccCard() {
+        synchronized (mLock) {
+            if (mUiccCard != null && mUiccCard.getCardState()
+                    != IccCardStatus.CardState.CARDSTATE_ABSENT) {
+                return true;
+            }
+            loge("hasIccCard: UiccProfile is not null but UiccCard is null or card state is "
+                    + "ABSENT");
+            return false;
         }
     }
 
@@ -134,6 +783,8 @@ public class UiccProfile {
             mImsSubscriptionAppIndex = ics.mImsSubscriptionAppIndex;
             mContext = c;
             mCi = ci;
+            mTelephonyManager = (TelephonyManager) mContext.getSystemService(
+                    Context.TELEPHONY_SERVICE);
 
             //update applications
             if (DBG) log(ics.mApplications.length + " applications");
@@ -141,7 +792,7 @@ public class UiccProfile {
                 if (mUiccApplications[i] == null) {
                     //Create newly added Applications
                     if (i < ics.mApplications.length) {
-                        mUiccApplications[i] = new UiccCardApplication(mUiccCard,
+                        mUiccApplications[i] = new UiccCardApplication(this,
                                 ics.mApplications[i], mContext, mCi);
                     }
                 } else if (i >= ics.mApplications.length) {
@@ -156,13 +807,18 @@ public class UiccProfile {
 
             createAndUpdateCatServiceLocked();
 
-            log("Before privilege rules: " + mCarrierPrivilegeRules);
-            if (mCarrierPrivilegeRules == null) {
-                mCarrierPrivilegeRules = new UiccCarrierPrivilegeRules(mUiccCard,
-                        mHandler.obtainMessage(EVENT_CARRIER_PRIVILEGES_LOADED));
+            // Reload the carrier privilege rules if necessary.
+            log("Before privilege rules: " + mCarrierPrivilegeRules + " : " + ics.mCardState);
+            if (mCarrierPrivilegeRules == null && ics.mCardState == CardState.CARDSTATE_PRESENT) {
+                mCarrierPrivilegeRules = new UiccCarrierPrivilegeRules(this,
+                    obtainMessage(EVENT_CARRIER_PRIVILEGES_LOADED));
+            } else if (mCarrierPrivilegeRules != null
+                    && ics.mCardState != CardState.CARDSTATE_PRESENT) {
+                mCarrierPrivilegeRules = null;
             }
 
             sanitizeApplicationIndexesLocked();
+            updateIccAvailability(true);
         }
     }
 
@@ -170,9 +826,9 @@ public class UiccProfile {
         if (mUiccApplications.length > 0 && mUiccApplications[0] != null) {
             // Initialize or Reinitialize CatService
             if (mCatService == null) {
-                mCatService = CatService.getInstance(mCi, mContext, mUiccCard, mPhoneId);
+                mCatService = CatService.getInstance(mCi, mContext, this, mPhoneId);
             } else {
-                mCatService.update(mCi, mContext, mUiccCard);
+                mCatService.update(mCi, mContext, this);
             }
         } else {
             if (mCatService != null) {
@@ -201,6 +857,46 @@ public class UiccProfile {
                         mCdmaSubscriptionAppIndex, AppType.APPTYPE_RUIM, AppType.APPTYPE_CSIM);
         mImsSubscriptionAppIndex =
                 checkIndexLocked(mImsSubscriptionAppIndex, AppType.APPTYPE_ISIM, null);
+    }
+
+    private boolean isSupportedApplication(UiccCardApplication app) {
+        if (app.getType() != AppType.APPTYPE_USIM && app.getType() != AppType.APPTYPE_CSIM
+                && app.getType() != AppType.APPTYPE_ISIM && app.getType() != AppType.APPTYPE_SIM
+                && app.getType() != AppType.APPTYPE_RUIM) {
+            return false;
+        }
+        return true;
+    }
+
+    private boolean areAllApplicationsReady() {
+        for (UiccCardApplication app : mUiccApplications) {
+            if (app != null && isSupportedApplication(app) && !app.isReady()) {
+                if (VDBG) log("areAllApplicationsReady: return false");
+                return false;
+            }
+        }
+        if (VDBG) {
+            log("areAllApplicationsReady: outside loop, return " + (mUiccApplications[0] != null));
+        }
+        // Returns false if there is no application in the UiccProfile.
+        return mUiccApplications[0] != null;
+    }
+
+    private boolean areAllRecordsLoaded() {
+        for (UiccCardApplication app : mUiccApplications) {
+            if (app != null && isSupportedApplication(app)) {
+                IccRecords ir = app.getIccRecords();
+                if (ir == null || !ir.isLoaded()) {
+                    if (VDBG) log("areAllRecordsLoaded: return false");
+                    return false;
+                }
+            }
+        }
+        if (VDBG) {
+            log("areAllRecordsLoaded: outside loop, return " + (mUiccApplications[0] != null));
+        }
+        // Returns false if there is no application in the UiccProfile.
+        return mUiccApplications[0] != null;
     }
 
     private int checkIndexLocked(int index, AppType expectedAppType, AppType altExpectedAppType) {
@@ -254,32 +950,6 @@ public class UiccProfile {
             mCarrierPrivilegeRegistrants.remove(h);
         }
     }
-
-    protected Handler mHandler = new Handler() {
-        @Override
-        public void handleMessage(Message msg) {
-            switch (msg.what) {
-                case EVENT_OPEN_LOGICAL_CHANNEL_DONE:
-                case EVENT_CLOSE_LOGICAL_CHANNEL_DONE:
-                case EVENT_TRANSMIT_APDU_LOGICAL_CHANNEL_DONE:
-                case EVENT_TRANSMIT_APDU_BASIC_CHANNEL_DONE:
-                case EVENT_SIM_IO_DONE:
-                    AsyncResult ar = (AsyncResult) msg.obj;
-                    if (ar.exception != null) {
-                        loglocal("Exception: " + ar.exception);
-                        log("Error in SIM access with exception" + ar.exception);
-                    }
-                    AsyncResult.forMessage((Message) ar.userObj, ar.result, ar.exception);
-                    ((Message) ar.userObj).sendToTarget();
-                    break;
-                case EVENT_CARRIER_PRIVILEGES_LOADED:
-                    onCarrierPriviligesLoadedMessage();
-                    break;
-                default:
-                    loge("Unknown Event " + msg.what);
-            }
-        }
-    };
 
     private boolean isPackageInstalled(String pkgName) {
         PackageManager pm = mContext.getPackageManager();
@@ -484,7 +1154,7 @@ public class UiccProfile {
         loglocal("Open Logical Channel: " + aid + " , " + p2 + " by pid:" + Binder.getCallingPid()
                 + " uid:" + Binder.getCallingUid());
         mCi.iccOpenLogicalChannel(aid, p2,
-                mHandler.obtainMessage(EVENT_OPEN_LOGICAL_CHANNEL_DONE, response));
+                obtainMessage(EVENT_OPEN_LOGICAL_CHANNEL_DONE, response));
     }
 
     /**
@@ -493,7 +1163,7 @@ public class UiccProfile {
     public void iccCloseLogicalChannel(int channel, Message response) {
         loglocal("Close Logical Channel: " + channel);
         mCi.iccCloseLogicalChannel(channel,
-                mHandler.obtainMessage(EVENT_CLOSE_LOGICAL_CHANNEL_DONE, response));
+                obtainMessage(EVENT_CLOSE_LOGICAL_CHANNEL_DONE, response));
     }
 
     /**
@@ -502,7 +1172,7 @@ public class UiccProfile {
     public void iccTransmitApduLogicalChannel(int channel, int cla, int command,
             int p1, int p2, int p3, String data, Message response) {
         mCi.iccTransmitApduLogicalChannel(channel, cla, command, p1, p2, p3,
-                data, mHandler.obtainMessage(EVENT_TRANSMIT_APDU_LOGICAL_CHANNEL_DONE, response));
+                data, obtainMessage(EVENT_TRANSMIT_APDU_LOGICAL_CHANNEL_DONE, response));
     }
 
     /**
@@ -511,7 +1181,7 @@ public class UiccProfile {
     public void iccTransmitApduBasicChannel(int cla, int command,
             int p1, int p2, int p3, String data, Message response) {
         mCi.iccTransmitApduBasicChannel(cla, command, p1, p2, p3,
-                data, mHandler.obtainMessage(EVENT_TRANSMIT_APDU_BASIC_CHANNEL_DONE, response));
+                data, obtainMessage(EVENT_TRANSMIT_APDU_BASIC_CHANNEL_DONE, response));
     }
 
     /**
@@ -520,7 +1190,7 @@ public class UiccProfile {
     public void iccExchangeSimIO(int fileID, int command, int p1, int p2, int p3,
             String pathID, Message response) {
         mCi.iccIO(command, fileID, pathID, p1, p2, p3, null, null,
-                mHandler.obtainMessage(EVENT_SIM_IO_DONE, response));
+                obtainMessage(EVENT_SIM_IO_DONE, response));
     }
 
     /**
@@ -631,7 +1301,7 @@ public class UiccProfile {
      */
     public boolean setOperatorBrandOverride(String brand) {
         log("setOperatorBrandOverride: " + brand);
-        log("current iccId: " + getIccId());
+        log("current iccId: " + SubscriptionInfo.givePrintableIccid(getIccId()));
 
         String iccId = getIccId();
         if (TextUtils.isEmpty(iccId)) {
@@ -658,7 +1328,21 @@ public class UiccProfile {
             return null;
         }
         SharedPreferences sp = PreferenceManager.getDefaultSharedPreferences(mContext);
-        return sp.getString(OPERATOR_BRAND_OVERRIDE_PREFIX + iccId, null);
+        String brandName = sp.getString(OPERATOR_BRAND_OVERRIDE_PREFIX + iccId, null);
+        if (brandName == null) {
+            // Check if  CarrierConfig sets carrier name
+            CarrierConfigManager manager = (CarrierConfigManager)
+                    mContext.getSystemService(Context.CARRIER_CONFIG_SERVICE);
+            int subId = SubscriptionController.getInstance().getSubIdUsingPhoneId(mPhoneId);
+            if (manager != null) {
+                PersistableBundle bundle = manager.getConfigForSubId(subId);
+                if (bundle != null && bundle.getBoolean(
+                        CarrierConfigManager.KEY_CARRIER_NAME_OVERRIDE_BOOL)) {
+                    brandName = bundle.getString(CarrierConfigManager.KEY_CARRIER_NAME_STRING);
+                }
+            }
+        }
+        return brandName;
     }
 
     /**
@@ -744,6 +1428,21 @@ public class UiccProfile {
                     + ((Registrant) mCarrierPrivilegeRegistrants.get(i)).getHandler());
         }
         pw.flush();
+
+        if (ICC_CARD_PROXY_REMOVED) {
+            pw.println(" mNetworkLockedRegistrants: size=" + mNetworkLockedRegistrants.size());
+            for (int i = 0; i < mNetworkLockedRegistrants.size(); i++) {
+                pw.println("  mNetworkLockedRegistrants[" + i + "]="
+                        + ((Registrant) mNetworkLockedRegistrants.get(i)).getHandler());
+            }
+            pw.println(" mCurrentAppType=" + mCurrentAppType);
+            pw.println(" mUiccCard=" + mUiccCard);
+            pw.println(" mUiccApplication=" + mUiccApplication);
+            pw.println(" mIccRecords=" + mIccRecords);
+            pw.println(" mExternalState=" + mExternalState);
+            pw.flush();
+        }
+
         pw.println("sLocalLog:");
         sLocalLog.dump(fd, pw, args);
         pw.flush();

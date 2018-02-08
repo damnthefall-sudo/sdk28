@@ -23,6 +23,7 @@ import android.annotation.SystemApi;
 import android.annotation.SystemService;
 import android.content.Context;
 import android.util.Log;
+import android.util.proto.ProtoOutputStream;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -565,6 +566,42 @@ public final class PowerManager {
         int OPTIONAL_SENSORS = 13;
     }
 
+    /**
+     * Either the location providers shouldn't be affected by battery saver,
+     * or battery saver is off.
+     */
+    public static final int LOCATION_MODE_NO_CHANGE = 0;
+
+    /**
+     * In this mode, the GPS based location provider should be disabled when battery saver is on and
+     * the device is non-interactive.
+     */
+    public static final int LOCATION_MODE_GPS_DISABLED_WHEN_SCREEN_OFF = 1;
+
+    /**
+     * All location providers should be disabled when battery saver is on and
+     * the device is non-interactive.
+     */
+    public static final int LOCATION_MODE_ALL_DISABLED_WHEN_SCREEN_OFF = 2;
+
+    /**
+     * In this mode, all the location providers will be kept available, but location fixes
+     * should only be provided to foreground apps.
+     */
+    public static final int LOCATION_MODE_FOREGROUND_ONLY = 3;
+
+    /**
+     * @hide
+     */
+    @Retention(RetentionPolicy.SOURCE)
+    @IntDef(prefix = {"LOCATION_MODE_"}, value = {
+            LOCATION_MODE_NO_CHANGE,
+            LOCATION_MODE_GPS_DISABLED_WHEN_SCREEN_OFF,
+            LOCATION_MODE_ALL_DISABLED_WHEN_SCREEN_OFF,
+            LOCATION_MODE_FOREGROUND_ONLY,
+    })
+    public @interface LocationPowerSaveMode {}
+
     final Context mContext;
     final IPowerManager mService;
     final Handler mHandler;
@@ -964,24 +1001,6 @@ public final class PowerManager {
         return false;
     }
 
-    /**
-     * Sets the brightness of the backlights (screen, keyboard, button).
-     * <p>
-     * Requires the {@link android.Manifest.permission#DEVICE_POWER} permission.
-     * </p>
-     *
-     * @param brightness The brightness value from 0 to 255.
-     *
-     * @hide Requires signature permission.
-     */
-    public void setBacklightBrightness(int brightness) {
-        try {
-            mService.setTemporaryScreenBrightnessSettingOverride(brightness);
-        } catch (RemoteException e) {
-            throw e.rethrowFromSystemServer();
-        }
-    }
-
    /**
      * Returns true if the specified wake lock level is supported.
      *
@@ -1140,6 +1159,24 @@ public final class PowerManager {
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
+    }
+
+    /**
+     * Returns how location features should behave when battery saver is on. When battery saver
+     * is off, this will always return {@link #LOCATION_MODE_NO_CHANGE}.
+     *
+     * <p>This API is normally only useful for components that provide location features.
+     *
+     * @see #isPowerSaveMode()
+     * @see #ACTION_POWER_SAVE_MODE_CHANGED
+     */
+    @LocationPowerSaveMode
+    public int getLocationPowerSaveMode() {
+        final PowerSaveState powerSaveState = getPowerSaveState(ServiceType.GPS);
+        if (!powerSaveState.globalBatterySaverEnabled) {
+            return LOCATION_MODE_NO_CHANGE;
+        }
+        return powerSaveState.gpsMode;
     }
 
     /**
@@ -1595,6 +1632,21 @@ public final class PowerManager {
                 return "WakeLock{"
                     + Integer.toHexString(System.identityHashCode(this))
                     + " held=" + mHeld + ", refCount=" + mInternalCount + "}";
+            }
+        }
+
+        /** @hide */
+        public void writeToProto(ProtoOutputStream proto, long fieldId) {
+            synchronized (mToken) {
+                final long token = proto.start(fieldId);
+                proto.write(PowerManagerProto.WakeLockProto.HEX_STRING,
+                        Integer.toHexString(System.identityHashCode(this)));
+                proto.write(PowerManagerProto.WakeLockProto.HELD, mHeld);
+                proto.write(PowerManagerProto.WakeLockProto.INTERNAL_COUNT, mInternalCount);
+                if (mWorkSource != null) {
+                    mWorkSource.writeToProto(proto, PowerManagerProto.WakeLockProto.WORK_SOURCE);
+                }
+                proto.end(token);
             }
         }
 

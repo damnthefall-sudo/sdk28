@@ -17,9 +17,13 @@
 package android.arch.persistence.room.integration.testapp.migration;
 
 import static org.hamcrest.CoreMatchers.containsString;
+import static org.hamcrest.CoreMatchers.endsWith;
 import static org.hamcrest.CoreMatchers.instanceOf;
 import static org.hamcrest.CoreMatchers.is;
+import static org.hamcrest.CoreMatchers.not;
+import static org.hamcrest.CoreMatchers.notNullValue;
 import static org.hamcrest.CoreMatchers.nullValue;
+import static org.hamcrest.CoreMatchers.startsWith;
 import static org.hamcrest.MatcherAssert.assertThat;
 
 import android.arch.persistence.db.SupportSQLiteDatabase;
@@ -33,6 +37,7 @@ import android.support.test.InstrumentationRegistry;
 import android.support.test.filters.SmallTest;
 import android.support.test.runner.AndroidJUnit4;
 
+import org.hamcrest.MatcherAssert;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -250,6 +255,95 @@ public class MigrationTest {
                 .build();
         assertThat(db.dao().loadAllEntity1s().size(), is(0));
         db.close();
+    }
+
+    @Test
+    public void failWithIdentityCheck() throws IOException {
+        for (int i = 1; i < MigrationDb.LATEST_VERSION; i++) {
+            String name = "test_" + i;
+            helper.createDatabase(name, i).close();
+            IllegalStateException exception = null;
+            try {
+                MigrationDb db = Room.databaseBuilder(
+                        InstrumentationRegistry.getInstrumentation().getTargetContext(),
+                        MigrationDb.class, name).build();
+                db.runInTransaction(new Runnable() {
+                    @Override
+                    public void run() {
+                        // do nothing
+                    }
+                });
+            } catch (IllegalStateException ex) {
+                exception = ex;
+            }
+            MatcherAssert.assertThat("identity detection should've failed",
+                    exception, notNullValue());
+        }
+    }
+
+    @Test
+    public void fallbackToDestructiveMigrationFrom_destructiveMigrationOccursForSuppliedVersion()
+            throws IOException {
+        SupportSQLiteDatabase database = helper.createDatabase(TEST_DB, 6);
+        final MigrationDb.Dao_V1 dao = new MigrationDb.Dao_V1(database);
+        dao.insertIntoEntity1(2, "foo");
+        dao.insertIntoEntity1(3, "bar");
+        database.close();
+        Context targetContext = InstrumentationRegistry.getTargetContext();
+
+        MigrationDb db = Room.databaseBuilder(targetContext, MigrationDb.class, TEST_DB)
+                .fallbackToDestructiveMigrationFrom(6)
+                .build();
+
+        assertThat(db.dao().loadAllEntity1s().size(), is(0));
+    }
+
+    @Test
+    public void fallbackToDestructiveMigrationFrom_suppliedValueIsMigrationStartVersion_exception()
+            throws IOException {
+        SupportSQLiteDatabase database = helper.createDatabase(TEST_DB, 6);
+        database.close();
+        Context targetContext = InstrumentationRegistry.getTargetContext();
+
+        Throwable throwable = null;
+        try {
+            Room.databaseBuilder(targetContext, MigrationDb.class, TEST_DB)
+                    .addMigrations(MIGRATION_6_7)
+                    .fallbackToDestructiveMigrationFrom(6)
+                    .build();
+        } catch (Throwable t) {
+            throwable = t;
+        }
+
+        assertThat(throwable, is(not(nullValue())));
+        //noinspection ConstantConditions
+        assertThat(throwable.getMessage(),
+                startsWith("Inconsistency detected. A Migration was supplied to"));
+        assertThat(throwable.getMessage(), endsWith("6"));
+    }
+
+    @Test
+    public void fallbackToDestructiveMigrationFrom_suppliedValueIsMigrationEndVersion_exception()
+            throws IOException {
+        SupportSQLiteDatabase database = helper.createDatabase(TEST_DB, 5);
+        database.close();
+        Context targetContext = InstrumentationRegistry.getTargetContext();
+
+        Throwable throwable = null;
+        try {
+            Room.databaseBuilder(targetContext, MigrationDb.class, TEST_DB)
+                    .addMigrations(MIGRATION_5_6)
+                    .fallbackToDestructiveMigrationFrom(6)
+                    .build();
+        } catch (Throwable t) {
+            throwable = t;
+        }
+
+        assertThat(throwable, is(not(nullValue())));
+        //noinspection ConstantConditions
+        assertThat(throwable.getMessage(),
+                startsWith("Inconsistency detected. A Migration was supplied to"));
+        assertThat(throwable.getMessage(), endsWith("6"));
     }
 
     private void testFailure(int startVersion, int endVersion) throws IOException {

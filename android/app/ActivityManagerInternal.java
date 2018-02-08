@@ -319,4 +319,29 @@ public abstract class ActivityManagerInternal {
     }
 
     public abstract void registerScreenObserver(ScreenObserver observer);
+
+    /**
+     * Returns if more users can be started without stopping currently running users.
+     */
+    public abstract boolean canStartMoreUsers();
+
+    /**
+     * Sets the user switcher message for switching from {@link android.os.UserHandle#SYSTEM}.
+     */
+    public abstract void setSwitchingFromSystemUserMessage(String switchingFromSystemUserMessage);
+
+    /**
+     * Sets the user switcher message for switching to {@link android.os.UserHandle#SYSTEM}.
+     */
+    public abstract void setSwitchingToSystemUserMessage(String switchingToSystemUserMessage);
+
+    /**
+     * Returns maximum number of users that can run simultaneously.
+     */
+    public abstract int getMaxRunningUsers();
+
+    /**
+     * Returns is the caller has the same uid as the Recents component
+     */
+    public abstract boolean isCallerRecents(int callingUid);
 }

@@ -453,6 +453,7 @@ public class NotificationCompat {
     public @interface StreamType {}
 
     /** @hide */
+    @RestrictTo(LIBRARY_GROUP)
     @Retention(SOURCE)
     @IntDef({VISIBILITY_PUBLIC, VISIBILITY_PRIVATE, VISIBILITY_SECRET})
     public @interface NotificationVisibility {}
@@ -2114,8 +2115,16 @@ public class NotificationCompat {
 
         /**
          * Sets the title to be displayed on this conversation. May be set to {@code null}.
-         * @param conversationTitle Title displayed for this conversation.
-         * @return this object for method chaining.
+         *
+         * <p>This API's behavior was changed in SDK version {@link Build.VERSION_CODES#P}. If your
+         * application's target version is less than {@link Build.VERSION_CODES#P}, setting a
+         * conversation title to a non-null value will make {@link #isGroupConversation()} return
+         * {@code true} and passing {@code null} will make it return {@code false}. In
+         * {@link Build.VERSION_CODES#P} and beyond, use {@link #setGroupConversation(boolean)}
+         * to set group conversation status.
+         *
+         * @param conversationTitle Title displayed for this conversation
+         * @return this object for method chaining
          */
         public MessagingStyle setConversationTitle(@Nullable CharSequence conversationTitle) {
             mConversationTitle = conversationTitle;
@@ -2185,9 +2194,27 @@ public class NotificationCompat {
         }
 
         /**
-         * Returns {@code true} if this notification represents a group conversation.
+         * Returns {@code true} if this notification represents a group conversation, otherwise
+         * {@code false}.
+         *
+         * <p> If the application that generated this {@link MessagingStyle} targets an SDK version
+         * less than {@link Build.VERSION_CODES#P}, this method becomes dependent on whether or
+         * not the conversation title is set; returning {@code true} if the conversation title is
+         * a non-null value, or {@code false} otherwise. From {@link Build.VERSION_CODES#P} forward,
+         * this method returns what's set by {@link #setGroupConversation(boolean)} allowing for
+         * named, non-group conversations.
+         *
+         * @see #setConversationTitle(CharSequence)
          */
         public boolean isGroupConversation() {
+            // When target SDK version is < P, a non-null conversation title dictates if this is
+            // as group conversation.
+            if (mBuilder != null
+                    && mBuilder.mContext.getApplicationInfo().targetSdkVersion
+                    < Build.VERSION_CODES.P) {
+                return mConversationTitle != null;
+            }
+
             return mIsGroupConversation;
         }
 
@@ -2769,6 +2796,66 @@ public class NotificationCompat {
      * to attach actions.
      */
     public static class Action {
+        /**
+         * {@link SemanticAction}: No semantic action defined.
+         */
+        public static final int SEMANTIC_ACTION_NONE = 0;
+
+        /**
+         * {@link SemanticAction}: Reply to a conversation, chat, group, or wherever replies
+         * may be appropriate.
+         */
+        public static final int SEMANTIC_ACTION_REPLY = 1;
+
+        /**
+         * {@link SemanticAction}: Mark content as read.
+         */
+        public static final int SEMANTIC_ACTION_MARK_AS_READ = 2;
+
+        /**
+         * {@link SemanticAction}: Mark content as unread.
+         */
+        public static final int SEMANTIC_ACTION_MARK_AS_UNREAD = 3;
+
+        /**
+         * {@link SemanticAction}: Delete the content associated with the notification. This
+         * could mean deleting an email, message, etc.
+         */
+        public static final int SEMANTIC_ACTION_DELETE = 4;
+
+        /**
+         * {@link SemanticAction}: Archive the content associated with the notification. This
+         * could mean archiving an email, message, etc.
+         */
+        public static final int SEMANTIC_ACTION_ARCHIVE = 5;
+
+        /**
+         * {@link SemanticAction}: Mute the content associated with the notification. This could
+         * mean silencing a conversation or currently playing media.
+         */
+        public static final int SEMANTIC_ACTION_MUTE = 6;
+
+        /**
+         * {@link SemanticAction}: Unmute the content associated with the notification. This could
+         * mean un-silencing a conversation or currently playing media.
+         */
+        public static final int SEMANTIC_ACTION_UNMUTE = 7;
+
+        /**
+         * {@link SemanticAction}: Mark content with a thumbs up.
+         */
+        public static final int SEMANTIC_ACTION_THUMBS_UP = 8;
+
+        /**
+         * {@link SemanticAction}: Mark content with a thumbs down.
+         */
+        public static final int SEMANTIC_ACTION_THUMBS_DOWN = 9;
+
+        static final String EXTRA_SHOWS_USER_INTERFACE =
+                "android.support.action.showsUserInterface";
+
+        static final String EXTRA_SEMANTIC_ACTION = "android.support.action.semanticAction";
+
         final Bundle mExtras;
         private final RemoteInput[] mRemoteInputs;
 
@@ -2785,6 +2872,9 @@ public class NotificationCompat {
         private final RemoteInput[] mDataOnlyRemoteInputs;
 
         private boolean mAllowGeneratedReplies;
+        private boolean mShowsUserInterface = true;
+
+        private final @SemanticAction int mSemanticAction;
 
         /**
          * Small icon representing the action.
@@ -2801,12 +2891,13 @@ public class NotificationCompat {
         public PendingIntent actionIntent;
 
         public Action(int icon, CharSequence title, PendingIntent intent) {
-            this(icon, title, intent, new Bundle(), null, null, true);
+            this(icon, title, intent, new Bundle(), null, null, true, SEMANTIC_ACTION_NONE, true);
         }
 
         Action(int icon, CharSequence title, PendingIntent intent, Bundle extras,
                 RemoteInput[] remoteInputs, RemoteInput[] dataOnlyRemoteInputs,
-                boolean allowGeneratedReplies) {
+                boolean allowGeneratedReplies, @SemanticAction int semanticAction,
+                boolean showsUserInterface) {
             this.icon = icon;
             this.title = NotificationCompat.Builder.limitCharSequenceLength(title);
             this.actionIntent = intent;
@@ -2814,6 +2905,8 @@ public class NotificationCompat {
             this.mRemoteInputs = remoteInputs;
             this.mDataOnlyRemoteInputs = dataOnlyRemoteInputs;
             this.mAllowGeneratedReplies = allowGeneratedReplies;
+            this.mSemanticAction = semanticAction;
+            this.mShowsUserInterface = showsUserInterface;
         }
 
         public int getIcon() {
@@ -2853,6 +2946,17 @@ public class NotificationCompat {
         }
 
         /**
+         * Returns the {@link SemanticAction} associated with this {@link Action}. A
+         * {@link SemanticAction} denotes what an {@link Action}'s {@link PendingIntent} will do
+         * (eg. reply, mark as read, delete, etc).
+         *
+         * @see SemanticAction
+         */
+        public @SemanticAction int getSemanticAction() {
+            return mSemanticAction;
+        }
+
+        /**
          * Get the list of inputs to be collected from the user that ONLY accept data when this
          * action is sent. These remote inputs are guaranteed to return true on a call to
          * {@link RemoteInput#isDataOnly}.
@@ -2867,6 +2971,14 @@ public class NotificationCompat {
         }
 
         /**
+         * Return whether or not triggering this {@link Action}'s {@link PendingIntent} will open a
+         * user interface.
+         */
+        public boolean getShowsUserInterface() {
+            return mShowsUserInterface;
+        }
+
+        /**
          * Builder class for {@link Action} objects.
          */
         public static final class Builder {
@@ -2876,6 +2988,8 @@ public class NotificationCompat {
             private boolean mAllowGeneratedReplies = true;
             private final Bundle mExtras;
             private ArrayList<RemoteInput> mRemoteInputs;
+            private @SemanticAction int mSemanticAction;
+            private boolean mShowsUserInterface = true;
 
             /**
              * Construct a new builder for {@link Action} object.
@@ -2884,7 +2998,7 @@ public class NotificationCompat {
              * @param intent the {@link PendingIntent} to fire when users trigger this action
              */
             public Builder(int icon, CharSequence title, PendingIntent intent) {
-                this(icon, title, intent, new Bundle(), null, true);
+                this(icon, title, intent, new Bundle(), null, true, SEMANTIC_ACTION_NONE, true);
             }
 
             /**
@@ -2894,11 +3008,13 @@ public class NotificationCompat {
              */
             public Builder(Action action) {
                 this(action.icon, action.title, action.actionIntent, new Bundle(action.mExtras),
-                        action.getRemoteInputs(), action.getAllowGeneratedReplies());
+                        action.getRemoteInputs(), action.getAllowGeneratedReplies(),
+                        action.getSemanticAction(), action.mShowsUserInterface);
             }
 
             private Builder(int icon, CharSequence title, PendingIntent intent, Bundle extras,
-                    RemoteInput[] remoteInputs, boolean allowGeneratedReplies) {
+                    RemoteInput[] remoteInputs, boolean allowGeneratedReplies,
+                    @SemanticAction int semanticAction, boolean showsUserInterface) {
                 mIcon = icon;
                 mTitle = NotificationCompat.Builder.limitCharSequenceLength(title);
                 mIntent = intent;
@@ -2906,6 +3022,8 @@ public class NotificationCompat {
                 mRemoteInputs = remoteInputs == null ? null : new ArrayList<>(
                         Arrays.asList(remoteInputs));
                 mAllowGeneratedReplies = allowGeneratedReplies;
+                mSemanticAction = semanticAction;
+                mShowsUserInterface = showsUserInterface;
             }
 
             /**
@@ -2961,6 +3079,32 @@ public class NotificationCompat {
             }
 
             /**
+             * Sets the {@link SemanticAction} for this {@link Action}. A {@link SemanticAction}
+             * denotes what an {@link Action}'s {@link PendingIntent} will do (eg. reply, mark
+             * as read, delete, etc).
+             * @param semanticAction a {@link SemanticAction} defined within {@link Action} with
+             * {@code SEMANTIC_ACTION_} prefixes
+             * @return this object for method chaining
+             */
+            public Builder setSemanticAction(@SemanticAction int semanticAction) {
+                mSemanticAction = semanticAction;
+                return this;
+            }
+
+            /**
+             * Set whether or not this {@link Action}'s {@link PendingIntent} will open a user
+             * interface.
+             * @param showsUserInterface {@code true} if this {@link Action}'s {@link PendingIntent}
+             * will open a user interface, otherwise {@code false}
+             * @return this object for method chaining
+             * The default value is {@code true}
+             */
+            public Builder setShowsUserInterface(boolean showsUserInterface) {
+                mShowsUserInterface = showsUserInterface;
+                return this;
+            }
+
+            /**
              * Apply an extender to this action builder. Extenders may be used to add
              * metadata or change options on this builder.
              */
@@ -2991,7 +3135,8 @@ public class NotificationCompat {
                 RemoteInput[] textInputsArr = textInputs.isEmpty()
                         ? null : textInputs.toArray(new RemoteInput[textInputs.size()]);
                 return new Action(mIcon, mTitle, mIntent, mExtras, textInputsArr,
-                        dataOnlyInputsArr, mAllowGeneratedReplies);
+                        dataOnlyInputsArr, mAllowGeneratedReplies, mSemanticAction,
+                        mShowsUserInterface);
             }
         }
 
@@ -3251,6 +3396,27 @@ public class NotificationCompat {
                 return (mFlags & FLAG_HINT_DISPLAY_INLINE) != 0;
             }
         }
+
+        /**
+         * Provides meaning to an {@link Action} that hints at what the associated
+         * {@link PendingIntent} will do. For example, an {@link Action} with a
+         * {@link PendingIntent} that replies to a text message notification may have the
+         * {@link #SEMANTIC_ACTION_REPLY} {@link SemanticAction} set within it.
+         */
+        @IntDef({
+                SEMANTIC_ACTION_NONE,
+                SEMANTIC_ACTION_REPLY,
+                SEMANTIC_ACTION_MARK_AS_READ,
+                SEMANTIC_ACTION_MARK_AS_UNREAD,
+                SEMANTIC_ACTION_DELETE,
+                SEMANTIC_ACTION_ARCHIVE,
+                SEMANTIC_ACTION_MUTE,
+                SEMANTIC_ACTION_UNMUTE,
+                SEMANTIC_ACTION_THUMBS_UP,
+                SEMANTIC_ACTION_THUMBS_DOWN
+        })
+        @Retention(RetentionPolicy.SOURCE)
+        public @interface SemanticAction {}
     }
 
 
@@ -4651,8 +4817,21 @@ public class NotificationCompat {
             allowGeneratedReplies = action.getExtras().getBoolean(
                     NotificationCompatJellybean.EXTRA_ALLOW_GENERATED_REPLIES);
         }
+
+        final boolean showsUserInterface =
+                action.getExtras().getBoolean(Action.EXTRA_SHOWS_USER_INTERFACE, true);
+
+        final @Action.SemanticAction int semanticAction;
+        if (Build.VERSION.SDK_INT >= 28) {
+            semanticAction = action.getSemanticAction();
+        } else {
+            semanticAction = action.getExtras().getInt(
+                    Action.EXTRA_SEMANTIC_ACTION, Action.SEMANTIC_ACTION_NONE);
+        }
+
         return new Action(action.icon, action.title, action.actionIntent,
-                action.getExtras(), remoteInputs, null, allowGeneratedReplies);
+                action.getExtras(), remoteInputs, null, allowGeneratedReplies,
+                semanticAction, showsUserInterface);
     }
 
     /**

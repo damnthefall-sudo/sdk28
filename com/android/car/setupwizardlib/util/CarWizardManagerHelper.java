@@ -20,12 +20,15 @@ import android.content.Context;
 import android.content.Intent;
 import android.provider.Settings;
 
+import java.util.Arrays;
+
 /**
  * <p>Derived from {@code com.android.setupwizardlib/WizardManagerHelper.java}
  */
 public final class CarWizardManagerHelper {
     static final String EXTRA_WIZARD_BUNDLE = "wizardBundle";
     static final String EXTRA_IS_FIRST_RUN = "firstRun";
+    static final String EXTRA_IS_DEALER = "dealer";
     private static final String ACTION_NEXT = "com.android.wizard.NEXT";
     private static final String EXTRA_RESULT_CODE = "com.android.setupwizard.ResultCode";
 
@@ -80,6 +83,8 @@ public final class CarWizardManagerHelper {
         dstIntent.putExtra(EXTRA_WIZARD_BUNDLE, srcIntent.getBundleExtra(EXTRA_WIZARD_BUNDLE));
         dstIntent.putExtra(EXTRA_IS_FIRST_RUN,
                 srcIntent.getBooleanExtra(EXTRA_IS_FIRST_RUN, false));
+        dstIntent.putExtra(EXTRA_IS_DEALER,
+                srcIntent.getBooleanExtra(EXTRA_IS_DEALER, false));
     }
 
     /**
@@ -91,6 +96,17 @@ public final class CarWizardManagerHelper {
      */
     public static boolean isSetupWizardIntent(Intent intent) {
         return intent.getBooleanExtra(EXTRA_IS_FIRST_RUN, false);
+    }
+
+    /**
+     * Check whether an intent is intended for the dealer.
+     *
+     * @param intent The intent to be checked, usually from
+     *               {@link android.app.Activity#getIntent()}.
+     * @return true if the intent passed in was intended to be used with setup wizard.
+     */
+    public static boolean isDealerIntent(Intent intent) {
+        return intent.getBooleanExtra(EXTRA_IS_DEALER, false);
     }
 
     /**

@@ -21,6 +21,7 @@ import static android.app.ActivityManager.StackId.INVALID_STACK_ID;
 import static android.app.ActivityManager.TaskDescription.ATTR_TASKDESCRIPTION_PREFIX;
 import static android.app.ActivityOptions.ANIM_CLIP_REVEAL;
 import static android.app.ActivityOptions.ANIM_CUSTOM;
+import static android.app.ActivityOptions.ANIM_REMOTE_ANIMATION;
 import static android.app.ActivityOptions.ANIM_SCALE_UP;
 import static android.app.ActivityOptions.ANIM_SCENE_TRANSITION;
 import static android.app.ActivityOptions.ANIM_OPEN_CROSS_PROFILE_APPS;
@@ -135,6 +136,7 @@ import android.app.ResultInfo;
 import android.app.servertransaction.MoveToDisplayItem;
 import android.app.servertransaction.MultiWindowModeChangeItem;
 import android.app.servertransaction.NewIntentItem;
+import android.app.servertransaction.PauseActivityItem;
 import android.app.servertransaction.PipModeChangeItem;
 import android.app.servertransaction.WindowVisibilityItem;
 import android.app.servertransaction.ActivityConfigurationChangeItem;
@@ -169,6 +171,7 @@ import android.util.proto.ProtoOutputStream;
 import android.view.AppTransitionAnimationSpec;
 import android.view.IAppTransitionAnimationSpecsFuture;
 import android.view.IApplicationToken;
+import android.view.RemoteAnimationDefinition;
 import android.view.WindowManager.LayoutParams;
 
 import com.android.internal.R;
@@ -369,6 +372,10 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
             default:
                 return "unknown state=" + state;
         }
+    }
+
+    String getLifecycleDescription(String reason) {
+        return "packageName=" + packageName + ", state=" + state + ", reason=" + reason;
     }
 
     void dump(PrintWriter pw, String prefix) {
@@ -1480,6 +1487,10 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
                 case ANIM_OPEN_CROSS_PROFILE_APPS:
                     service.mWindowManager.overridePendingAppTransitionStartCrossProfileApps();
                     break;
+                case ANIM_REMOTE_ANIMATION:
+                    service.mWindowManager.overridePendingAppTransitionRemote(
+                            pendingOptions.getRemoteAnimationAdapter());
+                    break;
                 default:
                     Slog.e(TAG, "applyOptionsLocked: Unknown animationType=" + animationType);
                     break;
@@ -1607,6 +1618,20 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
             // The activity may be waiting for stop, but that is no longer appropriate for it.
             mStackSupervisor.mStoppingActivities.remove(this);
             mStackSupervisor.mGoingToSleepActivities.remove(this);
+
+            // If the activity is stopped or stopping, cycle to the paused state.
+            if (state == STOPPED || state == STOPPING) {
+                // Capture reason before state change
+                final String reason = getLifecycleDescription("makeVisibleIfNeeded");
+
+                // An activity must be in the {@link PAUSING} state for the system to validate
+                // the move to {@link PAUSED}.
+                state = PAUSING;
+                service.mLifecycleManager.scheduleTransaction(app.thread, appToken,
+                        PauseActivityItem.obtain(finishing, false /* userLeaving */,
+                                configChangeFlags, false /* dontReport */)
+                                .setDescription(reason));
+            }
         } catch (Exception e) {
             // Just skip on any failure; we'll make it visible when it next restarts.
             Slog.w(TAG, "Exception thrown making visibile: " + intent.getComponent(), e);
@@ -2730,12 +2755,14 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
     }
 
     /**
-     * @return true if the activity contains windows that have
-     *         {@link LayoutParams#FLAG_SHOW_WHEN_LOCKED} set or if the activity has set
-     *         {@link #mShowWhenLocked}.
+     * @return true if the activity windowing mode is not
+     *         {@link android.app.WindowConfiguration#WINDOWING_MODE_PINNED} and activity contains
+     *         windows that have {@link LayoutParams#FLAG_SHOW_WHEN_LOCKED} set or if the activity
+     *         has set {@link #mShowWhenLocked}.
+     *         Multi-windowing mode will be exited if true is returned.
      */
     boolean canShowWhenLocked() {
-        return !inMultiWindowMode() && (mShowWhenLocked
+        return !inPinnedWindowingMode() && (mShowWhenLocked
                 || service.mWindowManager.containsShowWhenLockedWindow(appToken));
     }
 
@@ -2762,6 +2789,10 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
 
     boolean isTopRunningActivity() {
         return mStackSupervisor.topRunningActivityLocked() == this;
+    }
+
+    void registerRemoteAnimations(RemoteAnimationDefinition definition) {
+        mWindowContainerController.registerRemoteAnimations(definition);
     }
 
     @Override

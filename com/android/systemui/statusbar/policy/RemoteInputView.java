@@ -27,7 +27,9 @@ import android.content.pm.ShortcutManager;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.text.Editable;
+import android.text.SpannedString;
 import android.text.TextWatcher;
 import android.util.AttributeSet;
 import android.util.Log;
@@ -135,11 +137,13 @@ public class RemoteInputView extends LinearLayout implements View.OnClickListene
         Intent fillInIntent = new Intent().addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
         RemoteInput.addResultsToIntent(mRemoteInputs, fillInIntent,
                 results);
+        RemoteInput.setResultsSource(fillInIntent, RemoteInput.SOURCE_FREE_FORM_INPUT);
 
         mEditText.setEnabled(false);
         mSendButton.setVisibility(INVISIBLE);
         mProgressBar.setVisibility(VISIBLE);
         mEntry.remoteInputText = mEditText.getText();
+        mEntry.lastRemoteInputSent = SystemClock.elapsedRealtime();
         mController.addSpinning(mEntry.key, mToken);
         mController.removeRemoteInput(mEntry, mToken);
         mEditText.mShowImeOnInputConnection = false;
@@ -298,6 +302,7 @@ public class RemoteInputView extends LinearLayout implements View.OnClickListene
 
     private void reset() {
         mResetting = true;
+        mEntry.remoteInputTextWhenReset = SpannedString.valueOf(mEditText.getText());
 
         mEditText.getText().clear();
         mEditText.setEnabled(true);

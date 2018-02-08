@@ -7,7 +7,6 @@ import android.util.proto.ProtoOutputStream;
 
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Objects;
 
 /**
  * Describes the source of some work that may be done by someone else.
@@ -162,9 +161,21 @@ public class WorkSource implements Parcelable {
 
     @Override
     public boolean equals(Object o) {
-        return o instanceof WorkSource
-            && !diff((WorkSource) o)
-            && Objects.equals(mChains, ((WorkSource) o).mChains);
+        if (o instanceof WorkSource) {
+            WorkSource other = (WorkSource) o;
+
+            if (diff(other)) {
+                return false;
+            }
+
+            if (mChains != null && !mChains.isEmpty()) {
+                return mChains.equals(other.mChains);
+            } else {
+                return other.mChains == null || other.mChains.isEmpty();
+            }
+        }
+
+        return false;
     }
 
     @Override
@@ -407,11 +418,11 @@ public class WorkSource implements Parcelable {
     }
 
     public boolean remove(WorkSource other) {
-        if (mNum <= 0 || other.mNum <= 0) {
+        if (isEmpty() || other.isEmpty()) {
             return false;
         }
 
-        boolean uidRemoved = false;
+        boolean uidRemoved;
         if (mNames == null && other.mNames == null) {
             uidRemoved = removeUids(other);
         } else {
@@ -427,13 +438,8 @@ public class WorkSource implements Parcelable {
         }
 
         boolean chainRemoved = false;
-        if (other.mChains != null) {
-            if (mChains != null) {
-                chainRemoved = mChains.removeAll(other.mChains);
-            }
-        } else if (mChains != null) {
-            mChains.clear();
-            chainRemoved = true;
+        if (other.mChains != null && mChains != null) {
+            chainRemoved = mChains.removeAll(other.mChains);
         }
 
         return uidRemoved || chainRemoved;

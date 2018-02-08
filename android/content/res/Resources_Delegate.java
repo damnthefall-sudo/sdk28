@@ -886,6 +886,12 @@ public class Resources_Delegate {
     }
 
     @LayoutlibDelegate
+    static void getValueForDensity(Resources resources, int id, int density, TypedValue outValue,
+            boolean resolveRefs) throws NotFoundException {
+        getValue(resources, id, outValue, resolveRefs);
+    }
+
+    @LayoutlibDelegate
     static XmlResourceParser getXml(Resources resources, int id) throws NotFoundException {
         Pair<String, ResourceValue> v = getResourceValue(resources, id, mPlatformResourceFlag);
 

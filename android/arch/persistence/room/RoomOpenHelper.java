@@ -41,13 +41,20 @@ public class RoomOpenHelper extends SupportSQLiteOpenHelper.Callback {
     private final Delegate mDelegate;
     @NonNull
     private final String mIdentityHash;
+    /**
+     * Room v1 had a bug where the hash was not consistent if fields are reordered.
+     * The new has fixes it but we still need to accept the legacy hash.
+     */
+    @NonNull // b/64290754
+    private final String mLegacyHash;
 
     public RoomOpenHelper(@NonNull DatabaseConfiguration configuration, @NonNull Delegate delegate,
-            @NonNull String identityHash) {
+            @NonNull String identityHash, @NonNull String legacyHash) {
         super(delegate.version);
         mConfiguration = configuration;
         mDelegate = delegate;
         mIdentityHash = identityHash;
+        mLegacyHash = legacyHash;
     }
 
     @Override
@@ -78,14 +85,17 @@ public class RoomOpenHelper extends SupportSQLiteOpenHelper.Callback {
             }
         }
         if (!migrated) {
-            if (mConfiguration == null || mConfiguration.requireMigration) {
+            if (mConfiguration != null && !mConfiguration.isMigrationRequiredFrom(oldVersion)) {
+                mDelegate.dropAllTables(db);
+                mDelegate.createAllTables(db);
+            } else {
                 throw new IllegalStateException("A migration from " + oldVersion + " to "
-                + newVersion + " is necessary. Please provide a Migration in the builder or call"
-                        + " fallbackToDestructiveMigration in the builder in which case Room will"
-                        + " re-create all of the tables.");
+                        + newVersion + " was required but not found. Please provide the "
+                        + "necessary Migration path via "
+                        + "RoomDatabase.Builder.addMigration(Migration ...) or allow for "
+                        + "destructive migrations via one of the "
+                        + "RoomDatabase.Builder.fallbackToDestructiveMigration* methods.");
             }
-            mDelegate.dropAllTables(db);
-            mDelegate.createAllTables(db);
         }
     }
 
@@ -115,7 +125,7 @@ public class RoomOpenHelper extends SupportSQLiteOpenHelper.Callback {
         } finally {
             cursor.close();
         }
-        if (!mIdentityHash.equals(identityHash)) {
+        if (!mIdentityHash.equals(identityHash) && !mLegacyHash.equals(identityHash)) {
             throw new IllegalStateException("Room cannot verify the data integrity. Looks like"
                     + " you've changed schema but forgot to update the version number. You can"
                     + " simply fix this by increasing the version number.");

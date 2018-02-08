@@ -565,7 +565,7 @@ public class ZenModeHelper {
                     proto.write(ZenModeProto.ENABLED_ACTIVE_CONDITIONS, rule.toString());
                 }
             }
-            mConfig.toNotificationPolicy().toProto(proto, ZenModeProto.POLICY);
+            mConfig.toNotificationPolicy().writeToProto(proto, ZenModeProto.POLICY);
             proto.write(ZenModeProto.SUPPRESSED_EFFECTS, mSuppressedEffects);
         }
     }
@@ -822,21 +822,24 @@ public class ZenModeHelper {
 
     @VisibleForTesting
     protected void applyRestrictions() {
-        final boolean zen = mZenMode != Global.ZEN_MODE_OFF;
+        final boolean zenPriorityOnly = mZenMode == Global.ZEN_MODE_IMPORTANT_INTERRUPTIONS;
+        final boolean zenSilence  = mZenMode == Global.ZEN_MODE_NO_INTERRUPTIONS;
+        final boolean zenAlarmsOnly = mZenMode == Global.ZEN_MODE_ALARMS;
 
         // notification restrictions
         final boolean muteNotifications =
                 (mSuppressedEffects & SUPPRESSED_EFFECT_NOTIFICATIONS) != 0;
         // call restrictions
-        final boolean muteCalls = zen && !mConfig.allowCalls && !mConfig.allowRepeatCallers
+        final boolean muteCalls = zenAlarmsOnly
+                || (zenPriorityOnly && !mConfig.allowCalls && !mConfig.allowRepeatCallers)
                 || (mSuppressedEffects & SUPPRESSED_EFFECT_CALLS) != 0;
         // alarm restrictions
-        final boolean muteAlarms = zen && !mConfig.allowAlarms;
+        final boolean muteAlarms = zenPriorityOnly && !mConfig.allowAlarms;
         // alarm restrictions
-        final boolean muteMediaAndSystemSounds = zen && !mConfig.allowMediaSystemOther;
+        final boolean muteMediaAndSystemSounds = zenPriorityOnly && !mConfig.allowMediaSystemOther;
         // total silence restrictions
-        final boolean muteEverything = mZenMode == Global.ZEN_MODE_NO_INTERRUPTIONS
-                || areAllBehaviorSoundsMuted();
+        final boolean muteEverything = zenSilence
+                || (zenPriorityOnly && areAllBehaviorSoundsMuted());
 
         for (int usage : AudioAttributes.SDK_USAGES) {
             final int suppressionBehavior = AudioAttributes.SUPPRESSIBLE_USAGES.get(usage);
@@ -999,7 +1002,7 @@ public class ZenModeHelper {
                     if (isChange && policy.doNotDisturbWhenSilent) {
                         if (mZenMode != Global.ZEN_MODE_NO_INTERRUPTIONS
                                 && mZenMode != Global.ZEN_MODE_ALARMS) {
-                            newZen = Global.ZEN_MODE_ALARMS;
+                            newZen = Global.ZEN_MODE_IMPORTANT_INTERRUPTIONS;
                         }
                         setPreviousRingerModeSetting(ringerModeOld);
                     }
@@ -1039,7 +1042,7 @@ public class ZenModeHelper {
                 case AudioManager.RINGER_MODE_SILENT:
                     if (isChange) {
                         if (mZenMode == Global.ZEN_MODE_OFF) {
-                            newZen = Global.ZEN_MODE_ALARMS;
+                            newZen = Global.ZEN_MODE_IMPORTANT_INTERRUPTIONS;
                         }
                         ringerModeInternalOut = isVibrate ? AudioManager.RINGER_MODE_VIBRATE
                                 : AudioManager.RINGER_MODE_SILENT;

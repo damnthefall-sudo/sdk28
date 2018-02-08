@@ -3807,8 +3807,20 @@ public class PhoneWindow extends Window implements MenuBuilder.Callback {
         mForcedNavigationBarColor = true;
         if (mDecor != null) {
             mDecor.updateColorViews(null, false /* animate */);
-            mDecor.updateNavigationGuardColor();
         }
+    }
+
+    @Override
+    public void setNavigationBarDividerColor(int navigationBarDividerColor) {
+        mNavigationBarDividerColor = navigationBarDividerColor;
+        if (mDecor != null) {
+            mDecor.updateColorViews(null, false /* animate */);
+        }
+    }
+
+    @Override
+    public int getNavigationBarDividerColor() {
+        return mNavigationBarDividerColor;
     }
 
     public void setIsStartingWindow(boolean isStartingWindow) {

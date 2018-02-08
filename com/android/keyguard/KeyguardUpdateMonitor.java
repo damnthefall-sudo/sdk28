@@ -372,6 +372,11 @@ public class KeyguardUpdateMonitor implements TrustManager.TrustListener {
         }
     }
 
+    @Override
+    public void onTrustError(CharSequence message) {
+        dispatchErrorMessage(message);
+    }
+
     protected void handleSimSubscriptionInfoChanged() {
         if (DEBUG_SIM_STATES) {
             Log.v(TAG, "onSubscriptionInfoChanged()");
@@ -706,6 +711,15 @@ public class KeyguardUpdateMonitor implements TrustManager.TrustListener {
         return mScreenOn;
     }
 
+    private void dispatchErrorMessage(CharSequence message) {
+        for (int i = 0; i < mCallbacks.size(); i++) {
+            KeyguardUpdateMonitorCallback cb = mCallbacks.get(i).get();
+            if (cb != null) {
+                cb.onTrustAgentErrorMessage(message);
+            }
+        }
+    }
+
     static class DisplayClientState {
         public int clientGeneration;
         public boolean clearing;
@@ -977,6 +991,12 @@ public class KeyguardUpdateMonitor implements TrustManager.TrustListener {
                     maxChargingWattage > fastThreshold ? CHARGING_FAST :
                     CHARGING_REGULAR;
         }
+
+        @Override
+        public String toString() {
+            return "BatteryStatus{status=" + status + ",level=" + level + ",plugged=" + plugged
+                    + ",health=" + health + ",maxChargingWattage=" + maxChargingWattage + "}";
+        }
     }
 
     public class StrongAuthTracker extends LockPatternUtils.StrongAuthTracker {
@@ -1237,7 +1257,8 @@ public class KeyguardUpdateMonitor implements TrustManager.TrustListener {
                 mFingerprintCancelSignal.cancel();
             }
             mFingerprintCancelSignal = new CancellationSignal();
-            mFpm.authenticate(null, mFingerprintCancelSignal, 0, mAuthenticationCallback, null, userId);
+            mFpm.authenticate(null, mFingerprintCancelSignal, 0, mAuthenticationCallback, null,
+                    userId);
             setFingerprintRunningState(FINGERPRINT_STATE_RUNNING);
         }
     }
@@ -1599,11 +1620,10 @@ public class KeyguardUpdateMonitor implements TrustManager.TrustListener {
         }
     }
 
-    private static boolean isBatteryUpdateInteresting(BatteryStatus old, BatteryStatus current) {
+    private boolean isBatteryUpdateInteresting(BatteryStatus old, BatteryStatus current) {
         final boolean nowPluggedIn = current.isPluggedIn();
         final boolean wasPluggedIn = old.isPluggedIn();
-        final boolean stateChangedWhilePluggedIn =
-            wasPluggedIn == true && nowPluggedIn == true
+        final boolean stateChangedWhilePluggedIn = wasPluggedIn && nowPluggedIn
             && (old.status != current.status);
 
         // change in plug state is always interesting
@@ -1611,13 +1631,8 @@ public class KeyguardUpdateMonitor implements TrustManager.TrustListener {
             return true;
         }
 
-        // change in battery level while plugged in
-        if (nowPluggedIn && old.level != current.level) {
-            return true;
-        }
-
-        // change where battery needs charging
-        if (!nowPluggedIn && current.isBatteryLow() && current.level != old.level) {
+        // change in battery level
+        if (old.level != current.level) {
             return true;
         }
 

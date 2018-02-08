@@ -24,7 +24,10 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.NetworkInfo;
+import android.net.NetworkRequest;
 import android.net.NetworkStats;
 import android.net.Uri;
 import android.os.AsyncResult;
@@ -84,6 +87,7 @@ import com.android.internal.telephony.CommandsInterface;
 import com.android.internal.telephony.Connection;
 import com.android.internal.telephony.Phone;
 import com.android.internal.telephony.PhoneConstants;
+import com.android.internal.telephony.SubscriptionController;
 import com.android.internal.telephony.TelephonyProperties;
 import com.android.internal.telephony.dataconnection.DataEnabledSettings;
 import com.android.internal.telephony.gsm.SuppServiceNotification;
@@ -221,13 +225,30 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
                     log("onReceive : Updating mAllowEmergencyVideoCalls = " +
                             mAllowEmergencyVideoCalls);
                 }
-                mCarrierConfigLoaded  = true;
             } else if (TelecomManager.ACTION_CHANGE_DEFAULT_DIALER.equals(intent.getAction())) {
                 mDefaultDialerUid.set(getPackageUid(context, intent.getStringExtra(
                         TelecomManager.EXTRA_CHANGE_DEFAULT_DIALER_PACKAGE_NAME)));
             }
         }
     };
+
+    /**
+     * Tracks whether we are currently monitoring network connectivity for the purpose of warning
+     * the user of an inability to handover from LTE to WIFI for video calls.
+     */
+    private boolean mIsMonitoringConnectivity = false;
+
+    /**
+     * Network callback used to schedule the handover check when a wireless network connects.
+     */
+    private ConnectivityManager.NetworkCallback mNetworkCallback =
+            new ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(Network network) {
+                    Rlog.i(LOG_TAG, "Network available: " + network);
+                    scheduleHandoverCheck();
+                }
+            };
 
     //***** Constants
 
@@ -585,6 +606,22 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
     private boolean mNotifyHandoverVideoFromWifiToLTE = false;
 
     /**
+     * Carrier configuration option which determines whether the carrier wants to inform the user
+     * when a video call is handed over from LTE to WIFI.
+     * See {@link CarrierConfigManager#KEY_NOTIFY_HANDOVER_VIDEO_FROM_LTE_TO_WIFI_BOOL} for more
+     * information.
+     */
+    private boolean mNotifyHandoverVideoFromLTEToWifi = false;
+
+    /**
+     * When {@code} false, indicates that no handover from LTE to WIFI has occurred during the start
+     * of the call.
+     * When {@code true}, indicates that the start of call handover from LTE to WIFI has been
+     * attempted (it may have suceeded or failed).
+     */
+    private boolean mHasPerformedStartOfCallHandover = false;
+
+    /**
      * Carrier configuration option which determines whether the carrier supports the
      * {@link VideoProfile#STATE_PAUSED} signalling.
      * See {@link CarrierConfigManager#KEY_SUPPORT_PAUSE_IMS_VIDEO_CALLS_BOOL} for more information.
@@ -628,30 +665,39 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
     };
 
     // Callback fires when ImsManager MMTel Feature changes state
-    private ImsServiceProxy.INotifyStatusChanged mNotifyStatusChangedCallback = () -> {
-        try {
-            int status = mImsManager.getImsServiceStatus();
-            log("Status Changed: " + status);
-            switch(status) {
-                case ImsFeature.STATE_READY: {
-                    startListeningForCalls();
-                    break;
+    private ImsServiceProxy.IFeatureUpdate mNotifyStatusChangedCallback =
+            new ImsServiceProxy.IFeatureUpdate() {
+                @Override
+                public void notifyStateChanged() {
+                    try {
+                        int status = mImsManager.getImsServiceStatus();
+                        log("Status Changed: " + status);
+                        switch (status) {
+                            case ImsFeature.STATE_READY: {
+                                startListeningForCalls();
+                                break;
+                            }
+                            case ImsFeature.STATE_INITIALIZING:
+                                // fall through
+                            case ImsFeature.STATE_NOT_AVAILABLE: {
+                                stopListeningForCalls();
+                                break;
+                            }
+                            default: {
+                                Log.w(LOG_TAG, "Unexpected State!");
+                            }
+                        }
+                    } catch (ImsException e) {
+                        // Could not get the ImsService, retry!
+                        retryGetImsService();
+                    }
                 }
-                case ImsFeature.STATE_INITIALIZING:
-                    // fall through
-                case ImsFeature.STATE_NOT_AVAILABLE: {
-                    stopListeningForCalls();
-                    break;
+
+                @Override
+                public void notifyUnavailable() {
+                    retryGetImsService();
                 }
-                default: {
-                    Log.w(LOG_TAG, "Unexpected State!");
-                }
-            }
-        } catch (ImsException e) {
-            // Could not get the ImsService, retry!
-            retryGetImsService();
-        }
-    };
+            };
 
     @VisibleForTesting
     public interface IRetryTimeout {
@@ -757,7 +803,7 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
         mImsManager.addNotifyStatusChangedCallbackIfAvailable(mNotifyStatusChangedCallback);
         // Wait for ImsService.STATE_READY to start listening for calls.
         // Call the callback right away for compatibility with older devices that do not use states.
-        mNotifyStatusChangedCallback.notifyStatusChanged();
+        mNotifyStatusChangedCallback.notifyStateChanged();
     }
 
     private void startListeningForCalls() throws ImsException {
@@ -995,17 +1041,32 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
     private void cacheCarrierConfiguration(int subId) {
         CarrierConfigManager carrierConfigManager = (CarrierConfigManager)
                 mPhone.getContext().getSystemService(Context.CARRIER_CONFIG_SERVICE);
-        if (carrierConfigManager == null) {
-            loge("cacheCarrierConfiguration: No carrier config service found.");
+        if (carrierConfigManager == null
+                || !SubscriptionController.getInstance().isActiveSubId(subId)) {
+            loge("cacheCarrierConfiguration: No carrier config service found" + " "
+                    + "or not active subId = " + subId);
+            mCarrierConfigLoaded = false;
             return;
         }
 
         PersistableBundle carrierConfig = carrierConfigManager.getConfigForSubId(subId);
         if (carrierConfig == null) {
             loge("cacheCarrierConfiguration: Empty carrier config.");
+            mCarrierConfigLoaded = false;
             return;
         }
+        mCarrierConfigLoaded = true;
 
+        updateCarrierConfigCache(carrierConfig);
+    }
+
+    /**
+     * Updates the local carrier config cache from a bundle obtained from the carrier config
+     * manager.  Also supports unit testing by injecting configuration at test time.
+     * @param carrierConfig The config bundle.
+     */
+    @VisibleForTesting
+    public void updateCarrierConfigCache(PersistableBundle carrierConfig) {
         mAllowEmergencyVideoCalls =
                 carrierConfig.getBoolean(CarrierConfigManager.KEY_ALLOW_EMERGENCY_VIDEO_CALLS_BOOL);
         mTreatDowngradedVideoCallsAsVideoCalls =
@@ -1023,6 +1084,8 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
                 CarrierConfigManager.KEY_SUPPORT_DOWNGRADE_VT_TO_AUDIO_BOOL);
         mNotifyHandoverVideoFromWifiToLTE = carrierConfig.getBoolean(
                 CarrierConfigManager.KEY_NOTIFY_HANDOVER_VIDEO_FROM_WIFI_TO_LTE_BOOL);
+        mNotifyHandoverVideoFromLTEToWifi = carrierConfig.getBoolean(
+                CarrierConfigManager.KEY_NOTIFY_HANDOVER_VIDEO_FROM_LTE_TO_WIFI_BOOL);
         mIgnoreDataEnabledChangedForVideoCalls = carrierConfig.getBoolean(
                 CarrierConfigManager.KEY_IGNORE_DATA_ENABLED_CHANGED_FOR_VIDEO_CALLS);
         mIsViLteDataMetered = carrierConfig.getBoolean(
@@ -1883,6 +1946,8 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
 
         int code = maybeRemapReasonCode(reasonInfo);
         switch (code) {
+            case ImsReasonInfo.CODE_SIP_ALTERNATE_EMERGENCY_CALL:
+                return DisconnectCause.IMS_SIP_ALTERNATE_EMERGENCY_CALL;
             case ImsReasonInfo.CODE_SIP_BAD_ADDRESS:
             case ImsReasonInfo.CODE_SIP_NOT_REACHABLE:
                 return DisconnectCause.NUMBER_UNREACHABLE;
@@ -2072,13 +2137,18 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
             processCallStateChange(imsCall, ImsPhoneCall.State.ACTIVE,
                     DisconnectCause.NOT_DISCONNECTED);
 
-            if (mNotifyVtHandoverToWifiFail &&
-                    !imsCall.isWifiCall() && imsCall.isVideoCall() && isWifiConnected()) {
-                // Schedule check to see if handover succeeded.
-                sendMessageDelayed(obtainMessage(EVENT_CHECK_FOR_WIFI_HANDOVER, imsCall),
-                        HANDOVER_TO_WIFI_TIMEOUT_MS);
+            if (mNotifyVtHandoverToWifiFail && imsCall.isVideoCall() && !imsCall.isWifiCall()) {
+                if (isWifiConnected()) {
+                    // Schedule check to see if handover succeeded.
+                    sendMessageDelayed(obtainMessage(EVENT_CHECK_FOR_WIFI_HANDOVER, imsCall),
+                            HANDOVER_TO_WIFI_TIMEOUT_MS);
+                } else {
+                    // No wifi connectivity, so keep track of network availability for potential
+                    // handover.
+                    registerForConnectivityChanges();
+                }
             }
-
+            mHasPerformedStartOfCallHandover = false;
             mMetrics.writeOnImsCallStarted(mPhone.getPhoneId(), imsCall.getCallSession());
         }
 
@@ -2565,18 +2635,35 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
             boolean isHandoverToWifi = srcAccessTech != ServiceState.RIL_RADIO_TECHNOLOGY_UNKNOWN
                     && srcAccessTech != ServiceState.RIL_RADIO_TECHNOLOGY_IWLAN
                     && targetAccessTech == ServiceState.RIL_RADIO_TECHNOLOGY_IWLAN;
-            if (isHandoverToWifi) {
-                // If we handed over to wifi successfully, don't check for failure in the future.
-                removeMessages(EVENT_CHECK_FOR_WIFI_HANDOVER);
-            }
+            // Only consider it a handover from WIFI if the source and target radio tech is known.
+            boolean isHandoverFromWifi =
+                    srcAccessTech == ServiceState.RIL_RADIO_TECHNOLOGY_IWLAN
+                            && targetAccessTech != ServiceState.RIL_RADIO_TECHNOLOGY_UNKNOWN
+                            && targetAccessTech != ServiceState.RIL_RADIO_TECHNOLOGY_IWLAN;
 
             ImsPhoneConnection conn = findConnection(imsCall);
             if (conn != null) {
-                // Only consider it a handover from WIFI if the source and target radio tech is known.
-                boolean isHandoverFromWifi =
-                        srcAccessTech == ServiceState.RIL_RADIO_TECHNOLOGY_IWLAN
-                                && targetAccessTech != ServiceState.RIL_RADIO_TECHNOLOGY_UNKNOWN
-                                && targetAccessTech != ServiceState.RIL_RADIO_TECHNOLOGY_IWLAN;
+                if (conn.getDisconnectCause() == DisconnectCause.NOT_DISCONNECTED) {
+                    if (isHandoverToWifi) {
+                        removeMessages(EVENT_CHECK_FOR_WIFI_HANDOVER);
+
+                        if (mNotifyHandoverVideoFromLTEToWifi && mHasPerformedStartOfCallHandover) {
+                            // This is a handover which happened mid-call (ie not the start of call
+                            // handover from LTE to WIFI), so we'll notify the InCall UI.
+                            conn.onConnectionEvent(
+                                    TelephonyManager.EVENT_HANDOVER_VIDEO_FROM_LTE_TO_WIFI, null);
+                        }
+
+                        // We are on WIFI now so no need to get notified of network availability.
+                        unregisterForConnectivityChanges();
+                    } else if (isHandoverFromWifi && imsCall.isVideoCall()) {
+                        // A video call just dropped from WIFI to LTE; we want to be informed if a
+                        // new WIFI
+                        // network comes into range.
+                        registerForConnectivityChanges();
+                    }
+                }
+
                 if (isHandoverFromWifi && imsCall.isVideoCall()) {
                     if (mNotifyHandoverVideoFromWifiToLTE && mIsDataEnabled) {
                         if (conn.getDisconnectCause() == DisconnectCause.NOT_DISCONNECTED) {
@@ -2602,6 +2689,9 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
                 loge("onCallHandover :: connection null.");
             }
 
+            if (!mHasPerformedStartOfCallHandover) {
+                mHasPerformedStartOfCallHandover = true;
+            }
             mMetrics.writeOnImsCallHandoverEvent(mPhone.getPhoneId(),
                     TelephonyCallSession.Event.Type.IMS_CALL_HANDOVER, imsCall.getCallSession(),
                     srcAccessTech, targetAccessTech, reasonInfo);
@@ -2627,10 +2717,19 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
                 // If we know we failed to handover, don't check for failure in the future.
                 removeMessages(EVENT_CHECK_FOR_WIFI_HANDOVER);
 
+                if (imsCall.isVideoCall()
+                        && conn.getDisconnectCause() == DisconnectCause.NOT_DISCONNECTED) {
+                    // Start listening for a WIFI network to come into range for potential handover.
+                    registerForConnectivityChanges();
+                }
+
                 if (mNotifyVtHandoverToWifiFail) {
                     // Only notify others if carrier config indicates to do so.
                     conn.onHandoverToWifiFailed();
                 }
+            }
+            if (!mHasPerformedStartOfCallHandover) {
+                mHasPerformedStartOfCallHandover = true;
             }
         }
 
@@ -2709,6 +2808,8 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
         public void onCallTerminated(ImsCall imsCall, ImsReasonInfo reasonInfo) {
             if (DBG) log("mImsUssdListener onCallTerminated reasonCode=" + reasonInfo.getCode());
             removeMessages(EVENT_CHECK_FOR_WIFI_HANDOVER);
+            mHasPerformedStartOfCallHandover = false;
+            unregisterForConnectivityChanges();
 
             if (imsCall == mUssdSession) {
                 mUssdSession = null;
@@ -2977,11 +3078,23 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
             case EVENT_CHECK_FOR_WIFI_HANDOVER:
                 if (msg.obj instanceof ImsCall) {
                     ImsCall imsCall = (ImsCall) msg.obj;
+                    if (imsCall != mForegroundCall.getImsCall()) {
+                        Rlog.i(LOG_TAG, "handoverCheck: no longer FG; check skipped.");
+                        unregisterForConnectivityChanges();
+                        // Handover check and its not the foreground call any more.
+                        return;
+                    }
                     if (!imsCall.isWifiCall()) {
                         // Call did not handover to wifi, notify of handover failure.
                         ImsPhoneConnection conn = findConnection(imsCall);
                         if (conn != null) {
+                            Rlog.i(LOG_TAG, "handoverCheck: handover failed.");
                             conn.onHandoverToWifiFailed();
+                        }
+
+                        if (imsCall.isVideoCall()
+                                && conn.getDisconnectCause() == DisconnectCause.NOT_DISCONNECTED) {
+                            registerForConnectivityChanges();
                         }
                     }
                 }
@@ -3040,7 +3153,8 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
         // Uid -1 indicates this is for the overall device data usage.
         vtDataUsageSnapshot.combineValues(new NetworkStats.Entry(
                 NetworkStatsService.VT_INTERFACE, -1, NetworkStats.SET_FOREGROUND,
-                NetworkStats.TAG_NONE, 1, isRoaming, delta / 2, 0, delta / 2, 0, 0));
+                NetworkStats.TAG_NONE, NetworkStats.METERED_YES, isRoaming,
+                NetworkStats.DEFAULT_NETWORK_YES, delta / 2, 0, delta / 2, 0, 0));
         mVtDataUsageSnapshot = vtDataUsageSnapshot;
 
         // Create the snapshot of video call data usage per dialer. combineValues will create
@@ -3062,8 +3176,8 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
         // the only thing we can do here is splitting the usage into half rx and half tx.
         vtDataUsageUidSnapshot.combineValues(new NetworkStats.Entry(
                 NetworkStatsService.VT_INTERFACE, mDefaultDialerUid.get(),
-                NetworkStats.SET_FOREGROUND, NetworkStats.TAG_NONE, 1, isRoaming, delta / 2,
-                0, delta / 2, 0, 0));
+                NetworkStats.SET_FOREGROUND, NetworkStats.TAG_NONE, NetworkStats.METERED_YES,
+                isRoaming, NetworkStats.DEFAULT_NETWORK_YES, delta / 2, 0, delta / 2, 0, 0));
         mVtDataUsageUidSnapshot = vtDataUsageUidSnapshot;
     }
 
@@ -3204,6 +3318,9 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
         if (mImsManager.isServiceAvailable()) {
             return;
         }
+        // remove callback so we do not receive updates from old ImsServiceProxy when switching
+        // between ImsServices.
+        mImsManager.removeNotifyStatusChangedCallback(mNotifyStatusChangedCallback);
         //Leave mImsManager as null, then CallStateException will be thrown when dialing
         mImsManager = null;
         // Exponential backoff during retry, limited to 32 seconds.
@@ -3475,7 +3592,7 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
         // We do not want to update the ImsConfig for REASON_REGISTERED, since it can happen before
         // the carrier config has loaded and will deregister IMS.
         if (!mShouldUpdateImsConfigOnDisconnect
-                && reason != DataEnabledSettings.REASON_REGISTERED) {
+                && reason != DataEnabledSettings.REASON_REGISTERED && mCarrierConfigLoaded) {
             // This will call into updateVideoCallFeatureValue and eventually all clients will be
             // asynchronously notified that the availability of VT over LTE has changed.
             if (mImsManager != null) {
@@ -3606,10 +3723,73 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
     }
 
     /**
+     * Registers for changes to network connectivity.  Specifically requests the availability of new
+     * WIFI networks which an IMS video call could potentially hand over to.
+     */
+    private void registerForConnectivityChanges() {
+        if (mIsMonitoringConnectivity || !mNotifyVtHandoverToWifiFail) {
+            return;
+        }
+        ConnectivityManager cm = (ConnectivityManager) mPhone.getContext()
+                .getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (cm != null) {
+            Rlog.i(LOG_TAG, "registerForConnectivityChanges");
+            NetworkCapabilities capabilities = new NetworkCapabilities();
+            capabilities.addTransportType(NetworkCapabilities.TRANSPORT_WIFI);
+            NetworkRequest.Builder builder = new NetworkRequest.Builder();
+            builder.setCapabilities(capabilities);
+            cm.registerNetworkCallback(builder.build(), mNetworkCallback);
+            mIsMonitoringConnectivity = true;
+        }
+    }
+
+    /**
+     * Unregister for connectivity changes.  Will be called when a call disconnects or if the call
+     * ends up handing over to WIFI.
+     */
+    private void unregisterForConnectivityChanges() {
+        if (!mIsMonitoringConnectivity || !mNotifyVtHandoverToWifiFail) {
+            return;
+        }
+        ConnectivityManager cm = (ConnectivityManager) mPhone.getContext()
+                .getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (cm != null) {
+            Rlog.i(LOG_TAG, "unregisterForConnectivityChanges");
+            cm.unregisterNetworkCallback(mNetworkCallback);
+            mIsMonitoringConnectivity = false;
+        }
+    }
+
+    /**
+     * If the foreground call is a video call, schedule a handover check if one is not already
+     * scheduled.  This method is intended ONLY for use when scheduling to watch for mid-call
+     * handovers.
+     */
+    private void scheduleHandoverCheck() {
+        ImsCall fgCall = mForegroundCall.getImsCall();
+        ImsPhoneConnection conn = mForegroundCall.getFirstConnection();
+        if (!mNotifyVtHandoverToWifiFail || fgCall == null || !fgCall.isVideoCall() || conn == null
+                || conn.getDisconnectCause() != DisconnectCause.NOT_DISCONNECTED) {
+            return;
+        }
+
+        if (!hasMessages(EVENT_CHECK_FOR_WIFI_HANDOVER)) {
+            Rlog.i(LOG_TAG, "scheduleHandoverCheck: schedule");
+            sendMessageDelayed(obtainMessage(EVENT_CHECK_FOR_WIFI_HANDOVER, fgCall),
+                    HANDOVER_TO_WIFI_TIMEOUT_MS);
+        }
+    }
+
+    /**
      * @return {@code true} if downgrading of a video call to audio is supported.
      */
     public boolean isCarrierDowngradeOfVtCallSupported() {
         return mSupportDowngradeVtToAudio;
+    }
+
+    @VisibleForTesting
+    public void setDataEnabled(boolean isDataEnabled) {
+        mIsDataEnabled = isDataEnabled;
     }
 
     private void handleFeatureCapabilityChanged(int serviceClass,

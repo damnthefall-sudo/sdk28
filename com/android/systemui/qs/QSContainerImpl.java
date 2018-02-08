@@ -17,13 +17,18 @@
 package com.android.systemui.qs;
 
 import android.content.Context;
+import android.graphics.Canvas;
+import android.graphics.Path;
 import android.graphics.Point;
 import android.util.AttributeSet;
+import android.util.Log;
 import android.view.View;
 import android.widget.FrameLayout;
 
+import com.android.settingslib.Utils;
 import com.android.systemui.R;
 import com.android.systemui.qs.customize.QSCustomizer;
+import com.android.systemui.statusbar.ExpandableOutlineView;
 
 /**
  * Wrapper view with background which contains {@link QSPanel} and {@link BaseStatusBarHeader}
@@ -31,6 +36,7 @@ import com.android.systemui.qs.customize.QSCustomizer;
 public class QSContainerImpl extends FrameLayout {
 
     private final Point mSizePoint = new Point();
+    private final Path mClipPath = new Path();
 
     private int mHeightOverride = -1;
     protected View mQSPanel;
@@ -39,7 +45,9 @@ public class QSContainerImpl extends FrameLayout {
     protected float mQsExpansion;
     private QSCustomizer mQSCustomizer;
     private View mQSFooter;
-    private float mFullElevation;
+    private View mBackground;
+    private float mRadius;
+    private int mSideMargins;
 
     public QSContainerImpl(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -53,10 +61,14 @@ public class QSContainerImpl extends FrameLayout {
         mHeader = findViewById(R.id.header);
         mQSCustomizer = findViewById(R.id.qs_customize);
         mQSFooter = findViewById(R.id.qs_footer);
-        mFullElevation = mQSPanel.getElevation();
+        mBackground = findViewById(R.id.quick_settings_background);
+        mRadius = getResources().getDimensionPixelSize(
+                Utils.getThemeAttr(mContext, android.R.attr.dialogCornerRadius));
+        mSideMargins = getResources().getDimensionPixelSize(R.dimen.notification_side_paddings);
 
         setClickable(true);
         setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
+        setMargins();
     }
 
     @Override
@@ -93,6 +105,18 @@ public class QSContainerImpl extends FrameLayout {
         updateExpansion();
     }
 
+    @Override
+    protected boolean drawChild(Canvas canvas, View child, long drawingTime) {
+        boolean ret;
+        canvas.save();
+        if (child != mQSCustomizer) {
+            canvas.clipPath(mClipPath);
+        }
+        ret = super.drawChild(canvas, child, drawingTime);
+        canvas.restore();
+        return ret;
+    }
+
     /**
      * Overrides the height of this view (post-layout), so that the content is clipped to that
      * height and the background is set to that height.
@@ -110,6 +134,12 @@ public class QSContainerImpl extends FrameLayout {
         mQSDetail.setBottom(getTop() + height);
         // Pin QS Footer to the bottom of the panel.
         mQSFooter.setTranslationY(height - mQSFooter.getHeight());
+        mBackground.setTop(mQSPanel.getTop());
+        mBackground.setBottom(height);
+
+        ExpandableOutlineView.getRoundedRectPath(0, 0, getWidth(), height, mRadius,
+                mRadius,
+                mClipPath);
     }
 
     protected int calculateContainerHeight() {
@@ -122,5 +152,20 @@ public class QSContainerImpl extends FrameLayout {
     public void setExpansion(float expansion) {
         mQsExpansion = expansion;
         updateExpansion();
+    }
+
+    private void setMargins() {
+        setMargins(mQSDetail);
+        setMargins(mBackground);
+        setMargins(mQSFooter);
+        setMargins(mQSPanel);
+        setMargins(mHeader);
+        setMargins(mQSCustomizer);
+    }
+
+    private void setMargins(View view) {
+        FrameLayout.LayoutParams lp = (LayoutParams) view.getLayoutParams();
+        lp.rightMargin = mSideMargins;
+        lp.leftMargin = mSideMargins;
     }
 }

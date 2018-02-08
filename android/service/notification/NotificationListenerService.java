@@ -55,6 +55,7 @@ import android.util.Log;
 import android.widget.RemoteViews;
 
 import com.android.internal.annotations.GuardedBy;
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.os.SomeArgs;
 
 import java.lang.annotation.Retention;
@@ -890,6 +891,8 @@ public abstract class NotificationListenerService extends Service {
                 createLegacyIconExtras(notification);
                 // populate remote views for older clients.
                 maybePopulateRemoteViews(notification);
+                // populate people for older clients.
+                maybePopulatePeople(notification);
             } catch (IllegalArgumentException e) {
                 if (corruptNotifications == null) {
                     corruptNotifications = new ArrayList<>(N);
@@ -1175,6 +1178,25 @@ public abstract class NotificationListenerService extends Service {
             notification.contentView = content;
             notification.bigContentView = big;
             notification.headsUpContentView = headsUp;
+        }
+    }
+
+    /**
+     * Populates remote views for pre-P targeting apps.
+     */
+    private void maybePopulatePeople(Notification notification) {
+        if (getContext().getApplicationInfo().targetSdkVersion < Build.VERSION_CODES.P) {
+            ArrayList<Notification.Person> people = notification.extras.getParcelableArrayList(
+                    Notification.EXTRA_PEOPLE_LIST);
+            if (people != null && people.isEmpty()) {
+                int size = people.size();
+                String[] peopleArray = new String[size];
+                for (int i = 0; i < size; i++) {
+                    Notification.Person person = people.get(i);
+                    peopleArray[i] = person.resolveToLegacyUri();
+                }
+                notification.extras.putStringArray(Notification.EXTRA_PEOPLE, peopleArray);
+            }
         }
     }
 
@@ -1522,7 +1544,11 @@ public abstract class NotificationListenerService extends Service {
             return mShowBadge;
         }
 
-        private void populate(String key, int rank, boolean matchesInterruptionFilter,
+        /**
+         * @hide
+         */
+        @VisibleForTesting
+        public void populate(String key, int rank, boolean matchesInterruptionFilter,
                 int visibilityOverride, int suppressedVisualEffects, int importance,
                 CharSequence explanation, String overrideGroupKey,
                 NotificationChannel channel, ArrayList<String> overridePeople,

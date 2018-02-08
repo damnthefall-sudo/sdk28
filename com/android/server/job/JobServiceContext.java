@@ -38,12 +38,14 @@ import android.os.PowerManager;
 import android.os.RemoteException;
 import android.os.UserHandle;
 import android.os.WorkSource;
+import android.util.EventLog;
 import android.util.Slog;
 import android.util.TimeUtils;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.app.IBatteryStats;
+import com.android.server.EventLogTags;
 import com.android.server.job.controllers.JobStatus;
 
 /**
@@ -222,17 +224,20 @@ public final class JobServiceContext implements ServiceConnection {
                     isDeadlineExpired, triggeredUris, triggeredAuthorities, job.network);
             mExecutionStartTimeElapsed = sElapsedRealtimeClock.millis();
 
-            if (DEBUG_STANDBY) {
-                final long whenDeferred = job.getWhenStandbyDeferred();
-                if (whenDeferred > 0) {
+            final long whenDeferred = job.getWhenStandbyDeferred();
+            if (whenDeferred > 0) {
+                final long deferral = mExecutionStartTimeElapsed - whenDeferred;
+                EventLog.writeEvent(EventLogTags.JOB_DEFERRED_EXECUTION, deferral);
+                if (DEBUG_STANDBY) {
                     StringBuilder sb = new StringBuilder(128);
                     sb.append("Starting job deferred for standby by ");
-                    TimeUtils.formatDuration(mExecutionStartTimeElapsed - whenDeferred, sb);
-                    sb.append(" : ");
+                    TimeUtils.formatDuration(deferral, sb);
+                    sb.append(" ms : ");
                     sb.append(job.toShortString());
                     Slog.v(TAG, sb.toString());
                 }
             }
+
             // Once we'e begun executing a job, we by definition no longer care whether
             // it was inflated from disk with not-yet-coherent delay/deadline bounds.
             job.clearPersistedUtcTimes();
@@ -307,13 +312,14 @@ public final class JobServiceContext implements ServiceConnection {
         return mTimeoutElapsed;
     }
 
-    boolean timeoutIfExecutingLocked(String pkgName, int userId, boolean matchJobId, int jobId) {
+    boolean timeoutIfExecutingLocked(String pkgName, int userId, boolean matchJobId, int jobId,
+            String reason) {
         final JobStatus executing = getRunningJobLocked();
         if (executing != null && (userId == UserHandle.USER_ALL || userId == executing.getUserId())
                 && (pkgName == null || pkgName.equals(executing.getSourcePackageName()))
                 && (!matchJobId || jobId == executing.getJobId())) {
             if (mVerb == VERB_EXECUTING) {
-                mParams.setStopReason(JobParameters.REASON_TIMEOUT);
+                mParams.setStopReason(JobParameters.REASON_TIMEOUT, reason);
                 sendStopMessageLocked("force timeout from shell");
                 return true;
             }
@@ -532,7 +538,7 @@ public final class JobServiceContext implements ServiceConnection {
             }
             return;
         }
-        mParams.setStopReason(arg1);
+        mParams.setStopReason(arg1, debugReason);
         if (arg1 == JobParameters.REASON_PREEMPT) {
             mPreferredUid = mRunningJob != null ? mRunningJob.getUid() :
                     NO_PREFERRED_UID;
@@ -682,7 +688,7 @@ public final class JobServiceContext implements ServiceConnection {
                 // Not an error - client ran out of time.
                 Slog.i(TAG, "Client timed out while executing (no jobFinished received), " +
                         "sending onStop: " + getRunningJobNameLocked());
-                mParams.setStopReason(JobParameters.REASON_TIMEOUT);
+                mParams.setStopReason(JobParameters.REASON_TIMEOUT, "client timed out");
                 sendStopMessageLocked("timeout while executing");
                 break;
             default:

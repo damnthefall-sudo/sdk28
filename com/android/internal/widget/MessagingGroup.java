@@ -20,17 +20,12 @@ import android.annotation.AttrRes;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.StyleRes;
+import android.app.Notification;
 import android.content.Context;
-import android.graphics.Color;
-import android.graphics.ColorFilter;
-import android.graphics.PorterDuff;
-import android.graphics.PorterDuffColorFilter;
-import android.graphics.drawable.Drawable;
 import android.graphics.drawable.Icon;
 import android.text.TextUtils;
 import android.util.AttributeSet;
 import android.util.Pools;
-import android.view.Gravity;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -41,7 +36,6 @@ import android.widget.LinearLayout;
 import android.widget.RemoteViews;
 
 import com.android.internal.R;
-import com.android.internal.util.NotificationColorUtil;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -60,12 +54,13 @@ public class MessagingGroup extends LinearLayout implements MessagingLinearLayou
     private int mLayoutColor;
     private CharSequence mAvatarName = "";
     private Icon mAvatarIcon;
-    private ColorFilter mMessageBackgroundFilter;
     private int mTextColor;
     private List<MessagingMessage> mMessages;
     private ArrayList<MessagingMessage> mAddedMessages = new ArrayList<>();
     private boolean mFirstLayout;
     private boolean mIsHidingAnimated;
+    private boolean mNeedsGeneratedAvatar;
+    private Notification.Person mSender;
 
     public MessagingGroup(@NonNull Context context) {
         super(context);
@@ -94,27 +89,23 @@ public class MessagingGroup extends LinearLayout implements MessagingLinearLayou
         mAvatarView = findViewById(R.id.message_icon);
     }
 
-    public void setSender(CharSequence sender) {
-        if (sender == null) {
-            mAvatarView.setVisibility(GONE);
-            mSenderName.setVisibility(GONE);
-            setGravity(Gravity.END);
-            mMessageBackgroundFilter = new PorterDuffColorFilter(mLayoutColor,
-                    PorterDuff.Mode.SRC_ATOP);
-            mTextColor = NotificationColorUtil.isColorLight(mLayoutColor) ? getNormalTextColor()
-                    : Color.WHITE;
-        } else {
-            mSenderName.setText(sender);
-            mAvatarView.setVisibility(VISIBLE);
-            mSenderName.setVisibility(VISIBLE);
-            setGravity(Gravity.START);
-            mMessageBackgroundFilter = null;
-            mTextColor = getNormalTextColor();
+    public void setSender(Notification.Person sender, CharSequence nameOverride) {
+        mSender = sender;
+        if (nameOverride == null) {
+            nameOverride = sender.getName();
         }
+        mSenderName.setText(nameOverride);
+        mNeedsGeneratedAvatar = sender.getIcon() == null;
+        if (!mNeedsGeneratedAvatar) {
+            setAvatar(sender.getIcon());
+        }
+        mAvatarView.setVisibility(VISIBLE);
+        mSenderName.setVisibility(VISIBLE);
+        mTextColor = getNormalTextColor();
     }
 
     private int getNormalTextColor() {
-        return mContext.getColor(R.color.notification_primary_text_color_light);
+        return mContext.getColor(R.color.notification_secondary_text_color_light);
     }
 
     public void setAvatar(Icon icon) {
@@ -205,10 +196,6 @@ public class MessagingGroup extends LinearLayout implements MessagingLinearLayou
 
     public CharSequence getSenderName() {
         return mSenderName.getText();
-    }
-
-    public void setSenderVisible(boolean visible) {
-        mSenderName.setVisibility(visible ? VISIBLE : GONE);
     }
 
     public static void dropCache() {
@@ -317,12 +304,6 @@ public class MessagingGroup extends LinearLayout implements MessagingLinearLayou
                 mMessageContainer.removeView(message);
                 mMessageContainer.addView(message, messageIndex);
             }
-            // Let's make sure the message color is correct
-            Drawable targetDrawable = message.getBackground();
-
-            if (targetDrawable != null) {
-                targetDrawable.mutate().setColorFilter(mMessageBackgroundFilter);
-            }
             message.setTextColor(mTextColor);
         }
         mMessages = group;
@@ -379,7 +360,7 @@ public class MessagingGroup extends LinearLayout implements MessagingLinearLayou
         return 0;
     }
 
-    public View getSender() {
+    public View getSenderView() {
         return mSenderName;
     }
 
@@ -389,5 +370,13 @@ public class MessagingGroup extends LinearLayout implements MessagingLinearLayou
 
     public MessagingLinearLayout getMessageContainer() {
         return mMessageContainer;
+    }
+
+    public boolean needsGeneratedAvatar() {
+        return mNeedsGeneratedAvatar;
+    }
+
+    public Notification.Person getSender() {
+        return mSender;
     }
 }

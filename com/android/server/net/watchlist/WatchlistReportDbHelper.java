@@ -16,15 +16,18 @@
 
 package com.android.server.net.watchlist;
 
+import android.annotation.Nullable;
 import android.content.ContentValues;
 import android.content.Context;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
+import android.os.Environment;
 import android.util.Pair;
 
 import com.android.internal.util.HexDump;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.GregorianCalendar;
 import java.util.HashMap;
@@ -74,18 +77,28 @@ class WatchlistReportDbHelper extends SQLiteOpenHelper {
      */
     public static class AggregatedResult {
         // A list of digests that visited c&c domain or ip before.
-        Set<String> appDigestList;
+        final Set<String> appDigestList;
 
         // The c&c domain or ip visited before.
-        String cncDomainVisited;
+        @Nullable final String cncDomainVisited;
 
         // A list of app digests and c&c domain visited.
-        HashMap<String, String> appDigestCNCList;
+        final HashMap<String, String> appDigestCNCList;
+
+        public AggregatedResult(Set<String> appDigestList, String cncDomainVisited,
+                HashMap<String, String> appDigestCNCList) {
+            this.appDigestList = appDigestList;
+            this.cncDomainVisited = cncDomainVisited;
+            this.appDigestCNCList = appDigestCNCList;
+        }
+    }
+
+    static File getSystemWatchlistDbFile() {
+        return new File(Environment.getDataSystemDirectory(), NAME);
     }
 
     private WatchlistReportDbHelper(Context context) {
-        super(context, WatchlistSettings.getSystemWatchlistFile(NAME).getAbsolutePath(),
-                null, VERSION);
+        super(context, getSystemWatchlistDbFile().getAbsolutePath(), null, VERSION);
         // Memory optimization - close idle connections after 30s of inactivity
         setIdleConnectionTimeout(IDLE_CONNECTION_TIMEOUT_MS);
     }
@@ -143,26 +156,24 @@ class WatchlistReportDbHelper extends SQLiteOpenHelper {
                     WhiteListReportContract.TABLE, DIGEST_DOMAIN_PROJECTION, selectStatement,
                     new String[]{"" + twoDaysBefore, "" + yesterday}, null, null,
                     null, null);
-            if (c == null || c.getCount() == 0) {
+            if (c == null) {
                 return null;
             }
-            final AggregatedResult result = new AggregatedResult();
-            result.cncDomainVisited = null;
-            // After aggregation, each digest maximum will have only 1 record.
-            result.appDigestList = new HashSet<>();
-            result.appDigestCNCList = new HashMap<>();
+            final HashSet<String> appDigestList = new HashSet<>();
+            final HashMap<String, String> appDigestCNCList = new HashMap<>();
+            String cncDomainVisited = null;
             while (c.moveToNext()) {
                 // We use hex string here as byte[] cannot be a key in HashMap.
                 String digestHexStr = HexDump.toHexString(c.getBlob(INDEX_DIGEST));
                 String cncDomain = c.getString(INDEX_CNC_DOMAIN);
 
-                result.appDigestList.add(digestHexStr);
-                if (result.cncDomainVisited != null) {
-                    result.cncDomainVisited = cncDomain;
+                appDigestList.add(digestHexStr);
+                if (cncDomainVisited != null) {
+                    cncDomainVisited = cncDomain;
                 }
-                result.appDigestCNCList.put(digestHexStr, cncDomain);
+                appDigestCNCList.put(digestHexStr, cncDomain);
             }
-            return result;
+            return new AggregatedResult(appDigestList, cncDomainVisited, appDigestCNCList);
         } finally {
             if (c != null) {
                 c.close();

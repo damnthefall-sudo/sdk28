@@ -29,6 +29,7 @@ import com.android.internal.util.IndentingPrintWriter;
 
 import android.Manifest;
 import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.annotation.UserIdInt;
 import android.app.AppOpsManager;
 import android.content.Context;
@@ -270,8 +271,6 @@ public final class DisplayManagerService extends SystemService {
 
     private final Injector mInjector;
 
-    private final BrightnessTracker mBrightnessTracker;
-
     public DisplayManagerService(Context context) {
         this(context, new Injector());
     }
@@ -290,7 +289,6 @@ public final class DisplayManagerService extends SystemService {
 
         PowerManager pm = (PowerManager) mContext.getSystemService(Context.POWER_SERVICE);
         mGlobalDisplayBrightness = pm.getDefaultScreenBrightnessSetting();
-        mBrightnessTracker = new BrightnessTracker(context, null);
         mCurrentUserId = UserHandle.USER_SYSTEM;
     }
 
@@ -1008,11 +1006,13 @@ public final class DisplayManagerService extends SystemService {
     }
 
     private void setBrightnessConfigurationForUserInternal(
-            @NonNull BrightnessConfiguration c, @UserIdInt int userId) {
+            @NonNull BrightnessConfiguration c, @UserIdInt int userId,
+            @Nullable String packageName) {
         final int userSerial = getUserManager().getUserSerialNumber(userId);
         synchronized (mSyncRoot) {
             try {
-                mPersistentDataStore.setBrightnessConfigurationForUser(c, userSerial);
+                mPersistentDataStore.setBrightnessConfigurationForUser(c, userSerial,
+                        packageName);
             } finally {
                 mPersistentDataStore.saveIfNeeded();
             }
@@ -1339,9 +1339,6 @@ public final class DisplayManagerService extends SystemService {
 
             pw.println();
             mPersistentDataStore.dump(pw);
-
-            pw.println();
-            mBrightnessTracker.dump(pw);
         }
     }
 
@@ -1417,10 +1414,6 @@ public final class DisplayManagerService extends SystemService {
                             mTempExternalTouchViewport, mTempVirtualTouchViewports);
                     break;
                 }
-
-                case MSG_REGISTER_BRIGHTNESS_TRACKER:
-                    mBrightnessTracker.start();
-                    break;
 
                 case MSG_LOAD_BRIGHTNESS_CONFIGURATION:
                     loadBrightnessConfiguration();
@@ -1833,22 +1826,9 @@ public final class DisplayManagerService extends SystemService {
             final int userId = UserHandle.getUserId(callingUid);
             final long token = Binder.clearCallingIdentity();
             try {
-                return mBrightnessTracker.getEvents(userId, hasUsageStats);
-            } finally {
-                Binder.restoreCallingIdentity(token);
-            }
-        }
-
-        @Override // Binder call
-        public void setBrightness(int brightness) {
-            // STOPSHIP - remove when adaptive brightness controller accepts curves.
-            mContext.enforceCallingOrSelfPermission(
-                    Manifest.permission.BRIGHTNESS_SLIDER_USAGE,
-                    "Permission to set brightness.");
-            int userId = UserHandle.getUserId(Binder.getCallingUid());
-            final long token = Binder.clearCallingIdentity();
-            try {
-                mBrightnessTracker.setBrightness(brightness, userId);
+                synchronized (mSyncRoot) {
+                    return mDisplayPowerController.getBrightnessEvents(userId, hasUsageStats);
+                }
             } finally {
                 Binder.restoreCallingIdentity(token);
             }
@@ -1856,7 +1836,7 @@ public final class DisplayManagerService extends SystemService {
 
         @Override // Binder call
         public void setBrightnessConfigurationForUser(
-                BrightnessConfiguration c, @UserIdInt int userId) {
+                BrightnessConfiguration c, @UserIdInt int userId, String packageName) {
             mContext.enforceCallingOrSelfPermission(
                     Manifest.permission.CONFIGURE_DISPLAY_BRIGHTNESS,
                     "Permission required to change the display's brightness configuration");
@@ -1866,10 +1846,42 @@ public final class DisplayManagerService extends SystemService {
                         "Permission required to change the display brightness"
                         + " configuration of another user");
             }
-            Preconditions.checkNotNull(c);
+            if (packageName != null && !validatePackageName(getCallingUid(), packageName)) {
+                packageName = null;
+            }
             final long token = Binder.clearCallingIdentity();
             try {
-                setBrightnessConfigurationForUserInternal(c, userId);
+                setBrightnessConfigurationForUserInternal(c, userId, packageName);
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        @Override // Binder call
+        public void setTemporaryBrightness(int brightness) {
+            mContext.enforceCallingOrSelfPermission(
+                    Manifest.permission.CONTROL_DISPLAY_BRIGHTNESS,
+                    "Permission required to set the display's brightness");
+            final long token = Binder.clearCallingIdentity();
+            try {
+                synchronized (mSyncRoot) {
+                    mDisplayPowerController.setTemporaryBrightness(brightness);
+                }
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        @Override // Binder call
+        public void setTemporaryAutoBrightnessAdjustment(float adjustment) {
+            mContext.enforceCallingOrSelfPermission(
+                    Manifest.permission.CONTROL_DISPLAY_BRIGHTNESS,
+                    "Permission required to set the display's auto brightness adjustment");
+            final long token = Binder.clearCallingIdentity();
+            try {
+                synchronized (mSyncRoot) {
+                    mDisplayPowerController.setTemporaryAutoBrightnessAdjustment(adjustment);
+                }
             } finally {
                 Binder.restoreCallingIdentity(token);
             }
@@ -2028,7 +2040,18 @@ public final class DisplayManagerService extends SystemService {
 
         @Override
         public void persistBrightnessSliderEvents() {
-            mBrightnessTracker.persistEvents();
+            synchronized (mSyncRoot) {
+                mDisplayPowerController.persistBrightnessSliderEvents();
+            }
+        }
+
+        @Override
+        public void onOverlayChanged() {
+            synchronized (mSyncRoot) {
+                for (int i = 0; i < mDisplayDevices.size(); i++) {
+                    mDisplayDevices.get(i).onOverlayChangedLocked();
+                }
+            }
         }
     }
 }

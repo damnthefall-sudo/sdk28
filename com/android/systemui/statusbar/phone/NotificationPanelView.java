@@ -72,6 +72,7 @@ import com.android.systemui.statusbar.policy.OnHeadsUpChangedListener;
 import com.android.systemui.statusbar.stack.NotificationStackScrollLayout;
 import com.android.systemui.statusbar.stack.StackStateAnimator;
 
+import java.util.Collection;
 import java.util.List;
 
 public class NotificationPanelView extends PanelView implements
@@ -309,7 +310,7 @@ public class NotificationPanelView extends PanelView implements
         mIndicationBottomPadding = getResources().getDimensionPixelSize(
                 R.dimen.keyguard_indication_bottom_padding);
         mQsNotificationTopPadding = getResources().getDimensionPixelSize(
-                R.dimen.qs_notification_keyguard_padding);
+                R.dimen.qs_notification_padding);
     }
 
     public void updateResources() {
@@ -451,7 +452,8 @@ public class NotificationPanelView extends PanelView implements
         boolean animate = mNotificationStackScroller.isAddOrRemoveAnimationPending();
         int stackScrollerPadding;
         if (mStatusBarState != StatusBarState.KEYGUARD) {
-            stackScrollerPadding = (mQs != null ? mQs.getHeader().getHeight() : 0) + mQsPeekHeight;
+            stackScrollerPadding = (mQs != null ? mQs.getHeader().getHeight() : 0) + mQsPeekHeight
+            +  mQsNotificationTopPadding;
             mTopPaddingAdjustment = 0;
         } else {
             mClockPositionAlgorithm.setup(
@@ -477,6 +479,7 @@ public class NotificationPanelView extends PanelView implements
         }
         mNotificationStackScroller.setIntrinsicPadding(stackScrollerPadding);
         mNotificationStackScroller.setDarkShelfOffsetX(mClockPositionResult.clockX);
+        mKeyguardBottomArea.setBurnInXOffset(mClockPositionResult.clockX);
         requestScrollerTopPaddingUpdate(animate);
     }
 
@@ -1381,7 +1384,7 @@ public class NotificationPanelView extends PanelView implements
                     mNotificationStackScroller.getIntrinsicPadding(),
                     mQsMaxExpansionHeight + mQsNotificationTopPadding);
         } else {
-            return mQsExpansionHeight;
+            return mQsExpansionHeight + mQsNotificationTopPadding;
         }
     }
 
@@ -2607,7 +2610,8 @@ public class NotificationPanelView extends PanelView implements
 
     private void setDarkAmount(float amount) {
         mDarkAmount = amount;
-        mKeyguardStatusView.setDark(mDarkAmount);
+        mKeyguardStatusView.setDarkAmount(mDarkAmount);
+        mKeyguardBottomArea.setDarkAmount(mDarkAmount);
         positionClockAndNotifications();
     }
 
@@ -2618,8 +2622,10 @@ public class NotificationPanelView extends PanelView implements
         }
     }
 
-    public void setPulsing(boolean pulsing) {
-        mKeyguardStatusView.setPulsing(pulsing);
+    public void setPulsing(Collection<HeadsUpManager.HeadsUpEntry> pulsing) {
+        mKeyguardStatusView.setPulsing(pulsing != null);
+        mNotificationStackScroller.setPulsing(pulsing, mKeyguardStatusView.getLocationOnScreen()[1]
+                + mKeyguardStatusView.getClockBottom());
     }
 
     public void setAmbientIndicationBottomPadding(int ambientIndicationBottomPadding) {
@@ -2629,8 +2635,9 @@ public class NotificationPanelView extends PanelView implements
         }
     }
 
-    public void refreshTime() {
+    public void dozeTimeTick() {
         mKeyguardStatusView.refreshTime();
+        mKeyguardBottomArea.dozeTimeTick();
         if (mDarkAmount > 0) {
             positionClockAndNotifications();
         }

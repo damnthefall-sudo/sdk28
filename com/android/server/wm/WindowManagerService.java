@@ -16,6 +16,7 @@
 
 package com.android.server.wm;
 
+import static android.Manifest.permission.CONTROL_REMOTE_APP_TRANSITION_ANIMATIONS;
 import static android.Manifest.permission.MANAGE_APP_TOKENS;
 import static android.Manifest.permission.READ_FRAME_BUFFER;
 import static android.Manifest.permission.REGISTER_WINDOW_MANAGER_LISTENERS;
@@ -23,6 +24,8 @@ import static android.Manifest.permission.RESTRICTED_VR_ACCESS;
 import static android.app.ActivityManager.SPLIT_SCREEN_CREATE_MODE_TOP_OR_LEFT;
 import static android.app.AppOpsManager.OP_SYSTEM_ALERT_WINDOW;
 import static android.app.StatusBarManager.DISABLE_MASK;
+import static android.app.WindowConfiguration.ACTIVITY_TYPE_HOME;
+import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_PRIMARY;
 import static android.app.admin.DevicePolicyManager.ACTION_DEVICE_POLICY_MANAGER_STATE_CHANGED;
 import static android.content.Intent.ACTION_USER_REMOVED;
 import static android.content.Intent.EXTRA_USER_HANDLE;
@@ -87,7 +90,6 @@ import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_ORIENTATION;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_SCREENSHOT;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_SCREEN_ON;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_STARTING_WINDOW;
-import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_TASK_POSITIONING;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_VISIBILITY;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_WALLPAPER_LIGHT;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_WINDOW_MOVEMENT;
@@ -123,6 +125,7 @@ import android.app.ActivityThread;
 import android.app.AppOpsManager;
 import android.app.IActivityManager;
 import android.app.IAssistDataReceiver;
+import android.app.WindowConfiguration;
 import android.content.BroadcastReceiver;
 import android.content.ContentResolver;
 import android.content.Context;
@@ -196,6 +199,7 @@ import android.view.IDockedStackListener;
 import android.view.IInputFilter;
 import android.view.IOnKeyguardExitResult;
 import android.view.IPinnedStackListener;
+import android.view.IRecentsAnimationRunner;
 import android.view.IRotationWatcher;
 import android.view.IWallpaperVisibilityListener;
 import android.view.IWindow;
@@ -210,17 +214,18 @@ import android.view.KeyEvent;
 import android.view.MagnificationSpec;
 import android.view.MotionEvent;
 import android.view.PointerIcon;
+import android.view.RemoteAnimationAdapter;
 import android.view.Surface;
 import android.view.SurfaceControl;
-import android.view.SurfaceControl.Builder;
 import android.view.SurfaceSession;
 import android.view.View;
 import android.view.WindowContentFrameStats;
 import android.view.WindowManager;
 import android.view.WindowManager.LayoutParams;
+import android.view.WindowManager.TransitionFlags;
+import android.view.WindowManager.TransitionType;
 import android.view.WindowManagerGlobal;
 import android.view.WindowManagerPolicyConstants.PointerEventListener;
-import android.view.animation.Animation;
 import android.view.inputmethod.InputMethodManagerInternal;
 
 import com.android.internal.R;
@@ -527,6 +532,7 @@ public class WindowManagerService extends IWindowManager.Stub
     IInputMethodManager mInputMethodManager;
 
     AccessibilityController mAccessibilityController;
+    private RecentsAnimationController mRecentsAnimationController;
 
     Watermark mWatermark;
     StrictModeFlash mStrictModeFlash;
@@ -928,7 +934,6 @@ public class WindowManagerService extends IWindowManager.Stub
             boolean haveInputMethods, boolean showBootMsgs, boolean onlyCore,
             WindowManagerPolicy policy) {
         installLock(this, INDEX_WINDOW);
-        mRoot = new RootWindowContainer(this);
         mContext = context;
         mHaveInputMethods = haveInputMethods;
         mAllowBootMessages = showBootMsgs;
@@ -952,8 +957,11 @@ public class WindowManagerService extends IWindowManager.Stub
         mDisplaySettings = new DisplaySettings();
         mDisplaySettings.readSettingsLocked();
 
-        mWindowPlacerLocked = new WindowSurfacePlacer(this);
         mPolicy = policy;
+        mAnimator = new WindowAnimator(this);
+        mRoot = new RootWindowContainer(this);
+
+        mWindowPlacerLocked = new WindowSurfacePlacer(this);
         mTaskSnapshotController = new TaskSnapshotController(this);
 
         mWindowTracing = WindowTracing.createDefaultAndStartLooper(context);
@@ -1051,7 +1059,6 @@ public class WindowManagerService extends IWindowManager.Stub
                 PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ON_AFTER_RELEASE, TAG_WM);
         mHoldingScreenWakeLock.setReferenceCounted(false);
 
-        mAnimator = new WindowAnimator(this);
         mSurfaceAnimationRunner = new SurfaceAnimationRunner();
 
         mAllowTheaterModeWakeFromLayout = context.getResources().getBoolean(
@@ -1539,7 +1546,7 @@ public class WindowManagerService extends IWindowManager.Stub
         // We treat this as if this activity was opening, so we can trigger the app transition
         // animation and piggy-back on existing transition animation infrastructure.
         mOpeningApps.add(atoken);
-        prepareAppTransition(AppTransition.TRANSIT_ACTIVITY_RELAUNCH, ALWAYS_KEEP_CURRENT);
+        prepareAppTransition(WindowManager.TRANSIT_ACTIVITY_RELAUNCH, ALWAYS_KEEP_CURRENT);
         mAppTransition.overridePendingAppTransitionClipReveal(frame.left, frame.top,
                 frame.width(), frame.height());
         executeAppTransition();
@@ -1553,7 +1560,7 @@ public class WindowManagerService extends IWindowManager.Stub
         // we don't set up the transition anymore and just let it go.
         if (mDisplayFrozen && !mOpeningApps.contains(atoken) && atoken.isRelaunching()) {
             mOpeningApps.add(atoken);
-            prepareAppTransition(AppTransition.TRANSIT_NONE, !ALWAYS_KEEP_CURRENT);
+            prepareAppTransition(WindowManager.TRANSIT_NONE, !ALWAYS_KEEP_CURRENT);
             executeAppTransition();
         }
     }
@@ -2508,7 +2515,7 @@ public class WindowManagerService extends IWindowManager.Stub
     }
 
     @Override
-    public void prepareAppTransition(int transit, boolean alwaysKeepCurrent) {
+    public void prepareAppTransition(@TransitionType int transit, boolean alwaysKeepCurrent) {
         prepareAppTransition(transit, alwaysKeepCurrent, 0 /* flags */, false /* forceOverride */);
     }
 
@@ -2521,8 +2528,8 @@ public class WindowManagerService extends IWindowManager.Stub
      *              AppTransition.TRANSIT_FLAG_*.
      * @param forceOverride Always override the transit, not matter what was set previously.
      */
-    public void prepareAppTransition(int transit, boolean alwaysKeepCurrent, int flags,
-            boolean forceOverride) {
+    public void prepareAppTransition(@TransitionType int transit, boolean alwaysKeepCurrent,
+            @TransitionFlags int flags, boolean forceOverride) {
         if (!checkCallingPermission(MANAGE_APP_TOKENS, "prepareAppTransition()")) {
             throw new SecurityException("Requires MANAGE_APP_TOKENS permission");
         }
@@ -2538,7 +2545,7 @@ public class WindowManagerService extends IWindowManager.Stub
     }
 
     @Override
-    public int getPendingAppTransition() {
+    public @TransitionType int getPendingAppTransition() {
         return mAppTransition.getAppTransition();
     }
 
@@ -2623,6 +2630,18 @@ public class WindowManagerService extends IWindowManager.Stub
     }
 
     @Override
+    public void overridePendingAppTransitionRemote(RemoteAnimationAdapter remoteAnimationAdapter) {
+        if (!checkCallingPermission(CONTROL_REMOTE_APP_TRANSITION_ANIMATIONS,
+                "overridePendingAppTransitionRemote()")) {
+            throw new SecurityException(
+                    "Requires CONTROL_REMOTE_APP_TRANSITION_ANIMATIONS permission");
+        }
+        synchronized (mWindowMap) {
+            mAppTransition.overridePendingAppTransitionRemote(remoteAnimationAdapter);
+        }
+    }
+
+    @Override
     public void endProlongedAnimations() {
         synchronized (mWindowMap) {
             for (final WindowState win : mWindowMap.values()) {
@@ -2652,6 +2671,39 @@ public class WindowManagerService extends IWindowManager.Stub
                 } finally {
                     Binder.restoreCallingIdentity(origId);
                 }
+            }
+        }
+    }
+
+    public void initializeRecentsAnimation(
+            IRecentsAnimationRunner recentsAnimationRunner,
+            RecentsAnimationController.RecentsAnimationCallbacks callbacks, int displayId) {
+        synchronized (mWindowMap) {
+            cancelRecentsAnimation();
+            mRecentsAnimationController = new RecentsAnimationController(this,
+                    recentsAnimationRunner, callbacks, displayId);
+        }
+    }
+
+    public RecentsAnimationController getRecentsAnimationController() {
+        return mRecentsAnimationController;
+    }
+
+    public void cancelRecentsAnimation() {
+        synchronized (mWindowMap) {
+            if (mRecentsAnimationController != null) {
+                // This call will call through to cleanupAnimation() below after the animation is
+                // canceled
+                mRecentsAnimationController.cancelAnimation();
+            }
+        }
+    }
+
+    public void cleanupRecentsAnimation() {
+        synchronized (mWindowMap) {
+            if (mRecentsAnimationController != null) {
+                mRecentsAnimationController.cleanupAnimation();
+                mRecentsAnimationController = null;
             }
         }
     }
@@ -2940,10 +2992,10 @@ public class WindowManagerService extends IWindowManager.Stub
     }
 
     @Override
-    public void dismissKeyguard(IKeyguardDismissCallback callback) {
+    public void dismissKeyguard(IKeyguardDismissCallback callback, CharSequence message) {
         checkCallingPermission(permission.CONTROL_KEYGUARD, "dismissKeyguard");
         synchronized(mWindowMap) {
-            mPolicy.dismissKeyguardLw(callback);
+            mPolicy.dismissKeyguardLw(callback, message);
         }
     }
 
@@ -5326,6 +5378,25 @@ public class WindowManagerService extends IWindowManager.Stub
         reconfigureDisplayLocked(displayContent);
     }
 
+    @Override
+    public void startWindowTrace(){
+        try {
+            mWindowTracing.startTrace(null /* printwriter */);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public void stopWindowTrace(){
+        mWindowTracing.stopTrace(null /* printwriter */);
+    }
+
+    @Override
+    public boolean isWindowTraceEnabled() {
+        return mWindowTracing.isEnabled();
+    }
+
     // -------------------------------------------------------------
     // Internals
     // -------------------------------------------------------------
@@ -5874,6 +5945,8 @@ public class WindowManagerService extends IWindowManager.Stub
      * the screen is.
      * @see WindowManagerPolicy#getNavBarPosition()
      */
+    @Override
+    @WindowManagerPolicy.NavigationBarPosition
     public int getNavBarPosition() {
         synchronized (mWindowMap) {
             // Perform layout if it was scheduled before to make sure that we get correct nav bar
@@ -5932,8 +6005,8 @@ public class WindowManagerService extends IWindowManager.Stub
         mPolicy.lockNow(options);
     }
 
-    public void showRecentApps(boolean fromHome) {
-        mPolicy.showRecentApps(fromHome);
+    public void showRecentApps() {
+        mPolicy.showRecentApps();
     }
 
     @Override
@@ -6292,6 +6365,10 @@ public class WindowManagerService extends IWindowManager.Stub
             pw.print("  mSkipAppTransitionAnimation=");pw.println(mSkipAppTransitionAnimation);
             pw.println("  mLayoutToAnim:");
             mAppTransition.dump(pw, "    ");
+            if (mRecentsAnimationController != null) {
+                pw.print("  mRecentsAnimationController="); pw.println(mRecentsAnimationController);
+                mRecentsAnimationController.dump(pw, "    ");
+            }
         }
     }
 
@@ -6572,6 +6649,14 @@ public class WindowManagerService extends IWindowManager.Stub
             }
             mAnimator.removeDisplayLocked(displayId);
             mWindowPlacerLocked.requestTraversal();
+        }
+    }
+
+    public void onOverlayChanged() {
+        synchronized (mWindowMap) {
+            mPolicy.onOverlayChangedLw();
+            getDefaultDisplayContentLocked().updateDisplayInfo();
+            requestTraversal();
         }
     }
 
@@ -6876,6 +6961,23 @@ public class WindowManagerService extends IWindowManager.Stub
             }
         } else {
             InputManager.getInstance().setPointerIconType(PointerIcon.TYPE_DEFAULT);
+        }
+    }
+
+    /**
+     * Update a tap exclude region with a rectangular area in the window identified by the provided
+     * id. Touches on this region will not switch focus to this window. Passing an empty rect will
+     * remove the area from the exclude region of this window.
+     */
+    void updateTapExcludeRegion(IWindow client, int regionId, int left, int top, int width,
+            int height) {
+        synchronized (mWindowMap) {
+            final WindowState callingWin = windowForClientLocked(null, client, false);
+            if (callingWin == null) {
+                Slog.w(TAG_WM, "Bad requesting window " + client);
+                return;
+            }
+            callingWin.updateTapExcludeRegion(regionId, left, top, width, height);
         }
     }
 

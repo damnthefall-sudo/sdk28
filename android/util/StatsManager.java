@@ -17,19 +17,33 @@ package android.util;
 
 import android.Manifest;
 import android.annotation.RequiresPermission;
-import android.annotation.SystemApi;
 import android.os.IBinder;
 import android.os.IStatsManager;
 import android.os.RemoteException;
 import android.os.ServiceManager;
+
+
+/*
+ *
+ *
+ *
+ *
+ * THIS ENTIRE FILE IS ONLY TEMPORARY TO PREVENT BREAKAGES OF DEPENDENCIES ON OLD APIS.
+ * The new StatsManager is to be found in android.app.StatsManager.
+ * TODO: Delete this file!
+ *
+ *
+ *
+ *
+ */
+
 
 /**
  * API for StatsD clients to send configurations and retrieve data.
  *
  * @hide
  */
-@SystemApi
-public final class StatsManager {
+public class StatsManager {
     IStatsManager mService;
     private static final String TAG = "StatsManager";
 
@@ -42,10 +56,20 @@ public final class StatsManager {
     }
 
     /**
+     * Temporary to prevent build failures. Will be deleted.
+     */
+    @RequiresPermission(Manifest.permission.DUMP)
+    public boolean addConfiguration(String configKey, byte[] config, String pkg, String cls) {
+        // To prevent breakages of dependencies on old API.
+
+        return false;
+    }
+
+    /**
      * Clients can send a configuration and simultaneously registers the name of a broadcast
      * receiver that listens for when it should request data.
      *
-     * @param configKey An arbitrary string that allows clients to track the configuration.
+     * @param configKey An arbitrary integer that allows clients to track the configuration.
      * @param config    Wire-encoded StatsDConfig proto that specifies metrics (and all
      *                  dependencies eg, conditions and matchers).
      * @param pkg       The package name to receive the broadcast.
@@ -53,7 +77,7 @@ public final class StatsManager {
      * @return true if successful
      */
     @RequiresPermission(Manifest.permission.DUMP)
-    public boolean addConfiguration(String configKey, byte[] config, String pkg, String cls) {
+    public boolean addConfiguration(long configKey, byte[] config, String pkg, String cls) {
         synchronized (this) {
             try {
                 IStatsManager service = getIStatsManagerLocked();
@@ -70,13 +94,22 @@ public final class StatsManager {
     }
 
     /**
+     * Temporary to prevent build failures. Will be deleted.
+     */
+    @RequiresPermission(Manifest.permission.DUMP)
+    public boolean removeConfiguration(String configKey) {
+        // To prevent breakages of old dependencies.
+        return false;
+    }
+
+    /**
      * Remove a configuration from logging.
      *
      * @param configKey Configuration key to remove.
      * @return true if successful
      */
     @RequiresPermission(Manifest.permission.DUMP)
-    public boolean removeConfiguration(String configKey) {
+    public boolean removeConfiguration(long configKey) {
         synchronized (this) {
             try {
                 IStatsManager service = getIStatsManagerLocked();
@@ -93,6 +126,16 @@ public final class StatsManager {
     }
 
     /**
+     * Temporary to prevent build failures. Will be deleted.
+     */
+    @RequiresPermission(Manifest.permission.DUMP)
+    public byte[] getData(String configKey) {
+        // TODO: remove this and all other methods with String-based config keys.
+        // To prevent build breakages of dependencies.
+        return null;
+    }
+
+    /**
      * Clients can request data with a binder call. This getter is destructive and also clears
      * the retrieved metrics from statsd memory.
      *
@@ -100,7 +143,7 @@ public final class StatsManager {
      * @return Serialized ConfigMetricsReportList proto. Returns null on failure.
      */
     @RequiresPermission(Manifest.permission.DUMP)
-    public byte[] getData(String configKey) {
+    public byte[] getData(long configKey) {
         synchronized (this) {
             try {
                 IStatsManager service = getIStatsManagerLocked();

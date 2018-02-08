@@ -40,8 +40,10 @@ import java.util.zip.ZipOutputStream;
 /**
  * Exposes application secondary dex files as files in the application data
  * directory.
+ * {@link MultiDexExtractor} is taking the file lock in the dex dir on creation and release it
+ * during close.
  */
-final class MultiDexExtractor {
+final class MultiDexExtractor implements Closeable {
 
     /**
      * Zip file containing one secondary dex file.
@@ -61,10 +63,10 @@ final class MultiDexExtractor {
      * {@code classes3.dex}, etc.
      */
     private static final String DEX_PREFIX = "classes";
-    private static final String DEX_SUFFIX = ".dex";
+    static final String DEX_SUFFIX = ".dex";
 
     private static final String EXTRACTED_NAME_EXT = ".classes";
-    private static final String EXTRACTED_SUFFIX = ".zip";
+    static final String EXTRACTED_SUFFIX = ".zip";
     private static final int MAX_EXTRACT_ATTEMPTS = 3;
 
     private static final String PREFS_FILE = "multidex.version";
@@ -82,6 +84,35 @@ final class MultiDexExtractor {
     private static final long NO_VALUE = -1L;
 
     private static final String LOCK_FILENAME = "MultiDex.lock";
+    private final File sourceApk;
+    private final long sourceCrc;
+    private final File dexDir;
+    private final RandomAccessFile lockRaf;
+    private final FileChannel lockChannel;
+    private final FileLock cacheLock;
+
+    MultiDexExtractor(File sourceApk, File dexDir) throws IOException {
+        Log.i(TAG, "MultiDexExtractor(" + sourceApk.getPath() + ", " + dexDir.getPath() + ")");
+        this.sourceApk = sourceApk;
+        this.dexDir = dexDir;
+        sourceCrc = getZipCrc(sourceApk);
+        File lockFile = new File(dexDir, LOCK_FILENAME);
+        lockRaf = new RandomAccessFile(lockFile, "rw");
+        try {
+            lockChannel = lockRaf.getChannel();
+            try {
+                Log.i(TAG, "Blocking on lock " + lockFile.getPath());
+                cacheLock = lockChannel.lock();
+            } catch (IOException | RuntimeException | Error e) {
+                closeQuietly(lockChannel);
+                throw e;
+            }
+            Log.i(TAG, lockFile.getPath() + " locked");
+        } catch (IOException | RuntimeException | Error e) {
+            closeQuietly(lockRaf);
+            throw e;
+        }
+    }
 
     /**
      * Extracts application secondary dexes into files in the application data
@@ -92,74 +123,54 @@ final class MultiDexExtractor {
      * @throws IOException if encounters a problem while reading or writing
      *         secondary dex files
      */
-    static List<? extends File> load(Context context, File sourceApk, File dexDir,
-            String prefsKeyPrefix,
-            boolean forceReload) throws IOException {
+    List<? extends File> load(Context context, String prefsKeyPrefix, boolean forceReload)
+            throws IOException {
         Log.i(TAG, "MultiDexExtractor.load(" + sourceApk.getPath() + ", " + forceReload + ", " +
                 prefsKeyPrefix + ")");
 
-        long currentCrc = getZipCrc(sourceApk);
-
-        // Validity check and extraction must be done only while the lock file has been taken.
-        File lockFile = new File(dexDir, LOCK_FILENAME);
-        RandomAccessFile lockRaf = new RandomAccessFile(lockFile, "rw");
-        FileChannel lockChannel = null;
-        FileLock cacheLock = null;
-        List<ExtractedDex> files;
-        IOException releaseLockException = null;
-        try {
-            lockChannel = lockRaf.getChannel();
-            Log.i(TAG, "Blocking on lock " + lockFile.getPath());
-            cacheLock = lockChannel.lock();
-            Log.i(TAG, lockFile.getPath() + " locked");
-
-            if (!forceReload && !isModified(context, sourceApk, currentCrc, prefsKeyPrefix)) {
-                try {
-                    files = loadExistingExtractions(context, sourceApk, dexDir, prefsKeyPrefix);
-                } catch (IOException ioe) {
-                    Log.w(TAG, "Failed to reload existing extracted secondary dex files,"
-                            + " falling back to fresh extraction", ioe);
-                    files = performExtractions(sourceApk, dexDir);
-                    putStoredApkInfo(context, prefsKeyPrefix, getTimeStamp(sourceApk), currentCrc,
-                            files);
-                }
-            } else {
-                Log.i(TAG, "Detected that extraction must be performed.");
-                files = performExtractions(sourceApk, dexDir);
-                putStoredApkInfo(context, prefsKeyPrefix, getTimeStamp(sourceApk), currentCrc,
-                        files);
-            }
-        } finally {
-            if (cacheLock != null) {
-                try {
-                    cacheLock.release();
-                } catch (IOException e) {
-                    Log.e(TAG, "Failed to release lock on " + lockFile.getPath());
-                    // Exception while releasing the lock is bad, we want to report it, but not at
-                    // the price of overriding any already pending exception.
-                    releaseLockException = e;
-                }
-            }
-            if (lockChannel != null) {
-                closeQuietly(lockChannel);
-            }
-            closeQuietly(lockRaf);
+        if (!cacheLock.isValid()) {
+            throw new IllegalStateException("MultiDexExtractor was closed");
         }
 
-        if (releaseLockException != null) {
-            throw releaseLockException;
+        List<ExtractedDex> files;
+        if (!forceReload && !isModified(context, sourceApk, sourceCrc, prefsKeyPrefix)) {
+            try {
+                files = loadExistingExtractions(context, prefsKeyPrefix);
+            } catch (IOException ioe) {
+                Log.w(TAG, "Failed to reload existing extracted secondary dex files,"
+                        + " falling back to fresh extraction", ioe);
+                files = performExtractions();
+                putStoredApkInfo(context, prefsKeyPrefix, getTimeStamp(sourceApk), sourceCrc,
+                        files);
+            }
+        } else {
+            if (forceReload) {
+                Log.i(TAG, "Forced extraction must be performed.");
+            } else {
+                Log.i(TAG, "Detected that extraction must be performed.");
+            }
+            files = performExtractions();
+            putStoredApkInfo(context, prefsKeyPrefix, getTimeStamp(sourceApk), sourceCrc,
+                    files);
         }
 
         Log.i(TAG, "load found " + files.size() + " secondary dex files");
         return files;
     }
 
+    @Override
+    public void close() throws IOException {
+        cacheLock.release();
+        lockChannel.close();
+        lockRaf.close();
+    }
+
     /**
      * Load previously extracted secondary dex files. Should be called only while owning the lock on
      * {@link #LOCK_FILENAME}.
      */
-    private static List<ExtractedDex> loadExistingExtractions(
-            Context context, File sourceApk, File dexDir,
+    private List<ExtractedDex> loadExistingExtractions(
+            Context context,
             String prefsKeyPrefix)
             throws IOException {
         Log.i(TAG, "loading existing secondary dex files");
@@ -228,16 +239,14 @@ final class MultiDexExtractor {
         return computedValue;
     }
 
-    private static List<ExtractedDex> performExtractions(File sourceApk, File dexDir)
-            throws IOException {
+    private List<ExtractedDex> performExtractions() throws IOException {
 
         final String extractedFilePrefix = sourceApk.getName() + EXTRACTED_NAME_EXT;
 
-        // Ensure that whatever deletions happen in prepareDexDir only happen if the zip that
-        // contains a secondary dex file in there is not consistent with the latest apk.  Otherwise,
-        // multi-process race conditions can cause a crash loop where one process deletes the zip
-        // while another had created it.
-        prepareDexDir(dexDir, extractedFilePrefix);
+        // It is safe to fully clear the dex dir because we own the file lock so no other process is
+        // extracting or running optimizing dexopt. It may cause crash of already running
+        // applications if for whatever reason we end up extracting again over a valid extraction.
+        clearDexDir();
 
         List<ExtractedDex> files = new ArrayList<ExtractedDex>();
 
@@ -272,9 +281,9 @@ final class MultiDexExtractor {
                     }
 
                     // Log size and crc of the extracted zip file
-                    Log.i(TAG, "Extraction " + (isExtractionSuccessful ? "succeeded" : "failed") +
-                            " - length " + extractedFile.getAbsolutePath() + ": " +
-                            extractedFile.length() + " - crc: " + extractedFile.crc);
+                    Log.i(TAG, "Extraction " + (isExtractionSuccessful ? "succeeded" : "failed")
+                            + " '" + extractedFile.getAbsolutePath() + "': length "
+                            + extractedFile.length() + " - crc: " + extractedFile.crc);
                     if (!isExtractionSuccessful) {
                         // Delete the extracted file
                         extractedFile.delete();
@@ -339,19 +348,15 @@ final class MultiDexExtractor {
     }
 
     /**
-     * This removes old files.
+     * Clear the dex dir from all files but the lock.
      */
-    private static void prepareDexDir(File dexDir, final String extractedFilePrefix) {
-        FileFilter filter = new FileFilter() {
-
+    private void clearDexDir() {
+        File[] files = dexDir.listFiles(new FileFilter() {
             @Override
             public boolean accept(File pathname) {
-                String name = pathname.getName();
-                return !(name.startsWith(extractedFilePrefix)
-                        || name.equals(LOCK_FILENAME));
+                return !pathname.getName().equals(LOCK_FILENAME);
             }
-        };
-        File[] files = dexDir.listFiles(filter);
+        });
         if (files == null) {
             Log.w(TAG, "Failed to list secondary dex dir content (" + dexDir.getPath() + ").");
             return;

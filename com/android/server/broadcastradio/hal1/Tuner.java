@@ -21,6 +21,7 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.hardware.radio.ITuner;
 import android.hardware.radio.ITunerCallback;
+import android.hardware.radio.ProgramList;
 import android.hardware.radio.ProgramSelector;
 import android.hardware.radio.RadioManager;
 import android.os.IBinder;
@@ -249,8 +250,7 @@ class Tuner extends ITuner.Stub {
         }
     }
 
-    @Override
-    public List<RadioManager.ProgramInfo> getProgramList(Map vendorFilter) {
+    List<RadioManager.ProgramInfo> getProgramList(Map vendorFilter) {
         Map<String, String> sFilter = vendorFilter;
         synchronized (mLock) {
             checkNotClosedLocked();
@@ -263,19 +263,41 @@ class Tuner extends ITuner.Stub {
     }
 
     @Override
-    public boolean isAnalogForced() {
-        synchronized (mLock) {
-            checkNotClosedLocked();
-            return nativeIsAnalogForced(mNativeContext);
-        }
+    public void startProgramListUpdates(ProgramList.Filter filter) {
+        mTunerCallback.startProgramListUpdates(filter);
     }
 
     @Override
-    public void setAnalogForced(boolean isForced) {
-        synchronized (mLock) {
-            checkNotClosedLocked();
-            nativeSetAnalogForced(mNativeContext, isForced);
+    public void stopProgramListUpdates() {
+        mTunerCallback.stopProgramListUpdates();
+    }
+
+    @Override
+    public boolean isConfigFlagSupported(int flag) {
+        return flag == RadioManager.CONFIG_FORCE_ANALOG;
+    }
+
+    @Override
+    public boolean isConfigFlagSet(int flag) {
+        if (flag == RadioManager.CONFIG_FORCE_ANALOG) {
+            synchronized (mLock) {
+                checkNotClosedLocked();
+                return nativeIsAnalogForced(mNativeContext);
+            }
         }
+        throw new UnsupportedOperationException("Not supported by HAL 1.x");
+    }
+
+    @Override
+    public void setConfigFlag(int flag, boolean value) {
+        if (flag == RadioManager.CONFIG_FORCE_ANALOG) {
+            synchronized (mLock) {
+                checkNotClosedLocked();
+                nativeSetAnalogForced(mNativeContext, value);
+                return;
+            }
+        }
+        throw new UnsupportedOperationException("Not supported by HAL 1.x");
     }
 
     @Override

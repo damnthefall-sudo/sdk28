@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 The Android Open Source Project
+ * Copyright 2017 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,8 @@
 package android.support.v7.recyclerview.extensions;
 
 import android.support.annotation.NonNull;
+import android.support.v7.util.AdapterListUpdateCallback;
+import android.support.v7.util.DiffUtil;
 import android.support.v7.widget.RecyclerView;
 
 import java.util.List;
@@ -66,7 +68,8 @@ import java.util.List;
  *     public void onBindViewHolder(UserViewHolder holder, int position) {
  *         holder.bindTo(getItem(position));
  *     }
- *     public static final DiffCallback&lt;User> DIFF_CALLBACK = new DiffCallback&lt;User>() {
+ *     public static final DiffUtil.ItemCallback&lt;User> DIFF_CALLBACK =
+ *             new DiffUtil.ItemCallback&lt;User>() {
  *         {@literal @}Override
  *         public boolean areItemsTheSame(
  *                 {@literal @}NonNull User oldUser, {@literal @}NonNull User newUser) {
@@ -95,14 +98,14 @@ public abstract class ListAdapter<T, VH extends RecyclerView.ViewHolder>
     private final ListAdapterHelper<T> mHelper;
 
     @SuppressWarnings("unused")
-    protected ListAdapter(@NonNull DiffCallback<T> diffCallback) {
-        mHelper = new ListAdapterHelper<>(new ListAdapterHelper.AdapterCallback(this),
-                new ListAdapterConfig.Builder<T>().setDiffCallback(diffCallback).build());
+    protected ListAdapter(@NonNull DiffUtil.ItemCallback<T> diffCallback) {
+        mHelper = new ListAdapterHelper<>(new AdapterListUpdateCallback(this),
+                new ListAdapterConfig.Builder<>(diffCallback).build());
     }
 
     @SuppressWarnings("unused")
     protected ListAdapter(@NonNull ListAdapterConfig<T> config) {
-        mHelper = new ListAdapterHelper<>(new ListAdapterHelper.AdapterCallback(this), config);
+        mHelper = new ListAdapterHelper<>(new AdapterListUpdateCallback(this), config);
     }
 
     /**

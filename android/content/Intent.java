@@ -3516,7 +3516,10 @@ public class Intent implements Parcelable, Cloneable {
      * For more details see TelephonyIntents.ACTION_SIM_STATE_CHANGED. This is here
      * because TelephonyIntents is an internal class.
      * @hide
+     * @deprecated Use {@link #ACTION_SIM_CARD_STATE_CHANGED} or
+     * {@link #ACTION_SIM_APPLICATION_STATE_CHANGED}
      */
+    @Deprecated
     @SystemApi
     @SdkConstant(SdkConstantType.BROADCAST_INTENT_ACTION)
     public static final String ACTION_SIM_STATE_CHANGED = "android.intent.action.SIM_STATE_CHANGED";
@@ -3926,6 +3929,14 @@ public class Intent implements Parcelable, Cloneable {
      */
     @SdkConstant(SdkConstantType.INTENT_CATEGORY)
     public static final String CATEGORY_LEANBACK_LAUNCHER = "android.intent.category.LEANBACK_LAUNCHER";
+    /**
+     * Indicates the preferred entry-point activity when an application is launched from a Car
+     * launcher. If not present, Car launcher can optionally use {@link #CATEGORY_LAUNCHER} as a
+     * fallback, or exclude the application entirely.
+     * @hide
+     */
+    @SdkConstant(SdkConstantType.INTENT_CATEGORY)
+    public static final String CATEGORY_CAR_LAUNCHER = "android.intent.category.CAR_LAUNCHER";
     /**
      * Indicates a Leanback settings activity to be displayed in the Leanback launcher.
      * @hide
@@ -9407,6 +9418,12 @@ public class Intent implements Parcelable, Cloneable {
             mSelector.toShortString(b, secure, comp, extras, clip);
             b.append("}");
         }
+    }
+
+    /** @hide */
+    public void writeToProto(ProtoOutputStream proto, long fieldId) {
+        // Same input parameters that toString() gives to toShortString().
+        writeToProto(proto, fieldId, true, true, true, false);
     }
 
     /** @hide */

@@ -64,7 +64,6 @@ import android.graphics.Rect;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.LayerDrawable;
-import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -223,9 +222,18 @@ public class ApplicationPackageManager extends PackageManager {
 
     @Override
     public Intent getLeanbackLaunchIntentForPackage(String packageName) {
-        // Try to find a main leanback_launcher activity.
+        return getLaunchIntentForPackageAndCategory(packageName, Intent.CATEGORY_LEANBACK_LAUNCHER);
+    }
+
+    @Override
+    public Intent getCarLaunchIntentForPackage(String packageName) {
+        return getLaunchIntentForPackageAndCategory(packageName, Intent.CATEGORY_CAR_LAUNCHER);
+    }
+
+    private Intent getLaunchIntentForPackageAndCategory(String packageName, String category) {
+        // Try to find a main launcher activity for the given categories.
         Intent intentToResolve = new Intent(Intent.ACTION_MAIN);
-        intentToResolve.addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
+        intentToResolve.addCategory(category);
         intentToResolve.setPackage(packageName);
         List<ResolveInfo> ris = queryIntentActivities(intentToResolve, 0);
 
@@ -685,6 +693,26 @@ public class ApplicationPackageManager extends PackageManager {
     public int checkSignatures(int uid1, int uid2) {
         try {
             return mPM.checkUidSignatures(uid1, uid2);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    @Override
+    public boolean hasSigningCertificate(
+            String packageName, byte[] certificate, @PackageManager.CertificateInputType int type) {
+        try {
+            return mPM.hasSigningCertificate(packageName, certificate, type);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    @Override
+    public boolean hasSigningCertificate(
+            int uid, byte[] certificate, @PackageManager.CertificateInputType int type) {
+        try {
+            return mPM.hasUidSigningCertificate(uid, certificate, type);
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -1680,22 +1708,6 @@ public class ApplicationPackageManager extends PackageManager {
     @Override
     public CharSequence getApplicationLabel(ApplicationInfo info) {
         return info.loadLabel(this);
-    }
-
-    @Override
-    public void installPackage(Uri packageURI,
-            PackageInstallObserver observer, int flags, String installerPackageName) {
-        if (!"file".equals(packageURI.getScheme())) {
-            throw new UnsupportedOperationException("Only file:// URIs are supported");
-        }
-
-        final String originPath = packageURI.getPath();
-        try {
-            mPM.installPackageAsUser(originPath, observer.getBinder(), flags, installerPackageName,
-                    mContext.getUserId());
-        } catch (RemoteException e) {
-            throw e.rethrowFromSystemServer();
-        }
     }
 
     @Override
@@ -2749,6 +2761,24 @@ public class ApplicationPackageManager extends PackageManager {
         try {
             mPM.registerDexModule(mContext.getPackageName(), dexModule,
                     isSharedModule, callbackDelegate);
+        } catch (RemoteException e) {
+            throw e.rethrowAsRuntimeException();
+        }
+    }
+
+    @Override
+    public CharSequence getHarmfulAppWarning(String packageName) {
+        try {
+            return mPM.getHarmfulAppWarning(packageName, mContext.getUserId());
+        } catch (RemoteException e) {
+            throw e.rethrowAsRuntimeException();
+        }
+    }
+
+    @Override
+    public void setHarmfulAppWarning(String packageName, CharSequence warning) {
+        try {
+            mPM.setHarmfulAppWarning(packageName, warning, mContext.getUserId());
         } catch (RemoteException e) {
             throw e.rethrowAsRuntimeException();
         }

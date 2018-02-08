@@ -16,7 +16,6 @@
 
 package com.android.server.am;
 
-import static android.app.ITaskStackListener.FORCED_RESIZEABLE_REASON_SECONDARY_DISPLAY;
 import static android.app.ITaskStackListener.FORCED_RESIZEABLE_REASON_SPLIT_SCREEN;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_RECENTS;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_STANDARD;
@@ -85,14 +84,14 @@ import static com.android.server.am.proto.ActivityStackProto.FULLSCREEN;
 import static com.android.server.am.proto.ActivityStackProto.ID;
 import static com.android.server.am.proto.ActivityStackProto.RESUMED_ACTIVITY;
 import static com.android.server.am.proto.ActivityStackProto.TASKS;
-import static com.android.server.wm.AppTransition.TRANSIT_ACTIVITY_CLOSE;
-import static com.android.server.wm.AppTransition.TRANSIT_ACTIVITY_OPEN;
-import static com.android.server.wm.AppTransition.TRANSIT_NONE;
-import static com.android.server.wm.AppTransition.TRANSIT_TASK_CLOSE;
-import static com.android.server.wm.AppTransition.TRANSIT_TASK_OPEN;
-import static com.android.server.wm.AppTransition.TRANSIT_TASK_OPEN_BEHIND;
-import static com.android.server.wm.AppTransition.TRANSIT_TASK_TO_BACK;
-import static com.android.server.wm.AppTransition.TRANSIT_TASK_TO_FRONT;
+import static android.view.WindowManager.TRANSIT_ACTIVITY_CLOSE;
+import static android.view.WindowManager.TRANSIT_ACTIVITY_OPEN;
+import static android.view.WindowManager.TRANSIT_NONE;
+import static android.view.WindowManager.TRANSIT_TASK_CLOSE;
+import static android.view.WindowManager.TRANSIT_TASK_OPEN;
+import static android.view.WindowManager.TRANSIT_TASK_OPEN_BEHIND;
+import static android.view.WindowManager.TRANSIT_TASK_TO_BACK;
+import static android.view.WindowManager.TRANSIT_TASK_TO_FRONT;
 
 import static java.lang.Integer.MAX_VALUE;
 
@@ -144,7 +143,6 @@ import com.android.internal.app.IVoiceInteractor;
 import com.android.internal.os.BatteryStatsImpl;
 import com.android.server.Watchdog;
 import com.android.server.am.ActivityManagerService.ItemMatcher;
-import com.android.server.am.EventLogTags;
 import com.android.server.wm.ConfigurationContainer;
 import com.android.server.wm.StackWindowController;
 import com.android.server.wm.StackWindowListener;
@@ -608,7 +606,7 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
                         true /* onTop */);
                 recentStack.moveToFront("setWindowingMode");
                 // If task moved to docked stack - show recents if needed.
-                mService.mWindowManager.showRecentApps(false /* fromHome */);
+                mService.mWindowManager.showRecentApps();
             }
             wm.continueSurfaceLayout();
         }
@@ -996,12 +994,6 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
             insertTaskAtTop(task, null);
             return;
         }
-
-        task = topTask();
-        if (task != null) {
-            mWindowContainerController.positionChildAtTop(task.getWindowContainerController(),
-                    true /* includingParents */);
-        }
     }
 
     /**
@@ -1013,17 +1005,19 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
             return;
         }
 
+        /**
+         * The intent behind moving a primary split screen stack to the back is usually to hide
+         * behind the home stack. Exit split screen in this case.
+         */
+        if (getWindowingMode() == WINDOWING_MODE_SPLIT_SCREEN_PRIMARY) {
+            setWindowingMode(WINDOWING_MODE_FULLSCREEN);
+        }
+
         getDisplay().positionChildAtBottom(this);
         mStackSupervisor.setFocusStackUnchecked(reason, getDisplay().getTopStack());
         if (task != null) {
             insertTaskAtBottom(task);
             return;
-        } else {
-            task = bottomTask();
-            if (task != null) {
-                mWindowContainerController.positionChildAtBottom(
-                        task.getWindowContainerController(), true /* includingParents */);
-            }
         }
     }
 
@@ -1811,7 +1805,8 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
             boolean behindFullscreenActivity = !stackShouldBeVisible;
             boolean resumeNextActivity = mStackSupervisor.isFocusedStack(this)
                     && (isInStackLocked(starting) == null);
-            final boolean isTopFullscreenStack = getDisplay().isTopFullscreenStack(this);
+            final boolean isTopNotPinnedStack =
+                    isAttached() && getDisplay().isTopNotPinnedStack(this);
             for (int taskNdx = mTaskHistory.size() - 1; taskNdx >= 0; --taskNdx) {
                 final TaskRecord task = mTaskHistory.get(taskNdx);
                 final ArrayList<ActivityRecord> activities = task.mActivities;
@@ -1833,7 +1828,7 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
 
                     // Now check whether it's really visible depending on Keyguard state.
                     final boolean reallyVisible = checkKeyguardVisibility(r,
-                            visibleIgnoringKeyguard, isTop && isTopFullscreenStack);
+                            visibleIgnoringKeyguard, isTop && isTopNotPinnedStack);
                     if (visibleIgnoringKeyguard) {
                         behindFullscreenActivity = updateBehindFullscreen(!stackShouldBeVisible,
                                 behindFullscreenActivity, r);
@@ -2633,7 +2628,9 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
                     next.clearOptionsLocked();
                     mService.mLifecycleManager.scheduleTransaction(next.app.thread, next.appToken,
                             ResumeActivityItem.obtain(next.app.repProcState,
-                                    mService.isNextTransitionForward()));
+                                    mService.isNextTransitionForward())
+                                    .setDescription(next.getLifecycleDescription(
+                                            "resumeTopActivityInnerLocked")));
 
                     if (DEBUG_STATES) Slog.d(TAG_STATES, "resumeTopActivityLocked: Resumed "
                             + next);
@@ -3413,7 +3410,8 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
                 EventLogTags.writeAmStopActivity(
                         r.userId, System.identityHashCode(r), r.shortComponentName);
                 mService.mLifecycleManager.scheduleTransaction(r.app.thread, r.appToken,
-                        StopActivityItem.obtain(r.visible, r.configChangeFlags));
+                        StopActivityItem.obtain(r.visible, r.configChangeFlags)
+                                .setDescription(r.getLifecycleDescription("stopActivityLocked")));
                 if (shouldSleepOrShutDownActivities()) {
                     r.setSleeping(true);
                 }
@@ -4219,7 +4217,8 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
             try {
                 if (DEBUG_SWITCH) Slog.i(TAG_SWITCH, "Destroying: " + r);
                 mService.mLifecycleManager.scheduleTransaction(r.app.thread, r.appToken,
-                        DestroyActivityItem.obtain(r.finishing, r.configChangeFlags));
+                        DestroyActivityItem.obtain(r.finishing, r.configChangeFlags)
+                            .setDescription(r.getLifecycleDescription("destroyActivityLocked")));
             } catch (Exception e) {
                 // We can just ignore exceptions here...  if the process
                 // has crashed, our death notification will clean things
@@ -5046,7 +5045,7 @@ class ActivityStack<T extends StackWindowController> extends ConfigurationContai
         addTask(task, toTop, "createTaskRecord");
         final boolean isLockscreenShown = mService.mStackSupervisor.getKeyguardController()
                 .isKeyguardShowing(mDisplayId != INVALID_DISPLAY ? mDisplayId : DEFAULT_DISPLAY);
-        if (!mStackSupervisor.getLaunchingBoundsController()
+        if (!mStackSupervisor.getLaunchParamsController()
                 .layoutTask(task, info.windowLayout, activity, source, options)
                 && !matchParentBounds() && task.isResizeable() && !isLockscreenShown) {
             task.updateOverrideConfiguration(getOverrideBounds());

@@ -27,6 +27,7 @@ import android.os.Handler;
 import android.os.Message;
 import android.os.RemoteException;
 import android.os.ServiceManager;
+import android.os.UserHandle;
 import android.util.Log;
 import android.util.Pair;
 
@@ -387,6 +388,29 @@ public class BackupManager {
     }
 
     /**
+     * Report whether the backup mechanism is currently active.
+     * When it is inactive, the device will not perform any backup operations, nor will it
+     * deliver data for restore, although clients can still safely call BackupManager methods.
+     *
+     * @hide
+     */
+    @SystemApi
+    @RequiresPermission(android.Manifest.permission.BACKUP)
+    public boolean isBackupServiceActive(UserHandle user) {
+        mContext.enforceCallingPermission(android.Manifest.permission.BACKUP,
+                "isBackupServiceActive");
+        checkServiceBinder();
+        if (sService != null) {
+            try {
+                return sService.isBackupServiceActive(user.getIdentifier());
+            } catch (RemoteException e) {
+                Log.e(TAG, "isBackupEnabled() couldn't connect");
+            }
+        }
+        return false;
+    }
+
+    /**
      * Enable/disable data restore at application install time.  When enabled, app
      * installation will include an attempt to fetch the app's historical data from
      * the archival restore dataset (if any).  When disabled, no such attempt will
@@ -707,7 +731,6 @@ public class BackupManager {
      * redirects them into main-thread actions.  This serializes the backup
      * progress callbacks nicely within the usual main-thread lifecycle pattern.
      */
-    @SystemApi
     private class BackupObserverWrapper extends IBackupObserver.Stub {
         final Handler mHandler;
         final BackupObserver mObserver;

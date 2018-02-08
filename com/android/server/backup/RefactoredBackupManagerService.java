@@ -38,6 +38,7 @@ import android.app.AppGlobals;
 import android.app.IActivityManager;
 import android.app.IBackupAgent;
 import android.app.PendingIntent;
+import android.app.admin.DevicePolicyManager;
 import android.app.backup.BackupManager;
 import android.app.backup.BackupManagerMonitor;
 import android.app.backup.FullBackup;
@@ -148,6 +149,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Queue;
 import java.util.Random;
@@ -205,6 +207,10 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
     public static final String RUN_INITIALIZE_ACTION = "android.app.backup.intent.INIT";
     public static final String BACKUP_FINISHED_ACTION = "android.intent.action.BACKUP_FINISHED";
     public static final String BACKUP_FINISHED_PACKAGE_EXTRA = "packageName";
+
+    // Time delay for initialization operations that can be delayed so as not to consume too much CPU
+    // on bring-up and increase time-to-UI.
+    private static final long INITIALIZATION_DELAY_MILLIS = 3000;
 
     // Timeout interval for deciding that a bind or clear-data has taken too long
     private static final long TIMEOUT_INTERVAL = 10 * 1000;
@@ -280,6 +286,9 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
     private volatile boolean mClearingData;
 
     private final BackupPasswordManager mBackupPasswordManager;
+
+    // Time when we post the transport registration operation
+    private final long mRegisterTransportsRequestedTime;
 
     @GuardedBy("mPendingRestores")
     private boolean mIsRestoreInProgress;
@@ -673,6 +682,8 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
     @GuardedBy("mQueueLock")
     private ArrayList<FullBackupEntry> mFullBackupQueue;
 
+    private BackupPolicyEnforcer mBackupPolicyEnforcer;
+
     // Utility: build a new random integer token. The low bits are the ordinal of the
     // operation for near-time uniqueness, and the upper bits are random for app-
     // side unpredictability.
@@ -734,6 +745,9 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
         // Set up our transport options and initialize the default transport
         SystemConfig systemConfig = SystemConfig.getInstance();
         Set<ComponentName> transportWhitelist = systemConfig.getBackupTransportWhitelist();
+        if (transportWhitelist == null) {
+            transportWhitelist = Collections.emptySet();
+        }
 
         String transport =
                 Settings.Secure.getString(
@@ -748,8 +762,7 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
                 new TransportManager(
                         context,
                         transportWhitelist,
-                        transport,
-                        backupThread.getLooper());
+                        transport);
 
         // If encrypted file systems is enabled or disabled, this call will return the
         // correct directory.
@@ -851,15 +864,19 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
         }
 
         mTransportManager = transportManager;
-        mTransportManager.setTransportBoundListener(mTransportBoundListener);
-        mTransportManager.registerAllTransports();
+        mTransportManager.setOnTransportRegisteredListener(this::onTransportRegistered);
+        mRegisterTransportsRequestedTime = SystemClock.elapsedRealtime();
+        mBackupHandler.postDelayed(
+                mTransportManager::registerTransports, INITIALIZATION_DELAY_MILLIS);
 
-        // Now that we know about valid backup participants, parse any
-        // leftover journal files into the pending backup set
-        mBackupHandler.post(this::parseLeftoverJournals);
+        // Now that we know about valid backup participants, parse any leftover journal files into
+        // the pending backup set
+        mBackupHandler.postDelayed(this::parseLeftoverJournals, INITIALIZATION_DELAY_MILLIS);
 
         // Power management
         mWakelock = mPowerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "*backup*");
+
+        mBackupPolicyEnforcer = new BackupPolicyEnforcer(context);
     }
 
     private void initPackageTracking() {
@@ -1150,39 +1167,28 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
         }
     }
 
-    private TransportManager.TransportBoundListener mTransportBoundListener =
-            new TransportManager.TransportBoundListener() {
-                @Override
-                public boolean onTransportBound(IBackupTransport transport) {
-                    // If the init sentinel file exists, we need to be sure to perform the init
-                    // as soon as practical.  We also create the state directory at registration
-                    // time to ensure it's present from the outset.
-                    String name = null;
-                    try {
-                        name = transport.name();
-                        String transportDirName = transport.transportDirName();
-                        File stateDir = new File(mBaseStateDir, transportDirName);
-                        stateDir.mkdirs();
+    private void onTransportRegistered(String transportName, String transportDirName) {
+        if (DEBUG) {
+            long timeMs = SystemClock.elapsedRealtime() - mRegisterTransportsRequestedTime;
+            Slog.d(TAG, "Transport " + transportName + " registered " + timeMs
+                    + "ms after first request (delay = " + INITIALIZATION_DELAY_MILLIS + "ms)");
+        }
 
-                        File initSentinel = new File(stateDir, INIT_SENTINEL_FILE_NAME);
-                        if (initSentinel.exists()) {
-                            synchronized (mQueueLock) {
-                                mPendingInits.add(name);
+        File stateDir = new File(mBaseStateDir, transportDirName);
+        stateDir.mkdirs();
 
-                                // TODO: pick a better starting time than now + 1 minute
-                                long delay = 1000 * 60; // one minute, in milliseconds
-                                mAlarmManager.set(AlarmManager.RTC_WAKEUP,
-                                        System.currentTimeMillis() + delay, mRunInitIntent);
-                            }
-                        }
-                        return true;
-                    } catch (Exception e) {
-                        // the transport threw when asked its file naming prefs; declare it invalid
-                        Slog.w(TAG, "Failed to regiser transport: " + name);
-                        return false;
-                    }
-                }
-            };
+        File initSentinel = new File(stateDir, INIT_SENTINEL_FILE_NAME);
+        if (initSentinel.exists()) {
+            synchronized (mQueueLock) {
+                mPendingInits.add(transportName);
+
+                // TODO: pick a better starting time than now + 1 minute
+                long delay = 1000 * 60; // one minute, in milliseconds
+                mAlarmManager.set(AlarmManager.RTC_WAKEUP,
+                        System.currentTimeMillis() + delay, mRunInitIntent);
+            }
+        }
+    }
 
     // ----- Track installation/removal of packages -----
     private BroadcastReceiver mBroadcastReceiver = new BroadcastReceiver() {
@@ -1424,6 +1430,8 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
             final Intent notification = new Intent();
             notification.setAction(BACKUP_FINISHED_ACTION);
             notification.setPackage(receiver);
+            notification.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES |
+                    Intent.FLAG_RECEIVER_FOREGROUND);
             notification.putExtra(BACKUP_FINISHED_PACKAGE_EXTRA, packageName);
             mContext.sendBroadcastAsUser(notification, UserHandle.OWNER);
         }
@@ -1603,9 +1611,15 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
             return BackupManager.ERROR_BACKUP_NOT_ALLOWED;
         }
 
-        TransportClient transportClient =
-                mTransportManager.getCurrentTransportClient("BMS.requestBackup()");
-        if (transportClient == null) {
+        final TransportClient transportClient;
+        final String transportDirName;
+        try {
+            transportDirName =
+                    mTransportManager.getTransportDirName(
+                            mTransportManager.getCurrentTransportName());
+            transportClient =
+                    mTransportManager.getCurrentTransportClientOrThrow("BMS.requestBackup()");
+        } catch (TransportNotRegisteredException e) {
             BackupObserverUtils.sendBackupFinished(observer, BackupManager.ERROR_TRANSPORT_ABORTED);
             monitor = BackupManagerMonitorUtils.monitorEvent(monitor,
                     BackupManagerMonitor.LOG_EVENT_ID_TRANSPORT_IS_NULL,
@@ -1650,12 +1664,11 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
                     + " k/v backups");
         }
 
-        String dirName = transportClient.getTransportDirName();
         boolean nonIncrementalBackup = (flags & BackupManager.FLAG_NON_INCREMENTAL_BACKUP) != 0;
 
         Message msg = mBackupHandler.obtainMessage(MSG_REQUEST_BACKUP);
-        msg.obj = new BackupParams(transportClient, dirName, kvBackupList, fullBackupList, observer,
-                monitor, listener, true, nonIncrementalBackup);
+        msg.obj = new BackupParams(transportClient, transportDirName, kvBackupList, fullBackupList,
+                observer, monitor, listener, true, nonIncrementalBackup);
         mBackupHandler.sendMessage(msg);
         return BackupManager.SUCCESS;
     }
@@ -2766,6 +2779,10 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
     public void setBackupEnabled(boolean enable) {
         mContext.enforceCallingOrSelfPermission(android.Manifest.permission.BACKUP,
                 "setBackupEnabled");
+        if (!enable && mBackupPolicyEnforcer.getMandatoryBackupTransport() != null) {
+            Slog.w(TAG, "Cannot disable backups when the mandatory backups policy is active.");
+            return;
+        }
 
         Slog.i(TAG, "Backup enabled => " + enable);
 
@@ -2883,14 +2900,14 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
         mContext.enforceCallingOrSelfPermission(android.Manifest.permission.BACKUP,
                 "listAllTransports");
 
-        return mTransportManager.getBoundTransportNames();
+        return mTransportManager.getRegisteredTransportNames();
     }
 
     @Override
     public ComponentName[] listAllTransportComponents() {
         mContext.enforceCallingOrSelfPermission(android.Manifest.permission.BACKUP,
                 "listAllTransportComponents");
-        return mTransportManager.getAllTransportComponents();
+        return mTransportManager.getRegisteredTransportComponents();
     }
 
     @Override
@@ -2993,63 +3010,115 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
         }
     }
 
-    // Select which transport to use for the next backup operation.
+    /** Selects transport {@code transportName} and returns previous selected transport. */
     @Override
-    public String selectBackupTransport(String transport) {
-        mContext.enforceCallingOrSelfPermission(android.Manifest.permission.BACKUP,
-                "selectBackupTransport");
+    @Deprecated
+    @Nullable
+    public String selectBackupTransport(String transportName) {
+        mContext.enforceCallingOrSelfPermission(
+                android.Manifest.permission.BACKUP, "selectBackupTransport");
+
+        if (!isAllowedByMandatoryBackupTransportPolicy(transportName)) {
+            // Don't change the transport if it is not allowed.
+            Slog.w(TAG, "Failed to select transport - disallowed by device owner policy.");
+            return mTransportManager.getCurrentTransportName();
+        }
 
         final long oldId = Binder.clearCallingIdentity();
         try {
-            String prevTransport = mTransportManager.selectTransport(transport);
-            updateStateForTransport(transport);
-            Slog.v(TAG, "selectBackupTransport() set " + mTransportManager.getCurrentTransportName()
-                    + " returning " + prevTransport);
-            return prevTransport;
+            String previousTransportName = mTransportManager.selectTransport(transportName);
+            updateStateForTransport(transportName);
+            Slog.v(TAG, "selectBackupTransport(transport = " + transportName
+                    + "): previous transport = " + previousTransportName);
+            return previousTransportName;
         } finally {
             Binder.restoreCallingIdentity(oldId);
         }
     }
 
     @Override
-    public void selectBackupTransportAsync(final ComponentName transport,
-            final ISelectBackupTransportCallback listener) {
-        mContext.enforceCallingOrSelfPermission(android.Manifest.permission.BACKUP,
-                "selectBackupTransportAsync");
-
+    public void selectBackupTransportAsync(
+            ComponentName transportComponent, @Nullable ISelectBackupTransportCallback listener) {
+        mContext.enforceCallingOrSelfPermission(
+                android.Manifest.permission.BACKUP, "selectBackupTransportAsync");
+        if (!isAllowedByMandatoryBackupTransportPolicy(transportComponent)) {
+            try {
+                if (listener != null) {
+                    Slog.w(TAG, "Failed to select transport - disallowed by device owner policy.");
+                    listener.onFailure(BackupManager.ERROR_BACKUP_NOT_ALLOWED);
+                }
+            } catch (RemoteException e) {
+                Slog.e(TAG, "ISelectBackupTransportCallback listener not available");
+            }
+            return;
+        }
         final long oldId = Binder.clearCallingIdentity();
-
-        Slog.v(TAG, "selectBackupTransportAsync() called with transport " +
-                transport.flattenToShortString());
-
-        mTransportManager.ensureTransportReady(transport,
-                new TransportManager.TransportReadyCallback() {
-                    @Override
-                    public void onSuccess(String transportName) {
-                        mTransportManager.selectTransport(transportName);
-                        updateStateForTransport(mTransportManager.getCurrentTransportName());
-                        Slog.v(TAG, "Transport successfully selected: "
-                                + transport.flattenToShortString());
-                        try {
-                            listener.onSuccess(transportName);
-                        } catch (RemoteException e) {
-                            // Nothing to do here.
+        try {
+            String transportString = transportComponent.flattenToShortString();
+            Slog.v(TAG, "selectBackupTransportAsync(transport = " + transportString + ")");
+            mBackupHandler.post(
+                    () -> {
+                        String transportName = null;
+                        int result =
+                                mTransportManager.registerAndSelectTransport(transportComponent);
+                        if (result == BackupManager.SUCCESS) {
+                            try {
+                                transportName =
+                                        mTransportManager.getTransportName(transportComponent);
+                                updateStateForTransport(transportName);
+                            } catch (TransportNotRegisteredException e) {
+                                Slog.e(TAG, "Transport got unregistered");
+                                result = BackupManager.ERROR_TRANSPORT_UNAVAILABLE;
+                            }
                         }
-                    }
 
-                    @Override
-                    public void onFailure(int reason) {
-                        Slog.v(TAG,
-                                "Failed to select transport: " + transport.flattenToShortString());
                         try {
-                            listener.onFailure(reason);
+                            if (listener != null) {
+                                if (transportName != null) {
+                                    listener.onSuccess(transportName);
+                                } else {
+                                    listener.onFailure(result);
+                                }
+                            }
                         } catch (RemoteException e) {
-                            // Nothing to do here.
+                            Slog.e(TAG, "ISelectBackupTransportCallback listener not available");
                         }
-                    }
-                });
+                    });
+        } finally {
+            Binder.restoreCallingIdentity(oldId);
+        }
+    }
 
-        Binder.restoreCallingIdentity(oldId);
+    /**
+     * Returns if the specified transport can be set as the current transport without violating the
+     * mandatory backup transport policy.
+     */
+    private boolean isAllowedByMandatoryBackupTransportPolicy(String transportName) {
+        ComponentName mandatoryBackupTransport = mBackupPolicyEnforcer.getMandatoryBackupTransport();
+        if (mandatoryBackupTransport == null) {
+            return true;
+        }
+        final String mandatoryBackupTransportName;
+        try {
+            mandatoryBackupTransportName =
+                    mTransportManager.getTransportName(mandatoryBackupTransport);
+        } catch (TransportNotRegisteredException e) {
+            Slog.e(TAG, "mandatory backup transport not registered!");
+            return false;
+        }
+        return TextUtils.equals(mandatoryBackupTransportName, transportName);
+    }
+
+    /**
+     * Returns if the specified transport can be set as the current transport without violating the
+     * mandatory backup transport policy.
+     */
+    private boolean isAllowedByMandatoryBackupTransportPolicy(ComponentName transport) {
+        ComponentName mandatoryBackupTransport = mBackupPolicyEnforcer.getMandatoryBackupTransport();
+        if (mandatoryBackupTransport == null) {
+            return true;
+        }
+        return mandatoryBackupTransport.equals(transport);
     }
 
     private void updateStateForTransport(String newTransportName) {
@@ -3058,18 +3127,24 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
                 Settings.Secure.BACKUP_TRANSPORT, newTransportName);
 
         // And update our current-dataset bookkeeping
-        IBackupTransport transport = mTransportManager.getTransportBinder(newTransportName);
-        if (transport != null) {
+        String callerLogString = "BMS.updateStateForTransport()";
+        TransportClient transportClient =
+                mTransportManager.getTransportClient(newTransportName, callerLogString);
+        if (transportClient != null) {
             try {
+                IBackupTransport transport = transportClient.connectOrThrow(callerLogString);
                 mCurrentToken = transport.getCurrentRestoreSet();
             } catch (Exception e) {
                 // Oops.  We can't know the current dataset token, so reset and figure it out
                 // when we do the next k/v backup operation on this transport.
                 mCurrentToken = 0;
+                Slog.w(TAG, "Transport " + newTransportName + " not available: current token = 0");
             }
+            mTransportManager.disposeOfTransportClient(transportClient, callerLogString);
         } else {
-            // The named transport isn't bound at this particular moment, so we can't
-            // know yet what its current dataset token is.  Reset as above.
+            Slog.w(TAG, "Transport " + newTransportName + " not registered: current token = 0");
+            // The named transport isn't registered, so we can't know what its current dataset token
+            // is. Reset as above.
             mCurrentToken = 0;
         }
     }
@@ -3093,29 +3168,30 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
         }
     }
 
-    // Supply the configuration summary string for the given transport.  If the name is
-    // not one of the available transports, or if the transport does not supply any
-    // summary / destination string, the method can return null.
-    //
-    // This string is used VERBATIM as the summary text of the relevant Settings item!
+    /**
+     * Supply the current destination string for the given transport. If the name is not one of the
+     * registered transports the method will return null.
+     *
+     * <p>This string is used VERBATIM as the summary text of the relevant Settings item.
+     *
+     * @param transportName The name of the registered transport.
+     * @return The current destination string or null if the transport is not registered.
+     */
     @Override
     public String getDestinationString(String transportName) {
-        mContext.enforceCallingOrSelfPermission(android.Manifest.permission.BACKUP,
-                "getDestinationString");
+        mContext.enforceCallingOrSelfPermission(
+                android.Manifest.permission.BACKUP, "getDestinationString");
 
-        final IBackupTransport transport = mTransportManager.getTransportBinder(transportName);
-        if (transport != null) {
-            try {
-                final String text = transport.currentDestinationString();
-                if (MORE_DEBUG) Slog.d(TAG, "getDestinationString() returning " + text);
-                return text;
-            } catch (Exception e) {
-                /* fall through to return null */
-                Slog.e(TAG, "Unable to get string from transport: " + e.getMessage());
+        try {
+            String string = mTransportManager.getTransportCurrentDestinationString(transportName);
+            if (MORE_DEBUG) {
+                Slog.d(TAG, "getDestinationString() returning " + string);
             }
+            return string;
+        } catch (TransportNotRegisteredException e) {
+            Slog.e(TAG, "Unable to get destination string from transport: " + e.getMessage());
+            return null;
         }
-
-        return null;
     }
 
     // Supply the manage-data intent for the given transport.
@@ -3385,30 +3461,50 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
 
     @Override
     public boolean isAppEligibleForBackup(String packageName) {
-        mContext.enforceCallingOrSelfPermission(android.Manifest.permission.BACKUP,
-                "isAppEligibleForBackup");
+        mContext.enforceCallingOrSelfPermission(
+                android.Manifest.permission.BACKUP, "isAppEligibleForBackup");
+
+        long oldToken = Binder.clearCallingIdentity();
         try {
-            PackageInfo packageInfo = mPackageManager.getPackageInfo(packageName,
-                    PackageManager.GET_SIGNATURES);
-            if (!AppBackupUtils.appIsEligibleForBackup(packageInfo.applicationInfo,
-                            mPackageManager) ||
-                    AppBackupUtils.appIsStopped(packageInfo.applicationInfo) ||
-                    AppBackupUtils.appIsDisabled(packageInfo.applicationInfo, mPackageManager)) {
-                return false;
+            String callerLogString = "BMS.isAppEligibleForBackup";
+            TransportClient transportClient =
+                    mTransportManager.getCurrentTransportClient(callerLogString);
+            boolean eligible =
+                    AppBackupUtils.appIsRunningAndEligibleForBackupWithTransport(
+                            transportClient, packageName, mPackageManager);
+            if (transportClient != null) {
+                mTransportManager.disposeOfTransportClient(transportClient, callerLogString);
             }
-            IBackupTransport transport = mTransportManager.getCurrentTransportBinder();
-            if (transport != null) {
-                try {
-                    return transport.isAppEligibleForBackup(packageInfo,
-                            AppBackupUtils.appGetsFullBackup(packageInfo));
-                } catch (Exception e) {
-                    Slog.e(TAG, "Unable to ask about eligibility: " + e.getMessage());
+            return eligible;
+        } finally {
+            Binder.restoreCallingIdentity(oldToken);
+        }
+    }
+
+    @Override
+    public String[] filterAppsEligibleForBackup(String[] packages) {
+        mContext.enforceCallingOrSelfPermission(
+                android.Manifest.permission.BACKUP, "filterAppsEligibleForBackup");
+
+        long oldToken = Binder.clearCallingIdentity();
+        try {
+            String callerLogString = "BMS.filterAppsEligibleForBackup";
+            TransportClient transportClient =
+                    mTransportManager.getCurrentTransportClient(callerLogString);
+            List<String> eligibleApps = new LinkedList<>();
+            for (String packageName : packages) {
+                if (AppBackupUtils
+                        .appIsRunningAndEligibleForBackupWithTransport(
+                                transportClient, packageName, mPackageManager)) {
+                    eligibleApps.add(packageName);
                 }
             }
-            // If transport is not present we couldn't tell that the package is not eligible.
-            return true;
-        } catch (NameNotFoundException e) {
-            return false;
+            if (transportClient != null) {
+                mTransportManager.disposeOfTransportClient(transportClient, callerLogString);
+            }
+            return eligibleApps.toArray(new String[eligibleApps.size()]);
+        } finally {
+            Binder.restoreCallingIdentity(oldToken);
         }
     }
 
@@ -3427,6 +3523,9 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
                         return;
                     } else if ("agents".startsWith(arg)) {
                         dumpAgents(pw);
+                        return;
+                    } else if ("transportclients".equals(arg.toLowerCase())) {
+                        mTransportManager.dump(pw);
                         return;
                     }
                 }
@@ -3473,10 +3572,10 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
                     pw.println((t.equals(mTransportManager.getCurrentTransportName()) ? "  * "
                             : "    ") + t);
                     try {
-                        IBackupTransport transport = mTransportManager.getTransportBinder(t);
                         File dir = new File(mBaseStateDir,
                                 mTransportManager.getTransportDirName(t));
-                        pw.println("       destination: " + transport.currentDestinationString());
+                        pw.println("       destination: "
+                                + mTransportManager.getTransportCurrentDestinationString(t));
                         pw.println("       intent: "
                                 + mTransportManager.getTransportConfigurationIntent(t));
                         for (File f : dir.listFiles()) {
@@ -3489,6 +3588,8 @@ public class RefactoredBackupManagerService implements BackupManagerServiceInter
                     }
                 }
             }
+
+            mTransportManager.dump(pw);
 
             pw.println("Pending init: " + mPendingInits.size());
             for (String s : mPendingInits) {

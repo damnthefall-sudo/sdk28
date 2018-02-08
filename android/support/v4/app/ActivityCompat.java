@@ -29,6 +29,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Parcelable;
+import android.support.annotation.IdRes;
 import android.support.annotation.IntRange;
 import android.support.annotation.NonNull;
 import android.support.annotation.Nullable;
@@ -340,6 +341,31 @@ public class ActivityCompat extends ContextCompat {
     }
 
     /**
+     * Finds a view that was identified by the {@code android:id} XML attribute that was processed
+     * in {@link Activity#onCreate}, or throws an IllegalArgumentException if the ID is invalid, or
+     * there is no matching view in the hierarchy.
+     * <p>
+     * <strong>Note:</strong> In most cases -- depending on compiler support --
+     * the resulting view is automatically cast to the target class type. If
+     * the target class type is unconstrained, an explicit cast may be
+     * necessary.
+     *
+     * @param id the ID to search for
+     * @return a view with given ID
+     * @see Activity#findViewById(int)
+     * @see android.support.v4.view.ViewCompat#requireViewById(View, int)
+     */
+    @NonNull
+    public static <T extends View> T requireViewById(@NonNull Activity activity, @IdRes int id) {
+        // TODO: use and link to Activity#requireViewById() directly, once available
+        T view = activity.findViewById(id);
+        if (view == null) {
+            throw new IllegalArgumentException("ID does not reference a View inside this Activity");
+        }
+        return view;
+    }
+
+    /**
      * When {@link android.app.ActivityOptions#makeSceneTransitionAnimation(Activity,
      * android.view.View, String)} was used to start an Activity, <var>callback</var>
      * will be called to handle shared elements on the <i>launched</i> Activity. This requires
@@ -538,6 +564,7 @@ public class ActivityCompat extends ContextCompat {
      * URIs. {@code null} if no content URIs are associated with the event or if permissions could
      * not be granted.
      */
+    @Nullable
     public static DragAndDropPermissionsCompat requestDragAndDropPermissions(Activity activity,
             DragEvent dragEvent) {
         return DragAndDropPermissionsCompat.request(activity, dragEvent);

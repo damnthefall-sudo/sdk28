@@ -29,7 +29,7 @@ import static android.view.WindowManager.DOCKED_RIGHT;
 import static android.view.WindowManager.DOCKED_TOP;
 import static com.android.server.wm.AppTransition.DEFAULT_APP_TRANSITION_DURATION;
 import static com.android.server.wm.AppTransition.TOUCH_RESPONSE_INTERPOLATOR;
-import static com.android.server.wm.AppTransition.TRANSIT_NONE;
+import static android.view.WindowManager.TRANSIT_NONE;
 import static com.android.server.wm.WindowManagerDebugConfig.TAG_WITH_CLASS_NAME;
 import static com.android.server.wm.WindowManagerDebugConfig.TAG_WM;
 import static com.android.server.wm.WindowManagerService.H.NOTIFY_DOCKED_STACK_MINIMIZED_CHANGED;
@@ -454,8 +454,11 @@ public class DockedStackDividerController {
                 inputMethodManagerInternal.hideCurrentInputMethod();
                 mImeHideRequested = true;
             }
+
+            // If a primary stack was just created, it will not have access to display content at
+            // this point so pass it from here to get a valid dock side.
             final TaskStack stack = mDisplayContent.getSplitScreenPrimaryStackIgnoringVisibility();
-            mOriginalDockedSide = stack.getDockSide();
+            mOriginalDockedSide = stack.getDockSideForDisplay(mDisplayContent);
             return;
         }
         mOriginalDockedSide = DOCKED_INVALID;
@@ -604,7 +607,7 @@ public class DockedStackDividerController {
         if (wasMinimized && mMinimizedDock && containsAppInDockedStack(openingApps)
                 && appTransition != TRANSIT_NONE &&
                 !AppTransition.isKeyguardGoingAwayTransit(appTransition)) {
-            mService.showRecentApps(true /* fromHome */);
+            mService.showRecentApps();
         }
     }
 

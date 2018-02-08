@@ -68,10 +68,9 @@ import java.io.FileDescriptor;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * A service that collects, aggregates, and persists application usage data.
@@ -116,6 +115,26 @@ public class UsageStatsService extends SystemService implements
 
     AppStandbyController mAppStandby;
 
+    private UsageStatsManagerInternal.AppIdleStateChangeListener mStandbyChangeListener =
+            new UsageStatsManagerInternal.AppIdleStateChangeListener() {
+                @Override
+                public void onAppIdleStateChanged(String packageName, int userId, boolean idle,
+                        int bucket) {
+                    Event event = new Event();
+                    event.mEventType = Event.STANDBY_BUCKET_CHANGED;
+                    event.mBucket = bucket;
+                    event.mPackage = packageName;
+                    // This will later be converted to system time.
+                    event.mTimeStamp = SystemClock.elapsedRealtime();
+                    mHandler.obtainMessage(MSG_REPORT_EVENT, userId, 0, event).sendToTarget();
+                }
+
+                @Override
+                public void onParoleStateChanged(boolean isParoleOn) {
+
+                }
+            };
+
     public UsageStatsService(Context context) {
         super(context);
     }
@@ -130,6 +149,7 @@ public class UsageStatsService extends SystemService implements
 
         mAppStandby = new AppStandbyController(getContext(), BackgroundThread.get().getLooper());
 
+        mAppStandby.addListener(mStandbyChangeListener);
         File systemDataDir = new File(Environment.getDataDirectory(), "system");
         mUsageStatsDir = new File(systemDataDir, "usagestats");
         mUsageStatsDir.mkdirs();
@@ -478,7 +498,6 @@ public class UsageStatsService extends SystemService implements
             IndentingPrintWriter idpw = new IndentingPrintWriter(pw, "  ");
 
             boolean checkin = false;
-            boolean history = false;
             String pkg = null;
 
             if (args != null) {
@@ -486,11 +505,6 @@ public class UsageStatsService extends SystemService implements
                     String arg = args[i];
                     if ("--checkin".equals(arg)) {
                         checkin = true;
-                    } else if ("--history".equals(arg)) {
-                        history = true;
-                    } else if ("history".equals(arg)) {
-                        history = true;
-                        break;
                     } else if ("flush".equals(arg)) {
                         flushToDiskLocked();
                         pw.println("Flushed stats to disk");
@@ -514,9 +528,6 @@ public class UsageStatsService extends SystemService implements
                 } else {
                     mUserState.valueAt(i).dump(idpw, pkg);
                     idpw.println();
-                    if (history) {
-                        mAppStandby.dumpHistory(idpw, userId);
-                    }
                 }
                 mAppStandby.dumpUser(idpw, userId, pkg);
                 idpw.decreaseIndent();
@@ -1020,6 +1031,30 @@ public class UsageStatsService extends SystemService implements
                 boolean obfuscateInstantApps) {
             return UsageStatsService.this.queryUsageStats(
                     userId, intervalType, beginTime, endTime, obfuscateInstantApps);
+        }
+
+        @Override
+        public void setLastJobRunTime(String packageName, int userId, long elapsedRealtime) {
+            mAppStandby.setLastJobRunTime(packageName, userId, elapsedRealtime);
+        }
+
+        @Override
+        public long getTimeSinceLastJobRun(String packageName, int userId) {
+            return mAppStandby.getTimeSinceLastJobRun(packageName, userId);
+        }
+
+        public void onActiveAdminAdded(String packageName, int userId) {
+            mAppStandby.addActiveDeviceAdmin(packageName, userId);
+        }
+
+        @Override
+        public void setActiveAdminApps(Set<String> packageNames, int userId) {
+            mAppStandby.setActiveAdminApps(packageNames, userId);
+        }
+
+        @Override
+        public void onAdminDataAvailable() {
+            mAppStandby.onAdminDataAvailable();
         }
     }
 }

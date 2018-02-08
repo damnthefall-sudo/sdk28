@@ -46,6 +46,7 @@ import android.net.wifi.SupplicantState;
 import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiManager;
 import android.net.wifi.WifiSsid;
+import android.os.HidlSupport.Mutable;
 import android.os.HwRemoteBinder;
 import android.os.RemoteException;
 import android.text.TextUtils;
@@ -451,7 +452,6 @@ public class SupplicantStaIfaceHal {
     public boolean registerDeathHandler(@NonNull SupplicantDeathEventHandler handler) {
         if (mDeathEventHandler != null) {
             Log.e(TAG, "Death handler already present");
-            return false;
         }
         mDeathEventHandler = handler;
         return true;
@@ -464,7 +464,6 @@ public class SupplicantStaIfaceHal {
     public boolean deregisterDeathHandler() {
         if (mDeathEventHandler == null) {
             Log.e(TAG, "No Death handler present");
-            return false;
         }
         mDeathEventHandler = null;
         return true;
@@ -2263,18 +2262,6 @@ public class SupplicantStaIfaceHal {
                 return SupplicantState.COMPLETED;
             default:
                 throw new IllegalArgumentException("Invalid state: " + state);
-        }
-    }
-
-    private static class Mutable<E> {
-        public E value;
-
-        Mutable() {
-            value = null;
-        }
-
-        Mutable(E value) {
-            this.value = value;
         }
     }
 

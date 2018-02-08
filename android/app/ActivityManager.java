@@ -60,6 +60,7 @@ import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.os.SystemProperties;
 import android.os.UserHandle;
+import android.os.WorkSource;
 import android.text.TextUtils;
 import android.util.ArrayMap;
 import android.util.DisplayMetrics;
@@ -180,7 +181,8 @@ public class ActivityManager {
             BUGREPORT_OPTION_INTERACTIVE,
             BUGREPORT_OPTION_REMOTE,
             BUGREPORT_OPTION_WEAR,
-            BUGREPORT_OPTION_TELEPHONY
+            BUGREPORT_OPTION_TELEPHONY,
+            BUGREPORT_OPTION_WIFI
     })
     public @interface BugreportMode {}
     /**
@@ -213,6 +215,12 @@ public class ActivityManager {
      * @hide
      */
     public static final int BUGREPORT_OPTION_TELEPHONY = 4;
+
+    /**
+     * Takes a lightweight bugreport that only includes a few sections related to Wifi.
+     * @hide
+     */
+    public static final int BUGREPORT_OPTION_WIFI = 5;
 
     /**
      * <a href="{@docRoot}guide/topics/manifest/meta-data-element.html">{@code
@@ -442,6 +450,31 @@ public class ActivityManager {
      */
     public static final int INTENT_SENDER_FOREGROUND_SERVICE = 5;
 
+    /**
+     * Extra included on intents that are delegating the call to
+     * ActivityManager#startActivityAsCaller to another app.  This token is necessary for that call
+     * to succeed.  Type is IBinder.
+     * @hide
+     */
+    public static final String EXTRA_PERMISSION_TOKEN = "android.app.extra.PERMISSION_TOKEN";
+
+    /**
+     * Extra included on intents that contain an EXTRA_INTENT, with options that the contained
+     * intent may want to be started with.  Type is Bundle.
+     * TODO: remove once the ChooserActivity moves to systemui
+     * @hide
+     */
+    public static final String EXTRA_OPTIONS = "android.app.extra.OPTIONS";
+
+    /**
+     * Extra included on intents that contain an EXTRA_INTENT, use this boolean value for the
+     * parameter of the same name when starting the contained intent.
+     * TODO: remove once the ChooserActivity moves to systemui
+     * @hide
+     */
+    public static final String EXTRA_IGNORE_TARGET_SECURITY =
+            "android.app.extra.EXTRA_IGNORE_TARGET_SECURITY";
+
     /** @hide User operation call: success! */
     public static final int USER_OP_SUCCESS = 0;
 
@@ -484,11 +517,11 @@ public class ActivityManager {
      * all activities that are visible to the user. */
     public static final int PROCESS_STATE_TOP = 2;
 
-    /** @hide Process is hosting a foreground service due to a system binding. */
-    public static final int PROCESS_STATE_BOUND_FOREGROUND_SERVICE = 3;
-
     /** @hide Process is hosting a foreground service. */
-    public static final int PROCESS_STATE_FOREGROUND_SERVICE = 4;
+    public static final int PROCESS_STATE_FOREGROUND_SERVICE = 3;
+
+    /** @hide Process is hosting a foreground service due to a system binding. */
+    public static final int PROCESS_STATE_BOUND_FOREGROUND_SERVICE = 4;
 
     /** @hide Process is important to the user, and something they are aware of. */
     public static final int PROCESS_STATE_IMPORTANT_FOREGROUND = 5;
@@ -3085,11 +3118,11 @@ public class ActivityManager {
             } else if (importance >= IMPORTANCE_VISIBLE) {
                 return PROCESS_STATE_IMPORTANT_FOREGROUND;
             } else if (importance >= IMPORTANCE_TOP_SLEEPING_PRE_28) {
-                return PROCESS_STATE_FOREGROUND_SERVICE;
+                return PROCESS_STATE_IMPORTANT_FOREGROUND;
             } else if (importance >= IMPORTANCE_FOREGROUND_SERVICE) {
                 return PROCESS_STATE_FOREGROUND_SERVICE;
             } else {
-                return PROCESS_STATE_BOUND_FOREGROUND_SERVICE;
+                return PROCESS_STATE_TOP;
             }
         }
 
@@ -3911,10 +3944,10 @@ public class ActivityManager {
     /**
      * @hide
      */
-    public static void noteWakeupAlarm(PendingIntent ps, int sourceUid, String sourcePkg,
-            String tag) {
+    public static void noteWakeupAlarm(PendingIntent ps, WorkSource workSource, int sourceUid,
+            String sourcePkg, String tag) {
         try {
-            getService().noteWakeupAlarm((ps != null) ? ps.getTarget() : null,
+            getService().noteWakeupAlarm((ps != null) ? ps.getTarget() : null, workSource,
                     sourceUid, sourcePkg, tag);
         } catch (RemoteException ex) {
         }
@@ -3923,19 +3956,24 @@ public class ActivityManager {
     /**
      * @hide
      */
-    public static void noteAlarmStart(PendingIntent ps, int sourceUid, String tag) {
+    public static void noteAlarmStart(PendingIntent ps, WorkSource workSource, int sourceUid,
+            String tag) {
         try {
-            getService().noteAlarmStart((ps != null) ? ps.getTarget() : null, sourceUid, tag);
+            getService().noteAlarmStart((ps != null) ? ps.getTarget() : null, workSource,
+                    sourceUid, tag);
         } catch (RemoteException ex) {
         }
     }
 
+
     /**
      * @hide
      */
-    public static void noteAlarmFinish(PendingIntent ps, int sourceUid, String tag) {
+    public static void noteAlarmFinish(PendingIntent ps, WorkSource workSource, int sourceUid,
+            String tag) {
         try {
-            getService().noteAlarmFinish((ps != null) ? ps.getTarget() : null, sourceUid, tag);
+            getService().noteAlarmFinish((ps != null) ? ps.getTarget() : null, workSource,
+                    sourceUid, tag);
         } catch (RemoteException ex) {
         }
     }

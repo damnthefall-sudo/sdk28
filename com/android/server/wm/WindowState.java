@@ -20,6 +20,7 @@ import static android.app.ActivityManager.StackId.INVALID_STACK_ID;
 import static android.os.Trace.TRACE_TAG_WINDOW_MANAGER;
 import static android.view.Display.DEFAULT_DISPLAY;
 import static android.view.SurfaceControl.Transaction;
+import static android.view.View.SYSTEM_UI_FLAG_FULLSCREEN;
 import static android.view.ViewTreeObserver.InternalInsetsInfo.TOUCHABLE_INSETS_CONTENT;
 import static android.view.ViewTreeObserver.InternalInsetsInfo.TOUCHABLE_INSETS_FRAME;
 import static android.view.ViewTreeObserver.InternalInsetsInfo.TOUCHABLE_INSETS_REGION;
@@ -30,6 +31,7 @@ import static android.view.WindowManager.LayoutParams.FLAG_ALLOW_LOCK_WHILE_SCRE
 import static android.view.WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM;
 import static android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND;
 import static android.view.WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD;
+import static android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN;
 import static android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
 import static android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
 import static android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL;
@@ -39,6 +41,8 @@ import static android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED;
 import static android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON;
 import static android.view.WindowManager.LayoutParams.FORMAT_CHANGED;
 import static android.view.WindowManager.LayoutParams.LAST_SUB_WINDOW;
+import static android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+import static android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER;
 import static android.view.WindowManager.LayoutParams.MATCH_PARENT;
 import static android.view.WindowManager.LayoutParams.PRIVATE_FLAG_COMPATIBLE_WINDOW;
 import static android.view.WindowManager.LayoutParams.PRIVATE_FLAG_HIDE_NON_SYSTEM_OVERLAY_WINDOWS;
@@ -48,8 +52,8 @@ import static android.view.WindowManager.LayoutParams.PRIVATE_FLAG_WILL_NOT_REPL
 import static android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE;
 import static android.view.WindowManager.LayoutParams.SOFT_INPUT_MASK_ADJUST;
 import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION;
-import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION_MEDIA_OVERLAY;
 import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION_MEDIA;
+import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION_MEDIA_OVERLAY;
 import static android.view.WindowManager.LayoutParams.TYPE_APPLICATION_STARTING;
 import static android.view.WindowManager.LayoutParams.TYPE_BASE_APPLICATION;
 import static android.view.WindowManager.LayoutParams.TYPE_DOCK_DIVIDER;
@@ -112,15 +116,36 @@ import static com.android.server.wm.proto.WindowStateProto.CHILD_WINDOWS;
 import static com.android.server.wm.proto.WindowStateProto.CONTAINING_FRAME;
 import static com.android.server.wm.proto.WindowStateProto.CONTENT_FRAME;
 import static com.android.server.wm.proto.WindowStateProto.CONTENT_INSETS;
+import static com.android.server.wm.proto.WindowStateProto.CUTOUT;
+import static com.android.server.wm.proto.WindowStateProto.DECOR_FRAME;
+import static com.android.server.wm.proto.WindowStateProto.DESTROYING;
+import static com.android.server.wm.proto.WindowStateProto.DISPLAY_FRAME;
 import static com.android.server.wm.proto.WindowStateProto.DISPLAY_ID;
 import static com.android.server.wm.proto.WindowStateProto.FRAME;
 import static com.android.server.wm.proto.WindowStateProto.GIVEN_CONTENT_INSETS;
+import static com.android.server.wm.proto.WindowStateProto.HAS_SURFACE;
 import static com.android.server.wm.proto.WindowStateProto.IDENTIFIER;
+import static com.android.server.wm.proto.WindowStateProto.IS_ON_SCREEN;
+import static com.android.server.wm.proto.WindowStateProto.IS_READY_FOR_DISPLAY;
+import static com.android.server.wm.proto.WindowStateProto.IS_VISIBLE;
+import static com.android.server.wm.proto.WindowStateProto.OUTSETS;
+import static com.android.server.wm.proto.WindowStateProto.OUTSET_FRAME;
+import static com.android.server.wm.proto.WindowStateProto.OVERSCAN_FRAME;
+import static com.android.server.wm.proto.WindowStateProto.OVERSCAN_INSETS;
 import static com.android.server.wm.proto.WindowStateProto.PARENT_FRAME;
-import static com.android.server.wm.proto.WindowStateProto.STACK_ID;
+import static com.android.server.wm.proto.WindowStateProto.REMOVED;
+import static com.android.server.wm.proto.WindowStateProto.REMOVE_ON_EXIT;
+import static com.android.server.wm.proto.WindowStateProto.REQUESTED_HEIGHT;
+import static com.android.server.wm.proto.WindowStateProto.REQUESTED_WIDTH;
 import static com.android.server.wm.proto.WindowStateProto.SHOWN_POSITION;
+import static com.android.server.wm.proto.WindowStateProto.STABLE_INSETS;
+import static com.android.server.wm.proto.WindowStateProto.STACK_ID;
 import static com.android.server.wm.proto.WindowStateProto.SURFACE_INSETS;
 import static com.android.server.wm.proto.WindowStateProto.SURFACE_POSITION;
+import static com.android.server.wm.proto.WindowStateProto.SYSTEM_UI_VISIBILITY;
+import static com.android.server.wm.proto.WindowStateProto.VIEW_VISIBILITY;
+import static com.android.server.wm.proto.WindowStateProto.VISIBLE_FRAME;
+import static com.android.server.wm.proto.WindowStateProto.VISIBLE_INSETS;
 import static com.android.server.wm.proto.WindowStateProto.WINDOW_CONTAINER;
 
 import android.annotation.CallSuper;
@@ -142,6 +167,7 @@ import android.os.SystemClock;
 import android.os.Trace;
 import android.os.UserHandle;
 import android.os.WorkSource;
+import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.util.MergedConfiguration;
 import android.util.Slog;
@@ -167,6 +193,7 @@ import android.view.animation.Animation;
 import android.view.animation.AnimationUtils;
 import android.view.animation.Interpolator;
 
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.util.ToBooleanFunction;
 import com.android.server.input.InputWindowHandle;
 import com.android.server.policy.WindowManagerPolicy;
@@ -176,7 +203,6 @@ import java.io.PrintWriter;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.LinkedList;
 import java.util.function.Predicate;
 
 /** A window in the window manager. */
@@ -602,6 +628,11 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
     private boolean mDrawnStateEvaluated;
 
     private final Point mSurfacePosition = new Point();
+
+    /**
+     * A region inside of this window to be excluded from touch-related focus switches.
+     */
+    private TapExcludeRegionHolder mTapExcludeRegionHolder;
 
     /**
      * Compares two window sub-layers and returns -1 if the first is lesser than the second in terms
@@ -1521,10 +1552,13 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
     @Override
     public boolean canAffectSystemUiFlags() {
         final boolean translucent = mAttrs.alpha == 0.0f;
+        if (translucent) {
+            return false;
+        }
         if (mAppToken == null) {
             final boolean shown = mWinAnimator.getShown();
             final boolean exiting = mAnimatingExit || mDestroying;
-            return shown && !exiting && !translucent;
+            return shown && !exiting;
         } else {
             return !mAppToken.isHidden();
         }
@@ -1840,6 +1874,11 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
         final int type = mAttrs.type;
         if (WindowManagerService.excludeWindowTypeFromTapOutTask(type)) {
             dc.mTapExcludedWindows.remove(this);
+        }
+        if (mTapExcludeRegionHolder != null) {
+            // If a tap exclude region container was initialized for this window, then it should've
+            // also been registered in display.
+            dc.mTapExcludeProvidingWindows.remove(this);
         }
         mPolicy.removeWindowLw(this);
 
@@ -2222,12 +2261,13 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
                         mWinAnimator + ": " + mPolicyVisibilityAfterAnim);
             }
             mPolicyVisibility = mPolicyVisibilityAfterAnim;
-            setDisplayLayoutNeeded();
             if (!mPolicyVisibility) {
+                mWinAnimator.hide("checkPolicyVisibilityChange");
                 if (mService.mCurrentFocus == this) {
                     if (DEBUG_FOCUS_LIGHT) Slog.i(TAG,
                             "setAnimationLocked: setting mFocusMayChange true");
                     mService.mFocusMayChange = true;
+                    setDisplayLayoutNeeded();
                 }
                 // Window is no longer visible -- make sure if we were waiting
                 // for it to be displayed before enabling the display, that
@@ -2641,8 +2681,11 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
 
     boolean destroySurface(boolean cleanupOnResume, boolean appStopped) {
         boolean destroyedSomething = false;
-        for (int i = mChildren.size() - 1; i >= 0; --i) {
-            final WindowState c = mChildren.get(i);
+
+        // Copying to a different list as multiple children can be removed.
+        final ArrayList<WindowState> childWindows = new ArrayList<>(mChildren);
+        for (int i = childWindows.size() - 1; i >= 0; --i) {
+            final WindowState c = childWindows.get(i);
             destroyedSomething |= c.destroySurface(cleanupOnResume, appStopped);
         }
 
@@ -2948,7 +2991,33 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
 
     /** @return true when the window is in fullscreen task, but has non-fullscreen bounds set. */
     boolean isLetterboxedAppWindow() {
-        return !isInMultiWindowMode() && mAppToken != null && !mAppToken.matchParentBounds();
+        return !isInMultiWindowMode() && mAppToken != null && !mAppToken.matchParentBounds()
+                || isLetterboxedForDisplayCutoutLw();
+    }
+
+    @Override
+    public boolean isLetterboxedForDisplayCutoutLw() {
+        if (mAppToken == null) {
+            // Only windows with an AppWindowToken are letterboxed.
+            return false;
+        }
+        if (getDisplayContent().getDisplayInfo().displayCutout == null) {
+            // No cutout, no letterbox.
+            return false;
+        }
+        if (mAttrs.layoutInDisplayCutoutMode == LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS) {
+            // Layout in cutout, no letterbox.
+            return false;
+        }
+        // TODO: handle dialogs and other non-filling windows
+        if (mAttrs.layoutInDisplayCutoutMode == LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER) {
+            // Never layout in cutout, always letterbox.
+            return true;
+        }
+        // Letterbox if any fullscreen mode is set.
+        final int fl = mAttrs.flags;
+        final int sysui = mSystemUiVisibility;
+        return (fl & FLAG_FULLSCREEN) != 0 || (sysui & (SYSTEM_UI_FLAG_FULLSCREEN)) != 0;
     }
 
     boolean isDragResizeChanged() {
@@ -3083,10 +3152,32 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
         for (int i = 0; i < mChildren.size(); i++) {
             mChildren.get(i).writeToProto(proto, CHILD_WINDOWS, trim);
         }
+        proto.write(REQUESTED_WIDTH, mRequestedWidth);
+        proto.write(REQUESTED_HEIGHT, mRequestedHeight);
+        proto.write(VIEW_VISIBILITY, mViewVisibility);
+        proto.write(SYSTEM_UI_VISIBILITY, mSystemUiVisibility);
+        proto.write(HAS_SURFACE, mHasSurface);
+        proto.write(IS_READY_FOR_DISPLAY, isReadyForDisplay());
+        mDisplayFrame.writeToProto(proto, DISPLAY_FRAME);
+        mOverscanFrame.writeToProto(proto, OVERSCAN_FRAME);
+        mVisibleFrame.writeToProto(proto, VISIBLE_FRAME);
+        mDecorFrame.writeToProto(proto, DECOR_FRAME);
+        mOutsetFrame.writeToProto(proto, OUTSET_FRAME);
+        mOverscanInsets.writeToProto(proto, OVERSCAN_INSETS);
+        mVisibleInsets.writeToProto(proto, VISIBLE_INSETS);
+        mStableInsets.writeToProto(proto, STABLE_INSETS);
+        mOutsets.writeToProto(proto, OUTSETS);
+        mDisplayCutout.writeToProto(proto, CUTOUT);
+        proto.write(REMOVE_ON_EXIT, mRemoveOnExit);
+        proto.write(DESTROYING, mDestroying);
+        proto.write(REMOVED, mRemoved);
+        proto.write(IS_ON_SCREEN, isOnScreen());
+        proto.write(IS_VISIBLE, isVisible());
         proto.end(token);
     }
 
-    void writeIdentifierToProto(ProtoOutputStream proto, long fieldId) {
+    @Override
+    public void writeIdentifierToProto(ProtoOutputStream proto, long fieldId) {
         final long token = proto.start(fieldId);
         proto.write(HASH_CODE, System.identityHashCode(this));
         proto.write(USER_ID, UserHandle.getUserId(mOwnerUid));
@@ -3675,6 +3766,13 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
             windowInfo.activityToken = mAppToken.appToken.asBinder();
         }
         windowInfo.title = mAttrs.accessibilityTitle;
+        // Panel windows have no public way to set the a11y title directly. Use the
+        // regular title as a fallback.
+        if (TextUtils.isEmpty(windowInfo.title)
+                && (mAttrs.type >= WindowManager.LayoutParams.FIRST_SUB_WINDOW)
+                && (mAttrs.type <= WindowManager.LayoutParams.LAST_SUB_WINDOW)) {
+            windowInfo.title = mAttrs.getTitle();
+        }
         windowInfo.accessibilityIdOfAnchor = mAttrs.accessibilityIdOfAnchor;
         windowInfo.focused = isFocused();
         Task task = getTask();
@@ -3865,6 +3963,22 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
         return null;
     }
 
+    /**
+     * @return True if we our one of our ancestors has {@link #mAnimatingExit} set to true, false
+     *         otherwise.
+     */
+    @VisibleForTesting
+    boolean isSelfOrAncestorWindowAnimatingExit() {
+        WindowState window = this;
+        do {
+            if (window.mAnimatingExit) {
+                return true;
+            }
+            window = window.getParentWindow();
+        } while (window != null);
+        return false;
+    }
+
     void onExitAnimationDone() {
         if (DEBUG_ANIM) Slog.v(TAG, "onExitAnimationDone in " + this
                 + ": exiting=" + mAnimatingExit + " remove=" + mRemoveOnExit
@@ -3872,8 +3986,7 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
 
         if (!mChildren.isEmpty()) {
             // Copying to a different list as multiple children can be removed.
-            // TODO: Not sure if we really need to copy this into a different list.
-            final LinkedList<WindowState> childWindows = new LinkedList(mChildren);
+            final ArrayList<WindowState> childWindows = new ArrayList<>(mChildren);
             for (int i = childWindows.size() - 1; i >= 0; i--) {
                 childWindows.get(i).onExitAnimationDone();
             }
@@ -3901,7 +4014,7 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
             mService.mAccessibilityController.onSomeWindowResizedOrMovedLocked();
         }
 
-        if (!mAnimatingExit) {
+        if (!isSelfOrAncestorWindowAnimatingExit()) {
             return;
         }
 
@@ -4291,8 +4404,22 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
         float9[Matrix.MSKEW_Y] = mWinAnimator.mDtDx;
         float9[Matrix.MSKEW_X] = mWinAnimator.mDtDy;
         float9[Matrix.MSCALE_Y] = mWinAnimator.mDsDy;
-        float9[Matrix.MTRANS_X] = mSurfacePosition.x + mShownPosition.x;
-        float9[Matrix.MTRANS_Y] = mSurfacePosition.y + mShownPosition.y;
+        int x = mSurfacePosition.x + mShownPosition.x;
+        int y = mSurfacePosition.y + mShownPosition.y;
+
+        // If changed, also adjust transformFrameToSurfacePosition
+        final WindowContainer parent = getParent();
+        if (isChildWindow()) {
+            final WindowState parentWindow = getParentWindow();
+            x += parentWindow.mFrame.left - parentWindow.mAttrs.surfaceInsets.left;
+            y += parentWindow.mFrame.top - parentWindow.mAttrs.surfaceInsets.top;
+        } else if (parent != null) {
+            final Rect parentBounds = parent.getBounds();
+            x += parentBounds.left;
+            y += parentBounds.top;
+        }
+        float9[Matrix.MTRANS_X] = x;
+        float9[Matrix.MTRANS_Y] = y;
         float9[Matrix.MPERSP_0] = 0;
         float9[Matrix.MPERSP_1] = 0;
         float9[Matrix.MPERSP_2] = 1;
@@ -4417,6 +4544,7 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
 
         // Leash is now responsible for position, so set our position to 0.
         t.setPosition(mSurfaceControl, 0, 0);
+        mLastSurfacePosition.set(0, 0);
     }
 
     @Override
@@ -4432,13 +4560,16 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
         }
 
         transformFrameToSurfacePosition(mFrame.left, mFrame.top, mSurfacePosition);
-        if (!mSurfaceAnimator.hasLeash()) {
+        if (!mSurfaceAnimator.hasLeash() && !mLastSurfacePosition.equals(mSurfacePosition)) {
             t.setPosition(mSurfaceControl, mSurfacePosition.x, mSurfacePosition.y);
+            mLastSurfacePosition.set(mSurfacePosition.x, mSurfacePosition.y);
         }
     }
 
     private void transformFrameToSurfacePosition(int left, int top, Point outPoint) {
         outPoint.set(left, top);
+
+        // If changed, also adjust getTransformationMatrix
         final WindowContainer parentWindowContainer = getParent();
         if (isChildWindow()) {
             // TODO: This probably falls apart at some point and we should
@@ -4499,6 +4630,37 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
         }
     }
 
+    /**
+     * Update a tap exclude region with a rectangular area identified by provided id. The requested
+     * area will be clipped to the window bounds.
+     */
+    void updateTapExcludeRegion(int regionId, int left, int top, int width, int height) {
+        final DisplayContent currentDisplay = getDisplayContent();
+        if (currentDisplay == null) {
+            throw new IllegalStateException("Trying to update window not attached to any display.");
+        }
+
+        if (mTapExcludeRegionHolder == null) {
+            mTapExcludeRegionHolder = new TapExcludeRegionHolder();
+
+            // Make sure that this window is registered as one that provides a tap exclude region
+            // for its containing display.
+            currentDisplay.mTapExcludeProvidingWindows.add(this);
+        }
+
+        mTapExcludeRegionHolder.updateRegion(regionId, left, top, width, height);
+        // Trigger touch exclude region update on current display.
+        final boolean isAppFocusedOnDisplay = mService.mFocusedApp != null
+                && mService.mFocusedApp.getDisplayContent() == currentDisplay;
+        currentDisplay.setTouchExcludeRegion(isAppFocusedOnDisplay ? mService.mFocusedApp.getTask()
+                : null);
+    }
+
+    /** Union the region with current tap exclude region that this window provides. */
+    void amendTapExcludeRegion(Region region) {
+        mTapExcludeRegionHolder.amendRegion(region, getBounds());
+    }
+
     private final class MoveAnimationSpec implements AnimationSpec {
 
         private final long mDuration;
@@ -4509,7 +4671,8 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
         private MoveAnimationSpec(int fromX, int fromY, int toX, int toY) {
             final Animation anim = AnimationUtils.loadAnimation(mContext,
                     com.android.internal.R.anim.window_move_from_decor);
-            mDuration = anim.computeDurationHint();
+            mDuration = (long)
+                    (anim.computeDurationHint() * mService.getWindowAnimationScaleLocked());
             mInterpolator = anim.getInterpolator();
             mFrom.set(fromX, fromY);
             mTo.set(toX, toY);

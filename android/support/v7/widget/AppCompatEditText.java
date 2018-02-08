@@ -25,8 +25,10 @@ import android.graphics.drawable.Drawable;
 import android.support.annotation.DrawableRes;
 import android.support.annotation.Nullable;
 import android.support.annotation.RestrictTo;
+import android.support.v4.os.BuildCompat;
 import android.support.v4.view.TintableBackgroundView;
 import android.support.v7.appcompat.R;
+import android.text.Editable;
 import android.util.AttributeSet;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
@@ -69,6 +71,20 @@ public class AppCompatEditText extends EditText implements TintableBackgroundVie
         mTextHelper = AppCompatTextHelper.create(this);
         mTextHelper.loadFromAttributes(attrs, defStyleAttr);
         mTextHelper.applyCompoundDrawablesTints();
+    }
+
+    /**
+     * Return the text that the view is displaying. If an editable text has not been set yet, this
+     * will return null.
+     */
+    @Override
+    @Nullable public Editable getText() {
+        if (BuildCompat.isAtLeastP()) {
+            return super.getText();
+        }
+        // A bug pre-P makes getText() crash if called before the first setText due to a cast, so
+        // retrieve the editable text.
+        return super.getEditableText();
     }
 
     @Override

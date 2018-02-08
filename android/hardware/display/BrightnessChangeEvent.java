@@ -16,6 +16,8 @@
 
 package android.hardware.display;
 
+import android.annotation.SystemApi;
+import android.annotation.TestApi;
 import android.os.Parcel;
 import android.os.Parcelable;
 
@@ -23,51 +25,65 @@ import android.os.Parcelable;
  * Data about a brightness settings change.
  *
  * {@see DisplayManager.getBrightnessEvents()}
- * TODO make this SystemAPI
  * @hide
  */
+@SystemApi
+@TestApi
 public final class BrightnessChangeEvent implements Parcelable {
     /** Brightness in nits */
-    public int brightness;
+    public final float brightness;
 
     /** Timestamp of the change {@see System.currentTimeMillis()} */
-    public long timeStamp;
+    public final long timeStamp;
 
     /** Package name of focused activity when brightness was changed.
      *  This will be null if the caller of {@see DisplayManager.getBrightnessEvents()}
      *  does not have access to usage stats {@see UsageStatsManager} */
-    public String packageName;
+    public final String packageName;
 
     /** User id of of the user running when brightness was changed.
      * @hide */
-    public int userId;
+    public final int userId;
 
     /** Lux values of recent sensor data */
-    public float[] luxValues;
+    public final float[] luxValues;
 
     /** Timestamps of the lux sensor readings {@see System.currentTimeMillis()} */
-    public long[] luxTimestamps;
+    public final long[] luxTimestamps;
 
     /** Most recent battery level when brightness was changed or Float.NaN */
-    public float batteryLevel;
+    public final float batteryLevel;
 
     /** Color filter active to provide night mode */
-    public boolean nightMode;
+    public final boolean nightMode;
 
     /** If night mode color filter is active this will be the temperature in kelvin */
-    public int colorTemperature;
+    public final int colorTemperature;
 
-    /** Brightness level before slider adjustment */
-    public int lastBrightness;
+    /** Brightness le vel before slider adjustment */
+    public final float lastBrightness;
 
-    public BrightnessChangeEvent() {
+    /** @hide */
+    private BrightnessChangeEvent(float brightness, long timeStamp, String packageName,
+            int userId, float[] luxValues, long[] luxTimestamps, float batteryLevel,
+            boolean nightMode, int colorTemperature, float lastBrightness) {
+        this.brightness = brightness;
+        this.timeStamp = timeStamp;
+        this.packageName = packageName;
+        this.userId = userId;
+        this.luxValues = luxValues;
+        this.luxTimestamps = luxTimestamps;
+        this.batteryLevel = batteryLevel;
+        this.nightMode = nightMode;
+        this.colorTemperature = colorTemperature;
+        this.lastBrightness = lastBrightness;
     }
 
     /** @hide */
-    public BrightnessChangeEvent(BrightnessChangeEvent other) {
+    public BrightnessChangeEvent(BrightnessChangeEvent other, boolean redactPackage) {
         this.brightness = other.brightness;
         this.timeStamp = other.timeStamp;
-        this.packageName = other.packageName;
+        this.packageName = redactPackage ? null : other.packageName;
         this.userId = other.userId;
         this.luxValues = other.luxValues;
         this.luxTimestamps = other.luxTimestamps;
@@ -78,7 +94,7 @@ public final class BrightnessChangeEvent implements Parcelable {
     }
 
     private BrightnessChangeEvent(Parcel source) {
-        brightness = source.readInt();
+        brightness = source.readFloat();
         timeStamp = source.readLong();
         packageName = source.readString();
         userId = source.readInt();
@@ -87,7 +103,7 @@ public final class BrightnessChangeEvent implements Parcelable {
         batteryLevel = source.readFloat();
         nightMode = source.readBoolean();
         colorTemperature = source.readInt();
-        lastBrightness = source.readInt();
+        lastBrightness = source.readFloat();
     }
 
     public static final Creator<BrightnessChangeEvent> CREATOR =
@@ -107,7 +123,7 @@ public final class BrightnessChangeEvent implements Parcelable {
 
     @Override
     public void writeToParcel(Parcel dest, int flags) {
-        dest.writeInt(brightness);
+        dest.writeFloat(brightness);
         dest.writeLong(timeStamp);
         dest.writeString(packageName);
         dest.writeInt(userId);
@@ -116,6 +132,87 @@ public final class BrightnessChangeEvent implements Parcelable {
         dest.writeFloat(batteryLevel);
         dest.writeBoolean(nightMode);
         dest.writeInt(colorTemperature);
-        dest.writeInt(lastBrightness);
+        dest.writeFloat(lastBrightness);
+    }
+
+    /** @hide */
+    public static class Builder {
+        private float mBrightness;
+        private long mTimeStamp;
+        private String mPackageName;
+        private int mUserId;
+        private float[] mLuxValues;
+        private long[] mLuxTimestamps;
+        private float mBatteryLevel;
+        private boolean mNightMode;
+        private int mColorTemperature;
+        private float mLastBrightness;
+
+        /** {@see BrightnessChangeEvent#brightness} */
+        public Builder setBrightness(float brightness) {
+            mBrightness = brightness;
+            return this;
+        }
+
+        /** {@see BrightnessChangeEvent#timeStamp} */
+        public Builder setTimeStamp(long timeStamp) {
+            mTimeStamp = timeStamp;
+            return this;
+        }
+
+        /** {@see BrightnessChangeEvent#packageName} */
+        public Builder setPackageName(String packageName) {
+            mPackageName = packageName;
+            return this;
+        }
+
+        /** {@see BrightnessChangeEvent#userId} */
+        public Builder setUserId(int userId) {
+            mUserId = userId;
+            return this;
+        }
+
+        /** {@see BrightnessChangeEvent#luxValues} */
+        public Builder setLuxValues(float[] luxValues) {
+            mLuxValues = luxValues;
+            return this;
+        }
+
+        /** {@see BrightnessChangeEvent#luxTimestamps} */
+        public Builder setLuxTimestamps(long[] luxTimestamps) {
+            mLuxTimestamps = luxTimestamps;
+            return this;
+        }
+
+        /** {@see BrightnessChangeEvent#batteryLevel} */
+        public Builder setBatteryLevel(float batteryLevel) {
+            mBatteryLevel = batteryLevel;
+            return this;
+        }
+
+        /** {@see BrightnessChangeEvent#nightMode} */
+        public Builder setNightMode(boolean nightMode) {
+            mNightMode = nightMode;
+            return this;
+        }
+
+        /** {@see BrightnessChangeEvent#colorTemperature} */
+        public Builder setColorTemperature(int colorTemperature) {
+            mColorTemperature = colorTemperature;
+            return this;
+        }
+
+        /** {@see BrightnessChangeEvent#lastBrightness} */
+        public Builder setLastBrightness(float lastBrightness) {
+            mLastBrightness = lastBrightness;
+            return this;
+        }
+
+        /** Builds a BrightnessChangeEvent */
+        public BrightnessChangeEvent build() {
+            return new BrightnessChangeEvent(mBrightness, mTimeStamp,
+                    mPackageName, mUserId, mLuxValues, mLuxTimestamps, mBatteryLevel,
+                    mNightMode, mColorTemperature, mLastBrightness);
+        }
     }
 }

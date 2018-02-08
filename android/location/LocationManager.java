@@ -16,7 +16,10 @@
 
 package android.location;
 
-import com.android.internal.location.ProviderProperties;
+import static android.Manifest.permission.ACCESS_COARSE_LOCATION;
+import static android.Manifest.permission.ACCESS_FINE_LOCATION;
+import static android.Manifest.permission.LOCATION_HARDWARE;
+import static android.Manifest.permission.WRITE_SECURE_SETTINGS;
 
 import android.Manifest;
 import android.annotation.NonNull;
@@ -24,7 +27,6 @@ import android.annotation.RequiresPermission;
 import android.annotation.SuppressLint;
 import android.annotation.SystemApi;
 import android.annotation.SystemService;
-import android.annotation.TestApi;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
@@ -33,15 +35,14 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
+import android.os.Process;
 import android.os.RemoteException;
+import android.os.UserHandle;
 import android.util.Log;
-
+import com.android.internal.location.ProviderProperties;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
-
-import static android.Manifest.permission.ACCESS_COARSE_LOCATION;
-import static android.Manifest.permission.ACCESS_FINE_LOCATION;
 
 /**
  * This class provides access to the system location services.  These
@@ -882,6 +883,34 @@ public class LocationManager {
         requestLocationUpdates(request, null, null, intent);
     }
 
+    /**
+     * Set the last known location with a new location.
+     *
+     * <p>A privileged client can inject a {@link Location} if it has a better estimate of what
+     * the recent location is.  This is especially useful when the device boots up and the GPS
+     * chipset is in the process of getting the first fix.  If the client has cached the location,
+     * it can inject the {@link Location}, so if an app requests for a {@link Location} from {@link
+     * #getLastKnownLocation(String)}, the location information is still useful before getting
+     * the first fix.</p>
+     *
+     * <p> Useful in products like Auto.
+     *
+     * @param newLocation newly available {@link Location} object
+     * @return true if update was successful, false if not
+     *
+     * @throws SecurityException if no suitable permission is present
+     *
+     * @hide
+     */
+    @RequiresPermission(allOf = {LOCATION_HARDWARE, ACCESS_FINE_LOCATION})
+    public boolean injectLocation(Location newLocation) {
+        try {
+            return mService.injectLocation(newLocation);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
     private ListenerTransport wrapListener(LocationListener listener, Looper looper) {
         if (listener == null) return null;
         synchronized (mListeners) {
@@ -1142,13 +1171,57 @@ public class LocationManager {
     }
 
     /**
+     * Returns the current enabled/disabled status of location
+     *
+     * @return true if location is enabled. false if location is disabled.
+     */
+    public boolean isLocationEnabled() {
+        return isLocationEnabledForUser(Process.myUserHandle());
+    }
+
+    /**
+     * Method for enabling or disabling location.
+     *
+     * @param enabled true to enable location. false to disable location
+     * @param userHandle the user to set
+     * @return true if the value was set, false on database errors
+     *
+     * @hide
+     */
+    @SystemApi
+    @RequiresPermission(WRITE_SECURE_SETTINGS)
+    public void setLocationEnabledForUser(boolean enabled, UserHandle userHandle) {
+        try {
+            mService.setLocationEnabledForUser(enabled, userHandle.getIdentifier());
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Returns the current enabled/disabled status of location
+     *
+     * @param userHandle the user to query
+     * @return true location is enabled. false if location is disabled.
+     *
+     * @hide
+     */
+    @SystemApi
+    public boolean isLocationEnabledForUser(UserHandle userHandle) {
+        try {
+            return mService.isLocationEnabledForUser(userHandle.getIdentifier());
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
      * Returns the current enabled/disabled status of the given provider.
      *
      * <p>If the user has enabled this provider in the Settings menu, true
      * is returned otherwise false is returned
      *
-     * <p>Callers should instead use
-     * {@link android.provider.Settings.Secure#LOCATION_MODE}
+     * <p>Callers should instead use {@link #isLocationEnabled()}
      * unless they depend on provider-specific APIs such as
      * {@link #requestLocationUpdates(String, long, float, LocationListener)}.
      *
@@ -1167,6 +1240,64 @@ public class LocationManager {
 
         try {
             return mService.isProviderEnabled(provider);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Returns the current enabled/disabled status of the given provider and user.
+     *
+     * <p>If the user has enabled this provider in the Settings menu, true
+     * is returned otherwise false is returned
+     *
+     * <p>Callers should instead use {@link #isLocationEnabled()}
+     * unless they depend on provider-specific APIs such as
+     * {@link #requestLocationUpdates(String, long, float, LocationListener)}.
+     *
+     * <p>
+     * Before API version {@link android.os.Build.VERSION_CODES#LOLLIPOP}, this
+     * method would throw {@link SecurityException} if the location permissions
+     * were not sufficient to use the specified provider.
+     *
+     * @param provider the name of the provider
+     * @param userHandle the user to query
+     * @return true if the provider exists and is enabled
+     *
+     * @throws IllegalArgumentException if provider is null
+     * @hide
+     */
+    @SystemApi
+    public boolean isProviderEnabledForUser(String provider, UserHandle userHandle) {
+        checkProvider(provider);
+
+        try {
+            return mService.isProviderEnabledForUser(provider, userHandle.getIdentifier());
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Method for enabling or disabling a single location provider.
+     *
+     * @param provider the name of the provider
+     * @param enabled true to enable the provider. false to disable the provider
+     * @param userHandle the user to set
+     * @return true if the value was set, false on database errors
+     *
+     * @throws IllegalArgumentException if provider is null
+     * @hide
+     */
+    @SystemApi
+    @RequiresPermission(WRITE_SECURE_SETTINGS)
+    public boolean setProviderEnabledForUser(
+            String provider, boolean enabled, UserHandle userHandle) {
+        checkProvider(provider);
+
+        try {
+            return mService.setProviderEnabledForUser(
+                    provider, enabled, userHandle.getIdentifier());
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }

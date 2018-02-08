@@ -16,6 +16,7 @@
 
 package com.android.server.display;
 
+import android.app.ActivityThread;
 import android.content.res.Resources;
 import com.android.server.LocalServices;
 import com.android.server.lights.Light;
@@ -30,9 +31,12 @@ import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemProperties;
 import android.os.Trace;
+import android.text.TextUtils;
+import android.util.PathParser;
 import android.util.Slog;
 import android.util.SparseArray;
 import android.view.Display;
+import android.view.DisplayCutout;
 import android.view.DisplayEventReceiver;
 import android.view.Surface;
 import android.view.SurfaceControl;
@@ -389,7 +393,7 @@ final class LocalDisplayAdapter extends DisplayAdapter {
                             | DisplayDeviceInfo.FLAG_SUPPORTS_PROTECTED_BUFFERS;
                 }
 
-                final Resources res = getContext().getResources();
+                final Resources res = getOverlayContext().getResources();
                 if (mBuiltInDisplayId == SurfaceControl.BUILT_IN_DISPLAY_ID_MAIN) {
                     mInfo.name = res.getString(
                             com.android.internal.R.string.display_manager_built_in_display_name);
@@ -400,12 +404,14 @@ final class LocalDisplayAdapter extends DisplayAdapter {
                             && SystemProperties.getBoolean(PROPERTY_EMULATOR_CIRCULAR, false))) {
                         mInfo.flags |= DisplayDeviceInfo.FLAG_ROUND;
                     }
+                    mInfo.displayCutout = DisplayCutout.fromResources(res, mInfo.width);
                     mInfo.type = Display.TYPE_BUILT_IN;
                     mInfo.densityDpi = (int)(phys.density * 160 + 0.5f);
                     mInfo.xDpi = phys.xDpi;
                     mInfo.yDpi = phys.yDpi;
                     mInfo.touch = DisplayDeviceInfo.TOUCH_INTERNAL;
                 } else {
+                    mInfo.displayCutout = null;
                     mInfo.type = Display.TYPE_HDMI;
                     mInfo.flags |= DisplayDeviceInfo.FLAG_PRESENTATION;
                     mInfo.name = getContext().getResources().getString(
@@ -585,6 +591,11 @@ final class LocalDisplayAdapter extends DisplayAdapter {
             }
         }
 
+        @Override
+        public void onOverlayChangedLocked() {
+            updateDeviceInfoLocked();
+        }
+
         public boolean requestModeInTransactionLocked(int modeId) {
             if (modeId == 0) {
                 modeId = mDefaultModeId;
@@ -671,6 +682,11 @@ final class LocalDisplayAdapter extends DisplayAdapter {
             mInfo = null;
             sendDisplayDeviceEventLocked(this, DISPLAY_DEVICE_EVENT_CHANGED);
         }
+    }
+
+    /** Supplies a context whose Resources apply runtime-overlays */
+    Context getOverlayContext() {
+        return ActivityThread.currentActivityThread().getSystemUiContext();
     }
 
     /**

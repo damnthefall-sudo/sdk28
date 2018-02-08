@@ -27,7 +27,6 @@ import android.app.admin.DevicePolicyManager;
 import android.companion.CompanionDeviceManager;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.IPackageManager;
 import android.content.pm.PackageList;
@@ -62,8 +61,6 @@ import android.util.Slog;
 import android.util.Xml;
 import com.android.internal.util.XmlUtils;
 import com.android.server.LocalServices;
-import com.android.server.pm.PackageManagerService;
-import com.android.server.pm.PackageSetting;
 
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
@@ -135,6 +132,11 @@ public final class DefaultPermissionGrantPolicy {
         LOCATION_PERMISSIONS.add(Manifest.permission.ACCESS_COARSE_LOCATION);
     }
 
+    private static final Set<String> COARSE_LOCATION_PERMISSIONS = new ArraySet<>();
+    static {
+        COARSE_LOCATION_PERMISSIONS.add(Manifest.permission.ACCESS_COARSE_LOCATION);
+    }
+
     private static final Set<String> CALENDAR_PERMISSIONS = new ArraySet<>();
     static {
         CALENDAR_PERMISSIONS.add(Manifest.permission.READ_CALENDAR);
@@ -183,6 +185,7 @@ public final class DefaultPermissionGrantPolicy {
     private PackagesProvider mSmsAppPackagesProvider;
     private PackagesProvider mDialerAppPackagesProvider;
     private PackagesProvider mSimCallManagerPackagesProvider;
+    private PackagesProvider mUseOpenWifiAppPackagesProvider;
     private SyncAdapterPackagesProvider mSyncAdapterPackagesProvider;
 
     private ArrayMap<String, List<DefaultPermissionGrant>> mGrantExceptions;
@@ -244,6 +247,12 @@ public final class DefaultPermissionGrantPolicy {
     public void setSimCallManagerPackagesProvider(PackagesProvider provider) {
         synchronized (mLock) {
             mSimCallManagerPackagesProvider = provider;
+        }
+    }
+
+    public void setUseOpenWifiAppPackagesProvider(PackagesProvider provider) {
+        synchronized (mLock) {
+            mUseOpenWifiAppPackagesProvider = provider;
         }
     }
 
@@ -320,6 +329,7 @@ public final class DefaultPermissionGrantPolicy {
         final PackagesProvider smsAppPackagesProvider;
         final PackagesProvider dialerAppPackagesProvider;
         final PackagesProvider simCallManagerPackagesProvider;
+        final PackagesProvider useOpenWifiAppPackagesProvider;
         final SyncAdapterPackagesProvider syncAdapterPackagesProvider;
 
         synchronized (mLock) {
@@ -328,6 +338,7 @@ public final class DefaultPermissionGrantPolicy {
             smsAppPackagesProvider = mSmsAppPackagesProvider;
             dialerAppPackagesProvider = mDialerAppPackagesProvider;
             simCallManagerPackagesProvider = mSimCallManagerPackagesProvider;
+            useOpenWifiAppPackagesProvider = mUseOpenWifiAppPackagesProvider;
             syncAdapterPackagesProvider = mSyncAdapterPackagesProvider;
         }
 
@@ -341,6 +352,8 @@ public final class DefaultPermissionGrantPolicy {
                 ? dialerAppPackagesProvider.getPackages(userId) : null;
         String[] simCallManagerPackageNames = (simCallManagerPackagesProvider != null)
                 ? simCallManagerPackagesProvider.getPackages(userId) : null;
+        String[] useOpenWifiAppPackageNames = (useOpenWifiAppPackagesProvider != null)
+                ? useOpenWifiAppPackagesProvider.getPackages(userId) : null;
         String[] contactsSyncAdapterPackages = (syncAdapterPackagesProvider != null) ?
                 syncAdapterPackagesProvider.getPackages(ContactsContract.AUTHORITY, userId) : null;
         String[] calendarSyncAdapterPackages = (syncAdapterPackagesProvider != null) ?
@@ -453,6 +466,18 @@ public final class DefaultPermissionGrantPolicy {
                         getSystemPackage(simCallManagerPackageName);
                 if (simCallManagerPackage != null) {
                     grantDefaultPermissionsToDefaultSimCallManager(simCallManagerPackage,
+                            userId);
+                }
+            }
+        }
+
+        // Use Open Wifi
+        if (useOpenWifiAppPackageNames != null) {
+            for (String useOpenWifiPackageName : useOpenWifiAppPackageNames) {
+                PackageParser.Package useOpenWifiPackage =
+                        getSystemPackage(useOpenWifiPackageName);
+                if (useOpenWifiPackage != null) {
+                    grantDefaultPermissionsToDefaultSystemUseOpenWifiApp(useOpenWifiPackage,
                             userId);
                 }
             }
@@ -827,6 +852,13 @@ public final class DefaultPermissionGrantPolicy {
         }
     }
 
+    private void grantDefaultPermissionsToDefaultSystemUseOpenWifiApp(
+            PackageParser.Package useOpenWifiPackage, int userId) {
+        if (doesPackageSupportRuntimePermissions(useOpenWifiPackage)) {
+            grantRuntimePermissions(useOpenWifiPackage, COARSE_LOCATION_PERMISSIONS, userId);
+        }
+    }
+
     public void grantDefaultPermissionsToDefaultSmsApp(String packageName, int userId) {
         Log.i(TAG, "Granting permissions to default sms app for user:" + userId);
         if (packageName == null) {
@@ -856,6 +888,19 @@ public final class DefaultPermissionGrantPolicy {
             grantRuntimePermissions(dialerPackage, SMS_PERMISSIONS, false, true, userId);
             grantRuntimePermissions(dialerPackage, MICROPHONE_PERMISSIONS, false, true, userId);
             grantRuntimePermissions(dialerPackage, CAMERA_PERMISSIONS, false, true, userId);
+        }
+    }
+
+    public void grantDefaultPermissionsToDefaultUseOpenWifiApp(String packageName, int userId) {
+        Log.i(TAG, "Granting permissions to default Use Open WiFi app for user:" + userId);
+        if (packageName == null) {
+            return;
+        }
+        PackageParser.Package useOpenWifiPackage = getPackage(packageName);
+        if (useOpenWifiPackage != null
+                && doesPackageSupportRuntimePermissions(useOpenWifiPackage)) {
+            grantRuntimePermissions(
+                    useOpenWifiPackage, COARSE_LOCATION_PERMISSIONS, false, true, userId);
         }
     }
 
@@ -1014,7 +1059,7 @@ public final class DefaultPermissionGrantPolicy {
     }
 
     private void grantRuntimePermissions(PackageParser.Package pkg, Set<String> permissions,
-            boolean systemFixed, boolean isDefaultPhoneOrSms, int userId) {
+            boolean systemFixed, boolean ignoreSystemPackage, int userId) {
         if (pkg.requestedPermissions.isEmpty()) {
             return;
         }
@@ -1022,13 +1067,13 @@ public final class DefaultPermissionGrantPolicy {
         List<String> requestedPermissions = pkg.requestedPermissions;
         Set<String> grantablePermissions = null;
 
-        // If this is the default Phone or SMS app we grant permissions regardless
-        // whether the version on the system image declares the permission as used since
-        // selecting the app as the default Phone or SMS the user makes a deliberate
+        // In some cases, like for the Phone or SMS app, we grant permissions regardless
+        // of if the version on the system image declares the permission as used since
+        // selecting the app as the default for that function the user makes a deliberate
         // choice to grant this app the permissions needed to function. For all other
         // apps, (default grants on first boot and user creation) we don't grant default
         // permissions if the version on the system image does not declare them.
-        if (!isDefaultPhoneOrSms && pkg.isUpdatedSystemApp()) {
+        if (!ignoreSystemPackage && pkg.isUpdatedSystemApp()) {
             final PackageParser.Package disabledPkg =
                     mServiceInternal.getDisabledPackage(pkg.packageName);
             if (disabledPkg != null) {
@@ -1062,7 +1107,7 @@ public final class DefaultPermissionGrantPolicy {
                 // Unless the caller wants to override user choices. The override is
                 // to make sure we can grant the needed permission to the default
                 // sms and phone apps after the user chooses this in the UI.
-                if (flags == 0 || isDefaultPhoneOrSms) {
+                if (flags == 0 || ignoreSystemPackage) {
                     // Never clobber policy or system.
                     final int fixedFlags = PackageManager.FLAG_PERMISSION_SYSTEM_FIXED
                             | PackageManager.FLAG_PERMISSION_POLICY_FIXED;
@@ -1121,7 +1166,8 @@ public final class DefaultPermissionGrantPolicy {
         final String systemPackageName = mServiceInternal.getKnownPackageName(
                 PackageManagerInternal.PACKAGE_SYSTEM, UserHandle.USER_SYSTEM);
         final PackageParser.Package systemPackage = getPackage(systemPackageName);
-        return compareSignatures(systemPackage.mSignatures, pkg.mSignatures)
+        return compareSignatures(systemPackage.mSigningDetails.signatures,
+                pkg.mSigningDetails.signatures)
                 == PackageManager.SIGNATURE_MATCH;
     }
 

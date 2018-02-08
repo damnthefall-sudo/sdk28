@@ -128,12 +128,11 @@ public class NotificationChildrenContainer extends ViewGroup {
         mDividerHeight = res.getDimensionPixelSize(
                 R.dimen.notification_children_container_divider_height);
         mDividerAlpha = res.getFloat(R.dimen.notification_divider_alpha);
-        mHeaderHeight = res.getDimensionPixelSize(
-                R.dimen.notification_children_container_header_height);
         mNotificationHeaderMargin = res.getDimensionPixelSize(
                 R.dimen.notification_children_container_margin_top);
         mNotificatonTopPadding = res.getDimensionPixelSize(
                 R.dimen.notification_children_container_top_padding);
+        mHeaderHeight = mNotificationHeaderMargin + mNotificatonTopPadding;
         mCollapsedBottompadding = res.getDimensionPixelSize(
                 com.android.internal.R.dimen.notification_content_margin_bottom);
         mEnableShadowOnChildNotifications =
@@ -395,7 +394,7 @@ public class NotificationChildrenContainer extends ViewGroup {
             }
         } else if (mOverflowNumber != null) {
             removeView(mOverflowNumber);
-            if (isShown()) {
+            if (isShown() && isAttachedToWindow()) {
                 final View removedOverflowNumber = mOverflowNumber;
                 addTransientView(removedOverflowNumber, getTransientViewCount());
                 CrossFadeHelper.fadeOut(removedOverflowNumber, new Runnable() {

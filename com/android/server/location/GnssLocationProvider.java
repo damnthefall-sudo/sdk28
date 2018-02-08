@@ -84,8 +84,6 @@ import com.android.internal.location.GpsNetInitiatedHandler.GpsNiNotification;
 import com.android.internal.location.ProviderProperties;
 import com.android.internal.location.ProviderRequest;
 
-import com.android.server.power.BatterySaverPolicy;
-
 import libcore.io.IoUtils;
 
 import java.io.File;
@@ -579,7 +577,7 @@ public class GnssLocationProvider implements LocationProviderInterface {
         final PowerSaveState result =
                 mPowerManager.getPowerSaveState(ServiceType.GPS);
         switch (result.gpsMode) {
-            case BatterySaverPolicy.GPS_MODE_DISABLED_WHEN_SCREEN_OFF:
+            case PowerManager.LOCATION_MODE_GPS_DISABLED_WHEN_SCREEN_OFF:
                 // If we are in battery saver mode and the screen is off, disable GPS.
                 disableGps |= result.batterySaverEnabled && !mPowerManager.isInteractive();
                 break;
@@ -829,7 +827,7 @@ public class GnssLocationProvider implements LocationProviderInterface {
                 return isEnabled();
             }
         };
-        mGnssMetrics = new GnssMetrics();
+        mGnssMetrics = new GnssMetrics(mBatteryStats);
     }
 
     /**
@@ -2630,6 +2628,10 @@ public class GnssLocationProvider implements LocationProviderInterface {
         s.append("  mStarted=").append(mStarted).append('\n');
         s.append("  mFixInterval=").append(mFixInterval).append('\n');
         s.append("  mLowPowerMode=").append(mLowPowerMode).append('\n');
+        s.append("  mGnssMeasurementsProvider.isRegistered()=")
+                .append(mGnssMeasurementsProvider.isRegistered()).append('\n');
+        s.append("  mGnssNavigationMessageProvider.isRegistered()=")
+                .append(mGnssNavigationMessageProvider.isRegistered()).append('\n');
         s.append("  mDisableGps (battery saver mode)=").append(mDisableGps).append('\n');
         s.append("  mEngineCapabilities=0x").append(Integer.toHexString(mEngineCapabilities));
         s.append(" ( ");

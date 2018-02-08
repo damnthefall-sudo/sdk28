@@ -16,45 +16,80 @@
 
 package android.graphics;
 
+import static android.system.OsConstants.SEEK_CUR;
+import static android.system.OsConstants.SEEK_SET;
+
 import android.annotation.IntDef;
 import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.annotation.RawRes;
+import android.content.ContentResolver;
+import android.content.res.AssetFileDescriptor;
 import android.content.res.AssetManager;
 import android.content.res.Resources;
+import android.graphics.drawable.AnimatedImageDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.NinePatchDrawable;
+import android.net.Uri;
+import android.util.Size;
+import android.system.ErrnoException;
+import android.system.Os;
+import android.util.DisplayMetrics;
+import android.util.TypedValue;
+
+import libcore.io.IoUtils;
+import dalvik.system.CloseGuard;
 
 import java.nio.ByteBuffer;
+import java.io.File;
+import java.io.FileDescriptor;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.ArrayIndexOutOfBoundsException;
+import java.lang.AutoCloseable;
 import java.lang.NullPointerException;
 import java.lang.RuntimeException;
 import java.lang.annotation.Retention;
 import static java.lang.annotation.RetentionPolicy.SOURCE;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  *  Class for decoding images as {@link Bitmap}s or {@link Drawable}s.
- *  @hide
  */
-public final class ImageDecoder {
+public final class ImageDecoder implements AutoCloseable {
     /**
      *  Source of the encoded image data.
      */
     public static abstract class Source {
+        private Source() {}
+
         /* @hide */
+        @Nullable
         Resources getResources() { return null; }
 
         /* @hide */
-        void close() {}
+        int getDensity() { return Bitmap.DENSITY_NONE; }
 
         /* @hide */
-        abstract ImageDecoder createImageDecoder();
+        int computeDstDensity() {
+            Resources res = getResources();
+            if (res == null) {
+                return Bitmap.getDefaultDensity();
+            }
+
+            return res.getDisplayMetrics().densityDpi;
+        }
+
+        /* @hide */
+        @NonNull
+        abstract ImageDecoder createImageDecoder() throws IOException;
     };
 
     private static class ByteArraySource extends Source {
-        ByteArraySource(byte[] data, int offset, int length) {
+        ByteArraySource(@NonNull byte[] data, int offset, int length) {
             mData = data;
             mOffset = offset;
             mLength = length;
@@ -64,19 +99,19 @@ public final class ImageDecoder {
         private final int    mLength;
 
         @Override
-        public ImageDecoder createImageDecoder() {
+        public ImageDecoder createImageDecoder() throws IOException {
             return nCreate(mData, mOffset, mLength);
         }
     }
 
     private static class ByteBufferSource extends Source {
-        ByteBufferSource(ByteBuffer buffer) {
+        ByteBufferSource(@NonNull ByteBuffer buffer) {
             mBuffer = buffer;
         }
         private final ByteBuffer mBuffer;
 
         @Override
-        public ImageDecoder createImageDecoder() {
+        public ImageDecoder createImageDecoder() throws IOException {
             if (!mBuffer.isDirect() && mBuffer.hasArray()) {
                 int offset = mBuffer.arrayOffset() + mBuffer.position();
                 int length = mBuffer.limit() - mBuffer.position();
@@ -86,61 +121,194 @@ public final class ImageDecoder {
         }
     }
 
-    private static class ResourceSource extends Source {
-        ResourceSource(Resources res, int resId)
-                throws Resources.NotFoundException {
-            // Test that the resource can be found.
-            InputStream is = null;
+    private static class ContentResolverSource extends Source {
+        ContentResolverSource(@NonNull ContentResolver resolver, @NonNull Uri uri) {
+            mResolver = resolver;
+            mUri = uri;
+        }
+
+        private final ContentResolver mResolver;
+        private final Uri mUri;
+
+        @Override
+        public ImageDecoder createImageDecoder() throws IOException {
+            AssetFileDescriptor assetFd = null;
             try {
-                is = res.openRawResource(resId);
-            } finally {
-                if (is != null) {
-                    try {
-                        is.close();
-                    } catch (IOException e) {
-                    }
+                if (mUri.getScheme() == ContentResolver.SCHEME_CONTENT) {
+                    assetFd = mResolver.openTypedAssetFileDescriptor(mUri,
+                            "image/*", null);
+                } else {
+                    assetFd = mResolver.openAssetFileDescriptor(mUri, "r");
                 }
+            } catch (FileNotFoundException e) {
+                // Some images cannot be opened as AssetFileDescriptors (e.g.
+                // bmp, ico). Open them as InputStreams.
+                InputStream is = mResolver.openInputStream(mUri);
+                if (is == null) {
+                    throw new FileNotFoundException(mUri.toString());
+                }
+
+                return createFromStream(is);
             }
 
+            final FileDescriptor fd = assetFd.getFileDescriptor();
+            final long offset = assetFd.getStartOffset();
+
+            ImageDecoder decoder = null;
+            try {
+                try {
+                    Os.lseek(fd, offset, SEEK_SET);
+                    decoder = nCreate(fd);
+                } catch (ErrnoException e) {
+                    decoder = createFromStream(new FileInputStream(fd));
+                }
+            } finally {
+                if (decoder == null) {
+                    IoUtils.closeQuietly(assetFd);
+                } else {
+                    decoder.mAssetFd = assetFd;
+                }
+            }
+            return decoder;
+        }
+    }
+
+    @NonNull
+    private static ImageDecoder createFromFile(@NonNull File file) throws IOException {
+        FileInputStream stream = new FileInputStream(file);
+        FileDescriptor fd = stream.getFD();
+        try {
+            Os.lseek(fd, 0, SEEK_CUR);
+        } catch (ErrnoException e) {
+            return createFromStream(stream);
+        }
+
+        ImageDecoder decoder = null;
+        try {
+            decoder = nCreate(fd);
+        } finally {
+            if (decoder == null) {
+                IoUtils.closeQuietly(stream);
+            } else {
+                decoder.mInputStream = stream;
+            }
+        }
+        return decoder;
+    }
+
+    @NonNull
+    private static ImageDecoder createFromStream(@NonNull InputStream is) throws IOException {
+        // Arbitrary size matches BitmapFactory.
+        byte[] storage = new byte[16 * 1024];
+        ImageDecoder decoder = null;
+        try {
+            decoder = nCreate(is, storage);
+        } finally {
+            if (decoder == null) {
+                IoUtils.closeQuietly(is);
+            } else {
+                decoder.mInputStream = is;
+                decoder.mTempStorage = storage;
+            }
+        }
+
+        return decoder;
+    }
+
+    private static class InputStreamSource extends Source {
+        InputStreamSource(Resources res, InputStream is, int inputDensity) {
+            if (is == null) {
+                throw new IllegalArgumentException("The InputStream cannot be null");
+            }
             mResources = res;
-            mResId = resId;
+            mInputStream = is;
+            mInputDensity = res != null ? inputDensity : Bitmap.DENSITY_NONE;
         }
 
         final Resources mResources;
-        final int       mResId;
-        // This is just stored here in order to keep the underlying Asset
-        // alive. FIXME: Can I access the Asset (and keep it alive) without
-        // this object?
         InputStream mInputStream;
+        final int mInputDensity;
 
         @Override
         public Resources getResources() { return mResources; }
 
         @Override
-        public ImageDecoder createImageDecoder() {
-            // FIXME: Can I bypass creating the stream?
-            try {
-                mInputStream = mResources.openRawResource(mResId);
-            } catch (Resources.NotFoundException e) {
-                // This should never happen, since we already tested in the
-                // constructor.
-            }
-            if (!(mInputStream instanceof AssetManager.AssetInputStream)) {
-                // This should never happen.
-                throw new RuntimeException("Resource is not an asset?");
-            }
-            long asset = ((AssetManager.AssetInputStream) mInputStream).getNativeAsset();
-            return nCreate(asset);
-        }
+        public int getDensity() { return mInputDensity; }
 
         @Override
-        public void close() {
-            try {
-                mInputStream.close();
-            } catch (IOException e) {
-            } finally {
+        public ImageDecoder createImageDecoder() throws IOException {
+
+            synchronized (this) {
+                if (mInputStream == null) {
+                    throw new IOException("Cannot reuse InputStreamSource");
+                }
+                InputStream is = mInputStream;
                 mInputStream = null;
+                return createFromStream(is);
             }
+        }
+    }
+
+    private static class ResourceSource extends Source {
+        ResourceSource(@NonNull Resources res, int resId) {
+            mResources = res;
+            mResId = resId;
+            mResDensity = Bitmap.DENSITY_NONE;
+        }
+
+        final Resources mResources;
+        final int       mResId;
+        int             mResDensity;
+
+        @Override
+        public Resources getResources() { return mResources; }
+
+        @Override
+        public int getDensity() { return mResDensity; }
+
+        @Override
+        public ImageDecoder createImageDecoder() throws IOException {
+            // This is just used in order to access the underlying Asset and
+            // keep it alive. FIXME: Can we skip creating this object?
+            InputStream is = null;
+            ImageDecoder decoder = null;
+            TypedValue value = new TypedValue();
+            try {
+                is = mResources.openRawResource(mResId, value);
+
+                if (value.density == TypedValue.DENSITY_DEFAULT) {
+                    mResDensity = DisplayMetrics.DENSITY_DEFAULT;
+                } else if (value.density != TypedValue.DENSITY_NONE) {
+                    mResDensity = value.density;
+                }
+
+                if (!(is instanceof AssetManager.AssetInputStream)) {
+                    // This should never happen.
+                    throw new RuntimeException("Resource is not an asset?");
+                }
+                long asset = ((AssetManager.AssetInputStream) is).getNativeAsset();
+                decoder = nCreate(asset);
+            } finally {
+                if (decoder == null) {
+                    IoUtils.closeQuietly(is);
+                } else {
+                    decoder.mInputStream = is;
+                }
+            }
+            return decoder;
+        }
+    }
+
+    private static class FileSource extends Source {
+        FileSource(@NonNull File file) {
+            mFile = file;
+        }
+
+        private final File mFile;
+
+        @Override
+        public ImageDecoder createImageDecoder() throws IOException {
+            return createFromFile(mFile);
         }
     }
 
@@ -148,29 +316,35 @@ public final class ImageDecoder {
      *  Contains information about the encoded image.
      */
     public static class ImageInfo {
-        public final int width;
-        public final int height;
-        // TODO?: Add more info? mimetype, ninepatch etc?
+        private final Size mSize;
+        private ImageDecoder mDecoder;
 
-        ImageInfo(int width, int height) {
-            this.width = width;
-            this.height = height;
+        private ImageInfo(@NonNull ImageDecoder decoder) {
+            mSize = new Size(decoder.mWidth, decoder.mHeight);
+            mDecoder = decoder;
+        }
+
+        /**
+         * Size of the image, without scaling or cropping.
+         */
+        @NonNull
+        public Size getSize() {
+            return mSize;
+        }
+
+        /**
+         * The mimeType of the image.
+         */
+        @NonNull
+        public String getMimeType() {
+            return mDecoder.getMimeType();
         }
     };
 
     /**
-     *  Used if the provided data is incomplete.
-     *
-     *  There may be a partial image to display.
+     *  Thrown if the provided data is incomplete.
      */
-    public class IncompleteException extends Exception {};
-
-    /**
-     *  Used if the provided data is corrupt.
-     *
-     *  There may be a partial image to display.
-     */
-    public class CorruptException extends Exception {};
+    public static class IncompleteException extends IOException {};
 
     /**
      *  Optional listener supplied to {@link #decodeDrawable} or
@@ -180,78 +354,145 @@ public final class ImageDecoder {
         /**
          *  Called when the header is decoded and the size is known.
          *
-         *  @param info Information about the encoded image.
          *  @param decoder allows changing the default settings of the decode.
+         *  @param info Information about the encoded image.
+         *  @param source that created the decoder.
          */
-        public void onHeaderDecoded(ImageInfo info, ImageDecoder decoder);
+        public void onHeaderDecoded(@NonNull ImageDecoder decoder,
+                @NonNull ImageInfo info, @NonNull Source source);
 
     };
 
     /**
-     *  Optional listener supplied to the ImageDecoder.
+     *  An Exception was thrown reading the {@link Source}.
      */
-    public static interface OnExceptionListener {
+    public static final int ERROR_SOURCE_EXCEPTION  = 1;
+
+    /**
+     *  The encoded data was incomplete.
+     */
+    public static final int ERROR_SOURCE_INCOMPLETE = 2;
+
+    /**
+     *  The encoded data contained an error.
+     */
+    public static final int ERROR_SOURCE_ERROR      = 3;
+
+    @Retention(SOURCE)
+    @IntDef({ ERROR_SOURCE_EXCEPTION, ERROR_SOURCE_INCOMPLETE, ERROR_SOURCE_ERROR })
+    public @interface Error {};
+
+    /**
+     *  Optional listener supplied to the ImageDecoder.
+     *
+     *  Without this listener, errors will throw {@link java.io.IOException}.
+     */
+    public static interface OnPartialImageListener {
         /**
-         *  Called when there is a problem in the stream or in the data.
-         *  FIXME: Or do not allow streams?
-         *  FIXME: Report how much of the image has been decoded?
+         *  Called when there is only a partial image to display.
          *
-         *  @param e Exception containing information about the error.
-         *  @return True to create and return a {@link Drawable}/
-         *      {@link Bitmap} with partial data. False to return
-         *      {@code null}. True is the default.
+         *  If decoding is interrupted after having decoded a partial image,
+         *  this listener lets the client know that and allows them to
+         *  optionally finish the rest of the decode/creation process to create
+         *  a partial {@link Drawable}/{@link Bitmap}.
+         *
+         *  @param error indicating what interrupted the decode.
+         *  @param source that had the error.
+         *  @return True to create and return a {@link Drawable}/{@link Bitmap}
+         *      with partial data. False (which is the default) to abort the
+         *      decode and throw {@link java.io.IOException}.
          */
-        public boolean onException(Exception e);
+        public boolean onPartialImage(@Error int error, @NonNull Source source);
     };
 
     // Fields
-    private long      mNativePtr;
-    private final int mWidth;
-    private final int mHeight;
+    private long          mNativePtr;
+    private final int     mWidth;
+    private final int     mHeight;
+    private final boolean mAnimated;
 
     private int     mDesiredWidth;
     private int     mDesiredHeight;
-    private int     mAllocator = DEFAULT_ALLOCATOR;
+    private int     mAllocator = ALLOCATOR_DEFAULT;
     private boolean mRequireUnpremultiplied = false;
     private boolean mMutable = false;
     private boolean mPreferRamOverQuality = false;
     private boolean mAsAlphaMask = false;
     private Rect    mCropRect;
+    private Source  mSource;
 
-    private PostProcess         mPostProcess;
-    private OnExceptionListener mOnExceptionListener;
+    private PostProcessor          mPostProcessor;
+    private OnPartialImageListener mOnPartialImageListener;
 
+    // Objects for interacting with the input.
+    private InputStream         mInputStream;
+    private byte[]              mTempStorage;
+    private AssetFileDescriptor mAssetFd;
+    private final AtomicBoolean mClosed = new AtomicBoolean();
+    private final CloseGuard    mCloseGuard = CloseGuard.get();
 
     /**
-     * Private constructor called by JNI. {@link #recycle} must be
+     * Private constructor called by JNI. {@link #close} must be
      * called after decoding to delete native resources.
      */
     @SuppressWarnings("unused")
-    private ImageDecoder(long nativePtr, int width, int height) {
+    private ImageDecoder(long nativePtr, int width, int height,
+            boolean animated) {
         mNativePtr = nativePtr;
         mWidth = width;
         mHeight = height;
         mDesiredWidth = width;
         mDesiredHeight = height;
+        mAnimated = animated;
+        mCloseGuard.open("close");
+    }
+
+    @Override
+    protected void finalize() throws Throwable {
+        try {
+            if (mCloseGuard != null) {
+                mCloseGuard.warnIfOpen();
+            }
+
+            close();
+        } finally {
+            super.finalize();
+        }
     }
 
     /**
      * Create a new {@link Source} from an asset.
+     * @hide
      *
      * @param res the {@link Resources} object containing the image data.
      * @param resId resource ID of the image data.
      *      // FIXME: Can be an @DrawableRes?
      * @return a new Source object, which can be passed to
      *      {@link #decodeDrawable} or {@link #decodeBitmap}.
-     * @throws Resources.NotFoundException if the asset does not exist.
      */
+    @NonNull
     public static Source createSource(@NonNull Resources res, @RawRes int resId)
-            throws Resources.NotFoundException {
+    {
         return new ResourceSource(res, resId);
     }
 
     /**
+     * Create a new {@link Source} from a {@link android.net.Uri}.
+     *
+     * @param cr to retrieve from.
+     * @param uri of the image file.
+     * @return a new Source object, which can be passed to
+     *      {@link #decodeDrawable} or {@link #decodeBitmap}.
+     */
+    @NonNull
+    public static Source createSource(@NonNull ContentResolver cr,
+            @NonNull Uri uri) {
+        return new ContentResolverSource(cr, uri);
+    }
+
+    /**
      * Create a new {@link Source} from a byte array.
+     *
      * @param data byte array of compressed image data.
      * @param offset offset into data for where the decoder should begin
      *      parsing.
@@ -259,8 +500,9 @@ public final class ImageDecoder {
      * @throws NullPointerException if data is null.
      * @throws ArrayIndexOutOfBoundsException if offset and length are
      *      not within data.
+     * @hide
      */
-    // TODO: Overloads that don't use offset, length
+    @NonNull
     public static Source createSource(@NonNull byte[] data, int offset,
             int length) throws ArrayIndexOutOfBoundsException {
         if (data == null) {
@@ -275,39 +517,75 @@ public final class ImageDecoder {
     }
 
     /**
+     * See {@link #createSource(byte[], int, int).
+     * @hide
+     */
+    @NonNull
+    public static Source createSource(@NonNull byte[] data) {
+        return createSource(data, 0, data.length);
+    }
+
+    /**
      * Create a new {@link Source} from a {@link java.nio.ByteBuffer}.
      *
-     * The returned {@link Source} effectively takes ownership of the
+     * <p>The returned {@link Source} effectively takes ownership of the
      * {@link java.nio.ByteBuffer}; i.e. no other code should modify it after
-     * this call.
+     * this call.</p>
      *
-     * Decoding will start from {@link java.nio.ByteBuffer#position()}.
+     * Decoding will start from {@link java.nio.ByteBuffer#position()}. The
+     * position after decoding is undefined.
      */
-    public static Source createSource(ByteBuffer buffer) {
+    @NonNull
+    public static Source createSource(@NonNull ByteBuffer buffer) {
         return new ByteBufferSource(buffer);
+    }
+
+    /**
+     * Internal API used to generate bitmaps for use by Drawables (i.e. BitmapDrawable)
+     * @hide
+     */
+    public static Source createSource(Resources res, InputStream is) {
+        return new InputStreamSource(res, is, Bitmap.getDefaultDensity());
+    }
+
+    /**
+     * Internal API used to generate bitmaps for use by Drawables (i.e. BitmapDrawable)
+     * @hide
+     */
+    public static Source createSource(Resources res, InputStream is, int density) {
+        return new InputStreamSource(res, is, density);
+    }
+
+    /**
+     * Create a new {@link Source} from a {@link java.io.File}.
+     */
+    @NonNull
+    public static Source createSource(@NonNull File file) {
+        return new FileSource(file);
     }
 
     /**
      *  Return the width and height of a given sample size.
      *
-     *  This takes an input that functions like
+     *  <p>This takes an input that functions like
      *  {@link BitmapFactory.Options#inSampleSize}. It returns a width and
      *  height that can be acheived by sampling the encoded image. Other widths
      *  and heights may be supported, but will require an additional (internal)
      *  scaling step. Such internal scaling is *not* supported with
-     *  {@link #requireUnpremultiplied}.
+     *  {@link #setRequireUnpremultiplied} set to {@code true}.</p>
      *
      *  @param sampleSize Sampling rate of the encoded image.
-     *  @return Point {@link Point#x} and {@link Point#y} correspond to the
-     *      width and height after sampling.
+     *  @return {@link android.util.Size} of the width and height after
+     *      sampling.
      */
-    public Point getSampledSize(int sampleSize) {
+    @NonNull
+    public Size getSampledSize(int sampleSize) {
         if (sampleSize <= 0) {
             throw new IllegalArgumentException("sampleSize must be positive! "
                     + "provided " + sampleSize);
         }
         if (mNativePtr == 0) {
-            throw new IllegalStateException("ImageDecoder is recycled!");
+            throw new IllegalStateException("ImageDecoder is closed!");
         }
 
         return nGetSampledSize(mNativePtr, sampleSize);
@@ -320,7 +598,7 @@ public final class ImageDecoder {
      *  @param width must be greater than 0.
      *  @param height must be greater than 0.
      */
-    public void resize(int width, int height) {
+    public void setResize(int width, int height) {
         if (width <= 0 || height <= 0) {
             throw new IllegalArgumentException("Dimensions must be positive! "
                     + "provided (" + width + ", " + height + ")");
@@ -333,14 +611,18 @@ public final class ImageDecoder {
     /**
      *  Resize based on a sample size.
      *
-     *  This has the same effect as passing the result of
-     *  {@link #getSampledSize} to {@link #resize(int, int)}.
+     *  <p>This has the same effect as passing the result of
+     *  {@link #getSampledSize} to {@link #setResize(int, int)}.</p>
      *
      *  @param sampleSize Sampling rate of the encoded image.
      */
-    public void resize(int sampleSize) {
-        Point dimensions = this.getSampledSize(sampleSize);
-        this.resize(dimensions.x, dimensions.y);
+    public void setResize(int sampleSize) {
+        Size size = this.getSampledSize(sampleSize);
+        this.setResize(size.getWidth(), size.getHeight());
+    }
+
+    private boolean requestedResize() {
+        return mWidth != mDesiredWidth || mHeight != mDesiredHeight;
     }
 
     // These need to stay in sync with ImageDecoder.cpp's Allocator enum.
@@ -352,7 +634,7 @@ public final class ImageDecoder {
      *  switch to software when HARDWARE is incompatible, e.g.
      *  {@link #setMutable}, {@link #setAsAlphaMask}.
      */
-    public static final int DEFAULT_ALLOCATOR = 0;
+    public static final int ALLOCATOR_DEFAULT = 0;
 
     /**
      *  Use a software allocation for the pixel memory.
@@ -360,28 +642,29 @@ public final class ImageDecoder {
      *  Useful for drawing to a software {@link Canvas} or for
      *  accessing the pixels on the final output.
      */
-    public static final int SOFTWARE_ALLOCATOR = 1;
+    public static final int ALLOCATOR_SOFTWARE = 1;
 
     /**
      *  Use shared memory for the pixel memory.
      *
      *  Useful for sharing across processes.
      */
-    public static final int SHARED_MEMORY_ALLOCATOR = 2;
+    public static final int ALLOCATOR_SHARED_MEMORY = 2;
 
     /**
      *  Require a {@link Bitmap.Config#HARDWARE} {@link Bitmap}.
      *
-     *  This will throw an {@link java.lang.IllegalStateException} when combined
-     *  with incompatible options, like {@link #setMutable} or
-     *  {@link #setAsAlphaMask}.
+     *  When this is combined with incompatible options, like
+     *  {@link #setMutable} or {@link #setAsAlphaMask}, {@link #decodeDrawable}
+     *  / {@link #decodeBitmap} will throw an
+     *  {@link java.lang.IllegalStateException}.
      */
-    public static final int HARDWARE_ALLOCATOR = 3;
+    public static final int ALLOCATOR_HARDWARE = 3;
 
     /** @hide **/
     @Retention(SOURCE)
-    @IntDef({ DEFAULT_ALLOCATOR, SOFTWARE_ALLOCATOR, SHARED_MEMORY_ALLOCATOR,
-              HARDWARE_ALLOCATOR })
+    @IntDef({ ALLOCATOR_DEFAULT, ALLOCATOR_SOFTWARE, ALLOCATOR_SHARED_MEMORY,
+              ALLOCATOR_HARDWARE })
     public @interface Allocator {};
 
     /**
@@ -389,140 +672,147 @@ public final class ImageDecoder {
      *
      *  This is ignored for animated drawables.
      *
-     *  TODO: Allow accessing the backing from the Bitmap.
-     *
      *  @param allocator Type of allocator to use.
      */
     public void setAllocator(@Allocator int allocator) {
-        if (allocator < DEFAULT_ALLOCATOR || allocator > HARDWARE_ALLOCATOR) {
+        if (allocator < ALLOCATOR_DEFAULT || allocator > ALLOCATOR_HARDWARE) {
             throw new IllegalArgumentException("invalid allocator " + allocator);
         }
         mAllocator = allocator;
     }
 
     /**
-     *  Create a {@link Bitmap} with unpremultiplied pixels.
+     *  Specify whether the {@link Bitmap} should have unpremultiplied pixels.
      *
      *  By default, ImageDecoder will create a {@link Bitmap} with
      *  premultiplied pixels, which is required for drawing with the
      *  {@link android.view.View} system (i.e. to a {@link Canvas}). Calling
-     *  this method will result in {@link #decodeBitmap} returning a
-     *  {@link Bitmap} with unpremultiplied pixels. See
-     *  {@link Bitmap#isPremultiplied}. Incompatible with
+     *  this method with a value of {@code true} will result in
+     *  {@link #decodeBitmap} returning a {@link Bitmap} with unpremultiplied
+     *  pixels. See {@link Bitmap#isPremultiplied}. This is incompatible with
      *  {@link #decodeDrawable}; attempting to decode an unpremultiplied
      *  {@link Drawable} will throw an {@link java.lang.IllegalStateException}.
      */
-    public void requireUnpremultiplied() {
-        mRequireUnpremultiplied = true;
+    public void setRequireUnpremultiplied(boolean requireUnpremultiplied) {
+        mRequireUnpremultiplied = requireUnpremultiplied;
     }
 
     /**
      *  Modify the image after decoding and scaling.
      *
-     *  This allows adding effects prior to returning a {@link Drawable} or
+     *  <p>This allows adding effects prior to returning a {@link Drawable} or
      *  {@link Bitmap}. For a {@code Drawable} or an immutable {@code Bitmap},
-     *  this is the only way to process the image after decoding.
+     *  this is the only way to process the image after decoding.</p>
      *
-     *  If set on a nine-patch image, the nine-patch data is ignored.
+     *  <p>If set on a nine-patch image, the nine-patch data is ignored.</p>
      *
-     *  For an animated image, the drawing commands drawn on the {@link Canvas}
-     *  will be recorded immediately and then applied to each frame.
+     *  <p>For an animated image, the drawing commands drawn on the
+     *  {@link Canvas} will be recorded immediately and then applied to each
+     *  frame.</p>
      */
-    public void setPostProcess(PostProcess p) {
-        mPostProcess = p;
+    public void setPostProcessor(@Nullable PostProcessor p) {
+        mPostProcessor = p;
     }
 
     /**
-     *  Set (replace) the {@link OnExceptionListener} on this object.
+     *  Set (replace) the {@link OnPartialImageListener} on this object.
      *
      *  Will be called if there is an error in the input. Without one, a
      *  partial {@link Bitmap} will be created.
      */
-    public void setOnExceptionListener(OnExceptionListener l) {
-        mOnExceptionListener = l;
+    public void setOnPartialImageListener(@Nullable OnPartialImageListener l) {
+        mOnPartialImageListener = l;
     }
 
     /**
      *  Crop the output to {@code subset} of the (possibly) scaled image.
      *
-     *  {@code subset} must be contained within the size set by {@link #resize}
-     *  or the bounds of the image if resize was not called. Otherwise an
-     *  {@link IllegalStateException} will be thrown.
+     *  <p>{@code subset} must be contained within the size set by
+     *  {@link #setResize} or the bounds of the image if setResize was not
+     *  called. Otherwise an {@link IllegalStateException} will be thrown by
+     *  {@link #decodeDrawable}/{@link #decodeBitmap}.</p>
      *
-     *  NOT intended as a replacement for
+     *  <p>NOT intended as a replacement for
      *  {@link BitmapRegionDecoder#decodeRegion}. This supports all formats,
-     *  but merely crops the output.
+     *  but merely crops the output.</p>
      */
-    public void crop(Rect subset) {
+    public void setCrop(@Nullable Rect subset) {
         mCropRect = subset;
     }
 
     /**
-     *  Create a mutable {@link Bitmap}.
+     *  Specify whether the {@link Bitmap} should be mutable.
      *
-     *  By default, a {@link Bitmap} created will be immutable, but that can be
-     *  changed with this call.
+     *  <p>By default, a {@link Bitmap} created will be immutable, but that can
+     *  be changed with this call.</p>
      *
-     *  Incompatible with {@link #HARDWARE_ALLOCATOR}, because
-     *  {@link Bitmap.Config#HARDWARE} Bitmaps cannot be mutable. Attempting to
-     *  combine them will throw an {@link java.lang.IllegalStateException}.
+     *  <p>Mutable Bitmaps are incompatible with {@link #ALLOCATOR_HARDWARE},
+     *  because {@link Bitmap.Config#HARDWARE} Bitmaps cannot be mutable.
+     *  Attempting to combine them will throw an
+     *  {@link java.lang.IllegalStateException}.</p>
      *
-     *  Incompatible with {@link #decodeDrawable}, which would require
-     *  retrieving the Bitmap from the returned Drawable in order to modify.
-     *  Attempting to decode a mutable {@link Drawable} will throw an
-     *  {@link java.lang.IllegalStateException}
+     *  <p>Mutable Bitmaps are also incompatible with {@link #decodeDrawable},
+     *  which would require retrieving the Bitmap from the returned Drawable in
+     *  order to modify. Attempting to decode a mutable {@link Drawable} will
+     *  throw an {@link java.lang.IllegalStateException}.</p>
      */
-    public void setMutable() {
-        mMutable = true;
+    public void setMutable(boolean mutable) {
+        mMutable = mutable;
     }
 
     /**
-     *  Potentially save RAM at the expense of quality.
+     *  Specify whether to potentially save RAM at the expense of quality.
      *
-     *  This may result in a {@link Bitmap} with a denser {@link Bitmap.Config},
-     *  depending on the image. For example, for an opaque {@link Bitmap}, this
-     *  may result in a {@link Bitmap.Config} with no alpha information.
+     *  Setting this to {@code true} may result in a {@link Bitmap} with a
+     *  denser {@link Bitmap.Config}, depending on the image. For example, for
+     *  an opaque {@link Bitmap}, this may result in a {@link Bitmap.Config}
+     *  with no alpha information.
      */
-    public void setPreferRamOverQuality() {
-        mPreferRamOverQuality = true;
+    public void setPreferRamOverQuality(boolean preferRamOverQuality) {
+        mPreferRamOverQuality = preferRamOverQuality;
     }
 
     /**
-     *  Potentially treat the output as an alpha mask.
+     *  Specify whether to potentially treat the output as an alpha mask.
      *
-     *  If the image is encoded in a format with only one channel, treat that
-     *  channel as alpha. Otherwise this call has no effect.
+     *  <p>If this is set to {@code true} and the image is encoded in a format
+     *  with only one channel, treat that channel as alpha. Otherwise this call has
+     *  no effect.</p>
      *
-     *  Incompatible with {@link #HARDWARE_ALLOCATOR}. Trying to combine them
-     *  will throw an {@link java.lang.IllegalStateException}.
+     *  <p>setAsAlphaMask is incompatible with {@link #ALLOCATOR_HARDWARE}. Trying to
+     *  combine them will result in {@link #decodeDrawable}/
+     *  {@link #decodeBitmap} throwing an
+     *  {@link java.lang.IllegalStateException}.</p>
      */
-    public void setAsAlphaMask() {
-        mAsAlphaMask = true;
+    public void setAsAlphaMask(boolean asAlphaMask) {
+        mAsAlphaMask = asAlphaMask;
     }
 
-    /**
-     *  Clean up resources.
-     *
-     *  ImageDecoder has a private constructor, and will always be recycled
-     *  by decodeDrawable or decodeBitmap which creates it, so there is no
-     *  need for a finalizer.
-     */
-    private void recycle() {
-        if (mNativePtr == 0) {
+    @Override
+    public void close() {
+        mCloseGuard.close();
+        if (!mClosed.compareAndSet(false, true)) {
             return;
         }
-        nRecycle(mNativePtr);
+        nClose(mNativePtr);
         mNativePtr = 0;
+
+        IoUtils.closeQuietly(mInputStream);
+        IoUtils.closeQuietly(mAssetFd);
+
+        mInputStream = null;
+        mAssetFd = null;
+        mTempStorage = null;
     }
 
     private void checkState() {
         if (mNativePtr == 0) {
-            throw new IllegalStateException("Cannot reuse ImageDecoder.Source!");
+            throw new IllegalStateException("Cannot use closed ImageDecoder!");
         }
 
         checkSubset(mDesiredWidth, mDesiredHeight, mCropRect);
 
-        if (mAllocator == HARDWARE_ALLOCATOR) {
+        if (mAllocator == ALLOCATOR_HARDWARE) {
             if (mMutable) {
                 throw new IllegalStateException("Cannot make mutable HARDWARE Bitmap!");
             }
@@ -531,7 +821,7 @@ public final class ImageDecoder {
             }
         }
 
-        if (mPostProcess != null && mRequireUnpremultiplied) {
+        if (mPostProcessor != null && mRequireUnpremultiplied) {
             throw new IllegalStateException("Cannot draw to unpremultiplied pixels!");
         }
     }
@@ -546,54 +836,88 @@ public final class ImageDecoder {
         }
     }
 
-    /**
-     *  Create a {@link Drawable}.
-     */
-    public static Drawable decodeDrawable(Source src, OnHeaderDecodedListener listener) {
-        ImageDecoder decoder = src.createImageDecoder();
-        if (decoder == null) {
-            return null;
-        }
+    @NonNull
+    private Bitmap decodeBitmap() throws IOException {
+        checkState();
+        // nDecodeBitmap calls onPartialImage only if mOnPartialImageListener
+        // exists
+        ImageDecoder partialImagePtr = mOnPartialImageListener == null ? null : this;
+        // nDecodeBitmap calls postProcessAndRelease only if mPostProcessor
+        // exists.
+        ImageDecoder postProcessPtr = mPostProcessor == null ? null : this;
+        return nDecodeBitmap(mNativePtr, partialImagePtr,
+                postProcessPtr, mDesiredWidth, mDesiredHeight, mCropRect,
+                mMutable, mAllocator, mRequireUnpremultiplied,
+                mPreferRamOverQuality, mAsAlphaMask);
 
+    }
+
+    private void callHeaderDecoded(@Nullable OnHeaderDecodedListener listener,
+            @NonNull Source src) {
         if (listener != null) {
-            ImageInfo info = new ImageInfo(decoder.mWidth, decoder.mHeight);
-            listener.onHeaderDecoded(info, decoder);
-        }
-
-        decoder.checkState();
-
-        if (decoder.mRequireUnpremultiplied) {
-            // Though this could be supported (ignored) for opaque images, it
-            // seems better to always report this error.
-            throw new IllegalStateException("Cannot decode a Drawable with" +
-                                            " unpremultiplied pixels!");
-        }
-
-        if (decoder.mMutable) {
-            throw new IllegalStateException("Cannot decode a mutable Drawable!");
-        }
-
-        try {
-            Bitmap bm = nDecodeBitmap(decoder.mNativePtr,
-                                      decoder.mOnExceptionListener,
-                                      decoder.mPostProcess,
-                                      decoder.mDesiredWidth, decoder.mDesiredHeight,
-                                      decoder.mCropRect,
-                                      false,    // decoder.mMutable
-                                      decoder.mAllocator,
-                                      false,    // decoder.mRequireUnpremultiplied
-                                      decoder.mPreferRamOverQuality,
-                                      decoder.mAsAlphaMask
-                                      );
-            if (bm == null) {
-                return null;
+            ImageInfo info = new ImageInfo(this);
+            try {
+                listener.onHeaderDecoded(this, info, src);
+            } finally {
+                info.mDecoder = null;
             }
+        }
+    }
+
+    /**
+     *  Create a {@link Drawable} from a {@code Source}.
+     *
+     *  @param src representing the encoded image.
+     *  @param listener for learning the {@link ImageInfo} and changing any
+     *      default settings on the {@code ImageDecoder}. If not {@code null},
+     *      this will be called on the same thread as {@code decodeDrawable}
+     *      before that method returns.
+     *  @return Drawable for displaying the image.
+     *  @throws IOException if {@code src} is not found, is an unsupported
+     *      format, or cannot be decoded for any reason.
+     */
+    @NonNull
+    public static Drawable decodeDrawable(@NonNull Source src,
+            @Nullable OnHeaderDecodedListener listener) throws IOException {
+        try (ImageDecoder decoder = src.createImageDecoder()) {
+            decoder.mSource = src;
+            decoder.callHeaderDecoded(listener, src);
+
+            if (decoder.mRequireUnpremultiplied) {
+                // Though this could be supported (ignored) for opaque images,
+                // it seems better to always report this error.
+                throw new IllegalStateException("Cannot decode a Drawable " +
+                                                "with unpremultiplied pixels!");
+            }
+
+            if (decoder.mMutable) {
+                throw new IllegalStateException("Cannot decode a mutable " +
+                                                "Drawable!");
+            }
+
+            // this call potentially manipulates the decoder so it must be performed prior to
+            // decoding the bitmap and after decode set the density on the resulting bitmap
+            final int srcDensity = computeDensity(src, decoder);
+            if (decoder.mAnimated) {
+                // AnimatedImageDrawable calls postProcessAndRelease only if
+                // mPostProcessor exists.
+                ImageDecoder postProcessPtr = decoder.mPostProcessor == null ?
+                        null : decoder;
+                Drawable d = new AnimatedImageDrawable(decoder.mNativePtr,
+                        postProcessPtr, decoder.mDesiredWidth,
+                        decoder.mDesiredHeight, srcDensity,
+                        src.computeDstDensity(), decoder.mCropRect,
+                        decoder.mInputStream, decoder.mAssetFd);
+                // d has taken ownership of these objects.
+                decoder.mInputStream = null;
+                decoder.mAssetFd = null;
+                return d;
+            }
+
+            Bitmap bm = decoder.decodeBitmap();
+            bm.setDensity(srcDensity);
 
             Resources res = src.getResources();
-            if (res == null) {
-                bm.setDensity(Bitmap.DENSITY_NONE);
-            }
-
             byte[] np = bm.getNinePatchChunk();
             if (np != null && NinePatch.isNinePatchChunk(np)) {
                 Rect opticalInsets = new Rect();
@@ -604,62 +928,134 @@ public final class ImageDecoder {
                         opticalInsets, null);
             }
 
-            // TODO: Handle animation.
             return new BitmapDrawable(res, bm);
-        } finally {
-            decoder.recycle();
-            src.close();
         }
     }
 
     /**
-     * Create a {@link Bitmap}.
+     * See {@link #decodeDrawable(Source, OnHeaderDecodedListener)}.
      */
-    public static Bitmap decodeBitmap(Source src, OnHeaderDecodedListener listener) {
-        ImageDecoder decoder = src.createImageDecoder();
-        if (decoder == null) {
-            return null;
-        }
+    @NonNull
+    public static Drawable decodeDrawable(@NonNull Source src)
+            throws IOException {
+        return decodeDrawable(src, null);
+    }
 
-        if (listener != null) {
-            ImageInfo info = new ImageInfo(decoder.mWidth, decoder.mHeight);
-            listener.onHeaderDecoded(info, decoder);
-        }
+    /**
+     *  Create a {@link Bitmap} from a {@code Source}.
+     *
+     *  @param src representing the encoded image.
+     *  @param listener for learning the {@link ImageInfo} and changing any
+     *      default settings on the {@code ImageDecoder}. If not {@code null},
+     *      this will be called on the same thread as {@code decodeBitmap}
+     *      before that method returns.
+     *  @return Bitmap containing the image.
+     *  @throws IOException if {@code src} is not found, is an unsupported
+     *      format, or cannot be decoded for any reason.
+     */
+    @NonNull
+    public static Bitmap decodeBitmap(@NonNull Source src,
+            @Nullable OnHeaderDecodedListener listener) throws IOException {
+        try (ImageDecoder decoder = src.createImageDecoder()) {
+            decoder.mSource = src;
+            decoder.callHeaderDecoded(listener, src);
 
-        decoder.checkState();
-
-        try {
-            return nDecodeBitmap(decoder.mNativePtr,
-                                 decoder.mOnExceptionListener,
-                                 decoder.mPostProcess,
-                                 decoder.mDesiredWidth, decoder.mDesiredHeight,
-                                 decoder.mCropRect,
-                                 decoder.mMutable,
-                                 decoder.mAllocator,
-                                 decoder.mRequireUnpremultiplied,
-                                 decoder.mPreferRamOverQuality,
-                                 decoder.mAsAlphaMask);
-        } finally {
-            decoder.recycle();
-            src.close();
+            // this call potentially manipulates the decoder so it must be performed prior to
+            // decoding the bitmap
+            final int srcDensity = computeDensity(src, decoder);
+            Bitmap bm = decoder.decodeBitmap();
+            bm.setDensity(srcDensity);
+            return bm;
         }
     }
 
-    private static native ImageDecoder nCreate(long asset);
+    // This method may modify the decoder so it must be called prior to performing the decode
+    private static int computeDensity(@NonNull Source src, @NonNull ImageDecoder decoder) {
+        // if the caller changed the size then we treat the density as unknown
+        if (decoder.requestedResize()) {
+            return Bitmap.DENSITY_NONE;
+        }
+
+        // Special stuff for compatibility mode: if the target density is not
+        // the same as the display density, but the resource -is- the same as
+        // the display density, then don't scale it down to the target density.
+        // This allows us to load the system's density-correct resources into
+        // an application in compatibility mode, without scaling those down
+        // to the compatibility density only to have them scaled back up when
+        // drawn to the screen.
+        Resources res = src.getResources();
+        final int srcDensity = src.getDensity();
+        if (res != null && res.getDisplayMetrics().noncompatDensityDpi == srcDensity) {
+            return srcDensity;
+        }
+
+        // downscale the bitmap if the asset has a higher density than the default
+        final int dstDensity = src.computeDstDensity();
+        if (srcDensity != Bitmap.DENSITY_NONE && srcDensity > dstDensity) {
+            float scale = (float) dstDensity / srcDensity;
+            int scaledWidth = (int) (decoder.mWidth * scale + 0.5f);
+            int scaledHeight = (int) (decoder.mHeight * scale + 0.5f);
+            decoder.setResize(scaledWidth, scaledHeight);
+            return dstDensity;
+        }
+
+        return srcDensity;
+    }
+
+    @NonNull
+    private String getMimeType() {
+        return nGetMimeType(mNativePtr);
+    }
+
+    /**
+     *  See {@link #decodeBitmap(Source, OnHeaderDecodedListener)}.
+     */
+    @NonNull
+    public static Bitmap decodeBitmap(@NonNull Source src) throws IOException {
+        return decodeBitmap(src, null);
+    }
+
+    /**
+     * Private method called by JNI.
+     */
+    @SuppressWarnings("unused")
+    private int postProcessAndRelease(@NonNull Canvas canvas) {
+        try {
+            return mPostProcessor.onPostProcess(canvas);
+        } finally {
+            canvas.release();
+        }
+    }
+
+    /**
+     * Private method called by JNI.
+     */
+    @SuppressWarnings("unused")
+    private boolean onPartialImage(@Error int error) {
+        return mOnPartialImageListener.onPartialImage(error, mSource);
+    }
+
+    private static native ImageDecoder nCreate(long asset) throws IOException;
     private static native ImageDecoder nCreate(ByteBuffer buffer,
                                                int position,
-                                               int limit);
+                                               int limit) throws IOException;
     private static native ImageDecoder nCreate(byte[] data, int offset,
-                                               int length);
+                                               int length) throws IOException;
+    private static native ImageDecoder nCreate(InputStream is, byte[] storage);
+    // The fd must be seekable.
+    private static native ImageDecoder nCreate(FileDescriptor fd) throws IOException;
+    @NonNull
     private static native Bitmap nDecodeBitmap(long nativePtr,
-            OnExceptionListener listener,
-            PostProcess postProcess,
+            @Nullable ImageDecoder partialImageListener,
+            @Nullable ImageDecoder postProcessor,
             int width, int height,
-            Rect cropRect, boolean mutable,
+            @Nullable Rect cropRect, boolean mutable,
             int allocator, boolean requireUnpremul,
-            boolean preferRamOverQuality, boolean asAlphaMask);
-    private static native Point nGetSampledSize(long nativePtr,
-                                                int sampleSize);
-    private static native void nGetPadding(long nativePtr, Rect outRect);
-    private static native void nRecycle(long nativePtr);
+            boolean preferRamOverQuality, boolean asAlphaMask)
+        throws IOException;
+    private static native Size nGetSampledSize(long nativePtr,
+                                               int sampleSize);
+    private static native void nGetPadding(long nativePtr, @NonNull Rect outRect);
+    private static native void nClose(long nativePtr);
+    private static native String nGetMimeType(long nativePtr);
 }

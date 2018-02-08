@@ -23,6 +23,7 @@ import static android.app.slice.Slice.SUBTYPE_SOURCE;
 import static android.app.slice.SliceItem.FORMAT_ACTION;
 import static android.app.slice.SliceItem.FORMAT_IMAGE;
 import static android.app.slice.SliceItem.FORMAT_INT;
+import static android.app.slice.SliceItem.FORMAT_SLICE;
 import static android.app.slice.SliceItem.FORMAT_TEXT;
 
 import android.annotation.TargetApi;
@@ -34,14 +35,12 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ProviderInfo;
 import android.content.res.Resources;
-import android.graphics.Color;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.ShapeDrawable;
 import android.graphics.drawable.shapes.OvalShape;
 import android.net.Uri;
 import android.support.annotation.RestrictTo;
-import android.view.View;
-import android.widget.FrameLayout;
+import android.widget.ImageView;
 
 import androidx.app.slice.Slice;
 import androidx.app.slice.SliceItem;
@@ -53,12 +52,13 @@ import androidx.app.slice.view.R;
  */
 @RestrictTo(RestrictTo.Scope.LIBRARY)
 @TargetApi(23)
-public class ShortcutView extends FrameLayout implements SliceView.SliceModeView {
+public class ShortcutView extends SliceChildView {
 
     private static final String TAG = "ShortcutView";
 
+    private Slice mSlice;
     private Uri mUri;
-    private PendingIntent mAction;
+    private SliceItem mActionItem;
     private SliceItem mLabel;
     private SliceItem mIcon;
 
@@ -73,31 +73,27 @@ public class ShortcutView extends FrameLayout implements SliceView.SliceModeView
     }
 
     @Override
-    public View getView() {
-        return this;
-    }
-
-    @Override
     public void setSlice(Slice slice) {
-        mLabel = null;
-        mIcon = null;
-        mAction = null;
-        removeAllViews();
+        resetView();
+        mSlice = slice;
         determineShortcutItems(getContext(), slice);
         SliceItem colorItem = SliceQuery.findSubtype(slice, FORMAT_INT, SUBTYPE_COLOR);
         if (colorItem == null) {
             colorItem = SliceQuery.findSubtype(slice, FORMAT_INT, SUBTYPE_COLOR);
         }
-        // TODO: pick better default colour
-        final int color = colorItem != null ? colorItem.getInt() : Color.GRAY;
+        final int color = colorItem != null
+                ? colorItem.getInt()
+                : SliceViewUtil.getColorAccent(getContext());
         ShapeDrawable circle = new ShapeDrawable(new OvalShape());
         circle.setTint(color);
-        setBackground(circle);
+        ImageView iv = new ImageView(getContext());
+        iv.setBackground(circle);
+        addView(iv);
         if (mIcon != null) {
             final boolean isLarge = mIcon.hasHint(HINT_LARGE)
                     || SUBTYPE_SOURCE.equals(mIcon.getSubType());
             final int iconSize = isLarge ? mLargeIconSize : mSmallIconSize;
-            SliceViewUtil.createCircledIcon(getContext(), color, iconSize, mIcon.getIcon(),
+            SliceViewUtil.createCircledIcon(getContext(), iconSize, mIcon.getIcon(),
                     isLarge, this /* parent */);
             mUri = slice.getUri();
             setClickable(true);
@@ -115,12 +111,22 @@ public class ShortcutView extends FrameLayout implements SliceView.SliceModeView
     public boolean performClick() {
         if (!callOnClick()) {
             try {
-                if (mAction != null) {
-                    mAction.send();
+                if (mActionItem != null) {
+                    mActionItem.getAction().send();
                 } else {
                     Intent intent = new Intent(Intent.ACTION_VIEW).setData(mUri);
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                     getContext().startActivity(intent);
+                }
+                if (mObserver != null) {
+                    EventInfo ei = new EventInfo(SliceView.MODE_SHORTCUT,
+                            EventInfo.ACTION_TYPE_BUTTON,
+                            EventInfo.ROW_TYPE_SHORTCUT, 0 /* rowIndex */);
+                    SliceItem interactedItem = mActionItem != null
+                            ? mActionItem
+                            : new SliceItem(mSlice, FORMAT_SLICE, null /* subtype */,
+                                    mSlice.getHints());
+                    mObserver.onSliceAction(ei, interactedItem);
                 }
             } catch (CanceledException e) {
                 e.printStackTrace();
@@ -138,16 +144,14 @@ public class ShortcutView extends FrameLayout implements SliceView.SliceModeView
 
         if (titleItem != null) {
             // Preferred case: hinted action containing hinted image and text
-            mAction = titleItem.getAction();
+            mActionItem = titleItem;
             mIcon = SliceQuery.find(titleItem.getSlice(), FORMAT_IMAGE, HINT_TITLE,
                     null);
             mLabel = SliceQuery.find(titleItem.getSlice(), FORMAT_TEXT, HINT_TITLE,
                     null);
         } else {
             // No hinted action; just use the first one
-            SliceItem actionItem = SliceQuery.find(slice, FORMAT_ACTION, (String) null,
-                    null);
-            mAction = (actionItem != null) ? actionItem.getAction() : null;
+            mActionItem = SliceQuery.find(slice, FORMAT_ACTION, (String) null, null);
         }
         // First fallback: any hinted image and text
         if (mIcon == null) {
@@ -168,7 +172,7 @@ public class ShortcutView extends FrameLayout implements SliceView.SliceModeView
                     null);
         }
         // Final fallback: use app info
-        if (mIcon == null || mLabel == null || mAction == null) {
+        if (mIcon == null || mLabel == null || mActionItem == null) {
             PackageManager pm = context.getPackageManager();
             ProviderInfo providerInfo = pm.resolveContentProvider(
                     slice.getUri().getAuthority(), 0);
@@ -185,11 +189,24 @@ public class ShortcutView extends FrameLayout implements SliceView.SliceModeView
                     sb.addText(pm.getApplicationLabel(appInfo), null);
                     mLabel = sb.build().getItems().get(0);
                 }
-                if (mAction == null) {
-                    mAction = PendingIntent.getActivity(context, 0,
-                            pm.getLaunchIntentForPackage(appInfo.packageName), 0);
+                if (mActionItem == null) {
+                    mActionItem = new SliceItem(PendingIntent.getActivity(context, 0,
+                            pm.getLaunchIntentForPackage(appInfo.packageName), 0),
+                            new Slice.Builder(slice.getUri()).build(), FORMAT_SLICE,
+                            null /* subtype */, null);
                 }
             }
         }
+    }
+
+    @Override
+    public void resetView() {
+        mSlice = null;
+        mUri = null;
+        mActionItem = null;
+        mLabel = null;
+        mIcon = null;
+        setBackground(null);
+        removeAllViews();
     }
 }

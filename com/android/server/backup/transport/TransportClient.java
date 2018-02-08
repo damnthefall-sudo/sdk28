@@ -16,6 +16,8 @@
 
 package com.android.server.backup.transport;
 
+import static com.android.server.backup.transport.TransportUtils.formatMessage;
+
 import android.annotation.IntDef;
 import android.annotation.Nullable;
 import android.annotation.WorkerThread;
@@ -28,17 +30,23 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.UserHandle;
+import android.text.format.DateFormat;
 import android.util.ArrayMap;
+import android.util.EventLog;
 import android.util.Log;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.backup.IBackupTransport;
 import com.android.internal.util.Preconditions;
+import com.android.server.EventLogTags;
 import com.android.server.backup.TransportManager;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
+import java.util.Collections;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -63,15 +71,19 @@ import java.util.concurrent.ExecutionException;
  */
 public class TransportClient {
     private static final String TAG = "TransportClient";
+    private static final int LOG_BUFFER_SIZE = 5;
 
     private final Context mContext;
     private final Intent mBindIntent;
     private final String mIdentifier;
     private final ComponentName mTransportComponent;
-    private final String mTransportDirName;
     private final Handler mListenerHandler;
     private final String mPrefixForLog;
     private final Object mStateLock = new Object();
+    private final Object mLogBufferLock = new Object();
+
+    @GuardedBy("mLogBufferLock")
+    private final List<String> mLogBuffer = new LinkedList<>();
 
     @GuardedBy("mStateLock")
     private final Map<TransportConnectionListener, String> mListeners = new ArrayMap<>();
@@ -87,13 +99,11 @@ public class TransportClient {
             Context context,
             Intent bindIntent,
             ComponentName transportComponent,
-            String transportDirName,
             String identifier) {
         this(
                 context,
                 bindIntent,
                 transportComponent,
-                transportDirName,
                 identifier,
                 new Handler(Looper.getMainLooper()));
     }
@@ -103,27 +113,21 @@ public class TransportClient {
             Context context,
             Intent bindIntent,
             ComponentName transportComponent,
-            String transportDirName,
             String identifier,
             Handler listenerHandler) {
         mContext = context;
         mTransportComponent = transportComponent;
-        mTransportDirName = transportDirName;
         mBindIntent = bindIntent;
         mIdentifier = identifier;
         mListenerHandler = listenerHandler;
 
         // For logging
         String classNameForLog = mTransportComponent.getShortClassName().replaceFirst(".*\\.", "");
-        mPrefixForLog = classNameForLog + "#" + mIdentifier + ": ";
+        mPrefixForLog = classNameForLog + "#" + mIdentifier + ":";
     }
 
     public ComponentName getTransportComponent() {
         return mTransportComponent;
-    }
-
-    public String getTransportDirName() {
-        return mTransportDirName;
     }
 
     // Calls to onServiceDisconnected() or onBindingDied() turn TransportClient UNUSABLE. After one
@@ -236,7 +240,7 @@ public class TransportClient {
 
             switch (mState) {
                 case State.UNUSABLE:
-                    log(Log.DEBUG, caller, "Async connect: UNUSABLE client");
+                    log(Log.WARN, caller, "Async connect: UNUSABLE client");
                     notifyListener(listener, null, caller);
                     break;
                 case State.IDLE:
@@ -245,7 +249,7 @@ public class TransportClient {
                                     mBindIntent,
                                     mConnection,
                                     Context.BIND_AUTO_CREATE,
-                                    TransportManager.createSystemUserHandle());
+                                    UserHandle.SYSTEM);
                     if (hasBound) {
                         // We don't need to set a time-out because we are guaranteed to get a call
                         // back in ServiceConnection, either an onServiceConnected() or
@@ -331,14 +335,14 @@ public class TransportClient {
 
         IBackupTransport transport = mTransport;
         if (transport != null) {
-            log(Log.DEBUG, caller, "Sync connect: reusing transport");
+            log(Log.INFO, caller, "Sync connect: reusing transport");
             return transport;
         }
 
         // If it's already UNUSABLE we return straight away, no need to go to main-thread
         synchronized (mStateLock) {
             if (mState == State.UNUSABLE) {
-                log(Log.DEBUG, caller, "Sync connect: UNUSABLE client");
+                log(Log.WARN, caller, "Sync connect: UNUSABLE client");
                 return null;
             }
         }
@@ -410,13 +414,16 @@ public class TransportClient {
     }
 
     private void notifyListener(
-            TransportConnectionListener listener, IBackupTransport transport, String caller) {
-        log(Log.VERBOSE, caller, "Notifying listener of transport = " + transport);
+            TransportConnectionListener listener,
+            @Nullable IBackupTransport transport,
+            String caller) {
+        String transportString = (transport != null) ? "IBackupTransport" : "null";
+        log(Log.INFO, "Notifying [" + caller + "] transport = " + transportString);
         mListenerHandler.post(() -> listener.onTransportConnectionResult(transport, this));
     }
 
     @GuardedBy("mStateLock")
-    private void notifyListenersAndClearLocked(IBackupTransport transport) {
+    private void notifyListenersAndClearLocked(@Nullable IBackupTransport transport) {
         for (Map.Entry<TransportConnectionListener, String> entry : mListeners.entrySet()) {
             TransportConnectionListener listener = entry.getKey();
             String caller = entry.getValue();
@@ -428,8 +435,43 @@ public class TransportClient {
     @GuardedBy("mStateLock")
     private void setStateLocked(@State int state, @Nullable IBackupTransport transport) {
         log(Log.VERBOSE, "State: " + stateToString(mState) + " => " + stateToString(state));
+        onStateTransition(mState, state);
         mState = state;
         mTransport = transport;
+    }
+
+    private void onStateTransition(int oldState, int newState) {
+        String transport = mTransportComponent.flattenToShortString();
+        int bound = transitionThroughState(oldState, newState, State.BOUND_AND_CONNECTING);
+        int connected = transitionThroughState(oldState, newState, State.CONNECTED);
+        if (bound != Transition.NO_TRANSITION) {
+            int value = (bound == Transition.UP) ? 1 : 0; // 1 is bound, 0 is not bound
+            EventLog.writeEvent(EventLogTags.BACKUP_TRANSPORT_LIFECYCLE, transport, value);
+        }
+        if (connected != Transition.NO_TRANSITION) {
+            int value = (connected == Transition.UP) ? 1 : 0; // 1 is connected, 0 is not connected
+            EventLog.writeEvent(EventLogTags.BACKUP_TRANSPORT_CONNECTION, transport, value);
+        }
+    }
+
+    /**
+     * Returns:
+     *
+     * <ul>
+     *   <li>{@link Transition#UP}, if oldState < stateReference <= newState
+     *   <li>{@link Transition#DOWN}, if oldState >= stateReference > newState
+     *   <li>{@link Transition#NO_TRANSITION}, otherwise
+     */
+    @Transition
+    private int transitionThroughState(
+            @State int oldState, @State int newState, @State int stateReference) {
+        if (oldState < stateReference && stateReference <= newState) {
+            return Transition.UP;
+        }
+        if (oldState >= stateReference && stateReference > newState) {
+            return Transition.DOWN;
+        }
+        return Transition.NO_TRANSITION;
     }
 
     @GuardedBy("mStateLock")
@@ -481,13 +523,38 @@ public class TransportClient {
     }
 
     private void log(int priority, String message) {
-        TransportUtils.log(priority, TAG, message);
+        TransportUtils.log(priority, TAG, formatMessage(mPrefixForLog, null, message));
+        saveLogEntry(formatMessage(null, null, message));
     }
 
-    private void log(int priority, String caller, String msg) {
-        TransportUtils.log(priority, TAG, mPrefixForLog, caller, msg);
-        // TODO(brufino): Log in internal list for dump
-        // CharSequence time = DateFormat.format("yyyy-MM-dd HH:mm:ss", System.currentTimeMillis());
+    private void log(int priority, String caller, String message) {
+        TransportUtils.log(priority, TAG, formatMessage(mPrefixForLog, caller, message));
+        saveLogEntry(formatMessage(null, caller, message));
+    }
+
+    private void saveLogEntry(String message) {
+        CharSequence time = DateFormat.format("yyyy-MM-dd HH:mm:ss", System.currentTimeMillis());
+        message = time + " " + message;
+        synchronized (mLogBufferLock) {
+            if (mLogBuffer.size() == LOG_BUFFER_SIZE) {
+                mLogBuffer.remove(mLogBuffer.size() - 1);
+            }
+            mLogBuffer.add(0, message);
+        }
+    }
+
+    List<String> getLogBuffer() {
+        synchronized (mLogBufferLock) {
+            return Collections.unmodifiableList(mLogBuffer);
+        }
+    }
+
+    @IntDef({Transition.DOWN, Transition.NO_TRANSITION, Transition.UP})
+    @Retention(RetentionPolicy.SOURCE)
+    private @interface Transition {
+        int DOWN = -1;
+        int NO_TRANSITION = 0;
+        int UP = 1;
     }
 
     @IntDef({State.UNUSABLE, State.IDLE, State.BOUND_AND_CONNECTING, State.CONNECTED})
