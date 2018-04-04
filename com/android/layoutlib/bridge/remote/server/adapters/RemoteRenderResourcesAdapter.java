@@ -18,6 +18,7 @@ package com.android.layoutlib.bridge.remote.server.adapters;
 
 import com.android.ide.common.rendering.api.LayoutLog;
 import com.android.ide.common.rendering.api.RenderResources;
+import com.android.ide.common.rendering.api.ResourceReference;
 import com.android.ide.common.rendering.api.ResourceValue;
 import com.android.ide.common.rendering.api.StyleResourceValue;
 import com.android.layout.remote.api.RemoteRenderResources;
@@ -122,41 +123,38 @@ public class RemoteRenderResourcesAdapter extends RenderResources {
         }
     }
 
-    @SuppressWarnings("deprecation")
     @Override
-    public ResourceValue findItemInTheme(String itemName) {
-        throw new UnsupportedOperationException("Deprecated");
-    }
-
-    @Override
-    public ResourceValue findItemInTheme(String attrName, boolean isFrameworkAttr) {
+    public ResourceValue findItemInTheme(ResourceReference attr) {
         try {
-            return mDelegate.findItemInTheme(attrName, isFrameworkAttr);
-        } catch (RemoteException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    @SuppressWarnings("deprecation")
-    @Override
-    public ResourceValue findItemInStyle(StyleResourceValue style, String attrName) {
-        throw new UnsupportedOperationException("Deprecated");
-    }
-
-    @Override
-    public ResourceValue findItemInStyle(StyleResourceValue style, String attrName,
-            boolean isFrameworkAttr) {
-        try {
-            return mDelegate.findItemInStyle(style, attrName, isFrameworkAttr);
+            return mDelegate.findItemInTheme(attr);
         } catch (RemoteException e) {
             throw new RuntimeException(e);
         }
     }
 
     @Override
-    public ResourceValue findResValue(String reference, boolean forceFrameworkOnly) {
+    public ResourceValue findItemInStyle(StyleResourceValue style, ResourceReference attr) {
         try {
-            return mDelegate.findResValue(reference, forceFrameworkOnly);
+            return mDelegate.findItemInStyle(style, attr);
+        } catch (RemoteException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public ResourceValue dereference(ResourceValue resourceValue) {
+        try {
+            return mDelegate.dereference(resourceValue);
+        } catch (RemoteException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /** Returns a resource by namespace, type and name. The returned resource is unresolved. */
+    @Override
+    public ResourceValue getUnresolvedResource(ResourceReference reference) {
+        try {
+            return mDelegate.getUnresolvedResource(reference);
         } catch (RemoteException e) {
             throw new RuntimeException(e);
         }
@@ -191,12 +189,4 @@ public class RemoteRenderResourcesAdapter extends RenderResources {
         }
     }
 
-    @Override
-    public StyleResourceValue getStyle(String styleName, boolean isFramework) {
-        try {
-            return mDelegate.getStyle(styleName, isFramework);
-        } catch (RemoteException e) {
-            throw new RuntimeException(e);
-        }
-    }
 }

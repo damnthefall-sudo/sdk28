@@ -29,9 +29,9 @@ import static android.app.WindowConfiguration.WINDOWING_MODE_SPLIT_SCREEN_SECOND
 import static android.app.WindowConfiguration.WINDOWING_MODE_UNDEFINED;
 import static android.app.WindowConfiguration.activityTypeToString;
 import static android.app.WindowConfiguration.windowingModeToString;
-import static com.android.server.wm.proto.ConfigurationContainerProto.FULL_CONFIGURATION;
-import static com.android.server.wm.proto.ConfigurationContainerProto.MERGED_OVERRIDE_CONFIGURATION;
-import static com.android.server.wm.proto.ConfigurationContainerProto.OVERRIDE_CONFIGURATION;
+import static com.android.server.wm.ConfigurationContainerProto.FULL_CONFIGURATION;
+import static com.android.server.wm.ConfigurationContainerProto.MERGED_OVERRIDE_CONFIGURATION;
+import static com.android.server.wm.ConfigurationContainerProto.OVERRIDE_CONFIGURATION;
 
 import android.annotation.CallSuper;
 import android.app.WindowConfiguration;
@@ -216,6 +216,14 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
         mReturnBounds.set(getOverrideConfiguration().windowConfiguration.getBounds());
 
         return mReturnBounds;
+    }
+
+    /**
+     * Returns {@code true} if the {@link WindowConfiguration} in the override
+     * {@link Configuration} specifies bounds.
+     */
+    public boolean hasOverrideBounds() {
+        return !getOverrideBounds().isEmpty();
     }
 
     /**
@@ -462,7 +470,7 @@ public abstract class ConfigurationContainer<E extends ConfigurationContainer> {
 
     /**
      * Write to a protocol buffer output stream. Protocol buffer message definition is at
-     * {@link com.android.server.wm.proto.ConfigurationContainerProto}.
+     * {@link com.android.server.wm.ConfigurationContainerProto}.
      *
      * @param proto    Stream to write the ConfigurationContainer object to.
      * @param fieldId  Field Id of the ConfigurationContainer as defined in the parent

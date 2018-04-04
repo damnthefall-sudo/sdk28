@@ -232,32 +232,6 @@ public class SubscriptionController extends ISub.Stub {
         if (DBG) logdl("[SubscriptionController] init by Phone");
     }
 
-    /**
-     * Make sure the caller can read phone state which requires holding the
-     * READ_PHONE_STATE permission and the OP_READ_PHONE_STATE app op being
-     * set to MODE_ALLOWED.
-     *
-     * @param callingPackage The package claiming to make the IPC.
-     * @param message The name of the access protected method.
-     *
-     * @throws SecurityException if the caller does not have READ_PHONE_STATE permission.
-     */
-    private boolean canReadPhoneState(String callingPackage, String message) {
-        try {
-            mContext.enforceCallingOrSelfPermission(
-                    android.Manifest.permission.READ_PRIVILEGED_PHONE_STATE, message);
-
-            // SKIP checking run-time permission since self or using PRIVILEDGED permission
-            return true;
-        } catch (SecurityException e) {
-            mContext.enforceCallingOrSelfPermission(android.Manifest.permission.READ_PHONE_STATE,
-                    message);
-        }
-
-        return mAppOps.noteOp(AppOpsManager.OP_READ_PHONE_STATE, Binder.getCallingUid(),
-                callingPackage) == AppOpsManager.MODE_ALLOWED;
-    }
-
     private void enforceModifyPhoneState(String message) {
         mContext.enforceCallingOrSelfPermission(
                 android.Manifest.permission.MODIFY_PHONE_STATE, message);
@@ -443,7 +417,8 @@ public class SubscriptionController extends ISub.Stub {
      */
     @Override
     public SubscriptionInfo getActiveSubscriptionInfo(int subId, String callingPackage) {
-        if (!canReadPhoneState(callingPackage, "getActiveSubscriptionInfo")) {
+        if (!TelephonyPermissions.checkCallingOrSelfReadPhoneState(
+                mContext, subId, callingPackage, "getActiveSubscriptionInfo")) {
             return null;
         }
 
@@ -482,12 +457,29 @@ public class SubscriptionController extends ISub.Stub {
      */
     @Override
     public SubscriptionInfo getActiveSubscriptionInfoForIccId(String iccId, String callingPackage) {
-        if (!canReadPhoneState(callingPackage, "getActiveSubscriptionInfoForIccId") ||
-                iccId == null) {
+        // Query the subscriptions unconditionally, and then check whether the caller has access to
+        // the given subscription.
+        final SubscriptionInfo si = getActiveSubscriptionInfoForIccIdInternal(iccId);
+
+        final int subId = si != null
+                ? si.getSubscriptionId() : SubscriptionManager.INVALID_SUBSCRIPTION_ID;
+        if (!TelephonyPermissions.checkCallingOrSelfReadPhoneState(
+                mContext, subId, callingPackage, "getActiveSubscriptionInfoForIccId")) {
             return null;
         }
 
-        // Now that all security checks passes, perform the operation as ourselves.
+        return si;
+    }
+
+    /**
+     * Get the active SubscriptionInfo associated with the given iccId. The caller *must* perform
+     * permission checks when using this method.
+     */
+    private SubscriptionInfo getActiveSubscriptionInfoForIccIdInternal(String iccId) {
+        if (iccId == null) {
+            return null;
+        }
+
         final long identity = Binder.clearCallingIdentity();
         try {
             List<SubscriptionInfo> subList = getActiveSubscriptionInfoList(
@@ -521,7 +513,16 @@ public class SubscriptionController extends ISub.Stub {
     @Override
     public SubscriptionInfo getActiveSubscriptionInfoForSimSlotIndex(int slotIndex,
             String callingPackage) {
-        if (!canReadPhoneState(callingPackage, "getActiveSubscriptionInfoForSimSlotIndex")) {
+        Phone phone = PhoneFactory.getPhone(slotIndex);
+        if (phone == null) {
+            if (DBG) {
+                loge("[getActiveSubscriptionInfoForSimSlotIndex] no phone, slotIndex=" + slotIndex);
+            }
+            return null;
+        }
+        if (!TelephonyPermissions.checkCallingOrSelfReadPhoneState(
+                mContext, phone.getSubId(), callingPackage,
+                "getActiveSubscriptionInfoForSimSlotIndex")) {
             return null;
         }
 
@@ -566,7 +567,11 @@ public class SubscriptionController extends ISub.Stub {
     public List<SubscriptionInfo> getAllSubInfoList(String callingPackage) {
         if (DBG) logd("[getAllSubInfoList]+");
 
-        if (!canReadPhoneState(callingPackage, "getAllSubInfoList")) {
+        // This API isn't public, so no need to provide a valid subscription ID - we're not worried
+        // about carrier-privileged callers not having access.
+        if (!TelephonyPermissions.checkCallingOrSelfReadPhoneState(
+                mContext, SubscriptionManager.INVALID_SUBSCRIPTION_ID, callingPackage,
+                "getAllSubInfoList")) {
             return null;
         }
 
@@ -593,12 +598,19 @@ public class SubscriptionController extends ISub.Stub {
      */
     @Override
     public List<SubscriptionInfo> getActiveSubscriptionInfoList(String callingPackage) {
-
-        if (!canReadPhoneState(callingPackage, "getActiveSubscriptionInfoList")) {
-            return null;
+        boolean canReadAllPhoneState;
+        try {
+            canReadAllPhoneState = TelephonyPermissions.checkReadPhoneState(mContext,
+                    SubscriptionManager.INVALID_SUBSCRIPTION_ID, Binder.getCallingPid(),
+                    Binder.getCallingUid(), callingPackage, "getActiveSubscriptionInfoList");
+        } catch (SecurityException e) {
+            canReadAllPhoneState = false;
         }
 
-        // Now that all security checks passes, perform the operation as ourselves.
+        // Perform the operation as ourselves. If the caller cannot read phone state, they may still
+        // have carrier privileges for that subscription, so we always need to make the query and
+        // then filter the results.
+        List<SubscriptionInfo> subList;
         final long identity = Binder.clearCallingIdentity();
         try {
             if (!isSubInfoReady()) {
@@ -614,7 +626,7 @@ public class SubscriptionController extends ISub.Stub {
                         logd("[getActiveSubscriptionInfoList] Getting Cached subInfo=" + si);
                     }
                 }
-                return new ArrayList<SubscriptionInfo>(tmpCachedSubList);
+                subList = tmpCachedSubList;
             } else {
                 if (DBG_CACHE) {
                     logd("[getActiveSubscriptionInfoList] Cached subInfo is null");
@@ -624,6 +636,24 @@ public class SubscriptionController extends ISub.Stub {
         } finally {
             Binder.restoreCallingIdentity(identity);
         }
+
+        // If the caller can read all phone state, just return the full list.
+        if (canReadAllPhoneState) {
+            return new ArrayList<>(subList);
+        }
+
+        // Filter the list to only include subscriptions which the (restored) caller can manage.
+        return subList.stream()
+                .filter(subscriptionInfo -> {
+                    try {
+                        return TelephonyPermissions.checkCallingOrSelfReadPhoneState(mContext,
+                                subscriptionInfo.getSubscriptionId(), callingPackage,
+                                "getActiveSubscriptionInfoList");
+                    } catch (SecurityException e) {
+                        return false;
+                    }
+                })
+                .collect(Collectors.toList());
     }
 
     /**
@@ -677,24 +707,14 @@ public class SubscriptionController extends ISub.Stub {
      */
     @Override
     public int getActiveSubInfoCount(String callingPackage) {
-        if (!canReadPhoneState(callingPackage, "getActiveSubInfoCount")) {
+        // Let getActiveSubscriptionInfoList perform permission checks / filtering.
+        List<SubscriptionInfo> records = getActiveSubscriptionInfoList(callingPackage);
+        if (records == null) {
+            if (VDBG) logd("[getActiveSubInfoCount] records null");
             return 0;
         }
-
-        // Now that all security checks passes, perform the operation as ourselves.
-        final long identity = Binder.clearCallingIdentity();
-        try {
-            List<SubscriptionInfo> records = getActiveSubscriptionInfoList(
-                    mContext.getOpPackageName());
-            if (records == null) {
-                if (VDBG) logd("[getActiveSubInfoCount] records null");
-                return 0;
-            }
-            if (VDBG) logd("[getActiveSubInfoCount]- count: " + records.size());
-            return records.size();
-        } finally {
-            Binder.restoreCallingIdentity(identity);
-        }
+        if (VDBG) logd("[getActiveSubInfoCount]- count: " + records.size());
+        return records.size();
     }
 
     /**
@@ -706,7 +726,11 @@ public class SubscriptionController extends ISub.Stub {
     public int getAllSubInfoCount(String callingPackage) {
         if (DBG) logd("[getAllSubInfoCount]+");
 
-        if (!canReadPhoneState(callingPackage, "getAllSubInfoCount")) {
+        // This API isn't public, so no need to provide a valid subscription ID - we're not worried
+        // about carrier-privileged callers not having access.
+        if (!TelephonyPermissions.checkCallingOrSelfReadPhoneState(
+                mContext, SubscriptionManager.INVALID_SUBSCRIPTION_ID, callingPackage,
+                "getAllSubInfoCount")) {
             return 0;
         }
 
@@ -745,7 +769,11 @@ public class SubscriptionController extends ISub.Stub {
 
     @Override
     public List<SubscriptionInfo> getAvailableSubscriptionInfoList(String callingPackage) {
-        if (!canReadPhoneState(callingPackage, "getAvailableSubscriptionInfoList")) {
+        // This API isn't public, so no need to provide a valid subscription ID - we're not worried
+        // about carrier-privileged callers not having access.
+        if (!TelephonyPermissions.checkCallingOrSelfReadPhoneState(
+                mContext, SubscriptionManager.INVALID_SUBSCRIPTION_ID, callingPackage,
+                "getAvailableSubscriptionInfoList")) {
             throw new SecurityException("Need READ_PHONE_STATE to call "
                     + " getAvailableSubscriptionInfoList");
         }
@@ -1881,57 +1909,48 @@ public class SubscriptionController extends ISub.Stub {
         return subIds[0];
     }
 
-    public List<SubscriptionInfo> getSubInfoUsingSlotIndexWithCheck(int slotIndex,
-                                                                    boolean needCheck,
-                                                                    String callingPackage) {
-        if (DBG) logd("[getSubInfoUsingSlotIndexWithCheck]+ slotIndex:" + slotIndex);
-        if (!canReadPhoneState(callingPackage, "getSubInfoUsingSlotIndexWithCheck")) {
+    /** Must be public for access from instrumentation tests. */
+    @VisibleForTesting
+    public List<SubscriptionInfo> getSubInfoUsingSlotIndexPrivileged(int slotIndex,
+            boolean needCheck) {
+        if (DBG) logd("[getSubInfoUsingSlotIndexPrivileged]+ slotIndex:" + slotIndex);
+        if (slotIndex == SubscriptionManager.DEFAULT_SIM_SLOT_INDEX) {
+            slotIndex = getSlotIndex(getDefaultSubId());
+        }
+        if (!SubscriptionManager.isValidSlotIndex(slotIndex)) {
+            if (DBG) logd("[getSubInfoUsingSlotIndexPrivileged]- invalid slotIndex");
             return null;
         }
 
-        // Now that all security checks passes, perform the operation as ourselves.
-        final long identity = Binder.clearCallingIdentity();
+        if (needCheck && !isSubInfoReady()) {
+            if (DBG) logd("[getSubInfoUsingSlotIndexPrivileged]- not ready");
+            return null;
+        }
+
+        Cursor cursor = mContext.getContentResolver().query(SubscriptionManager.CONTENT_URI,
+                null, SubscriptionManager.SIM_SLOT_INDEX + "=?",
+                new String[]{String.valueOf(slotIndex)}, null);
+        ArrayList<SubscriptionInfo> subList = null;
         try {
-            if (slotIndex == SubscriptionManager.DEFAULT_SIM_SLOT_INDEX) {
-                slotIndex = getSlotIndex(getDefaultSubId());
-            }
-            if (!SubscriptionManager.isValidSlotIndex(slotIndex)) {
-                if (DBG) logd("[getSubInfoUsingSlotIndexWithCheck]- invalid slotIndex");
-                return null;
-            }
-
-            if (needCheck && !isSubInfoReady()) {
-                if (DBG) logd("[getSubInfoUsingSlotIndexWithCheck]- not ready");
-                return null;
-            }
-
-            Cursor cursor = mContext.getContentResolver().query(SubscriptionManager.CONTENT_URI,
-                    null, SubscriptionManager.SIM_SLOT_INDEX + "=?",
-                    new String[]{String.valueOf(slotIndex)}, null);
-            ArrayList<SubscriptionInfo> subList = null;
-            try {
-                if (cursor != null) {
-                    while (cursor.moveToNext()) {
-                        SubscriptionInfo subInfo = getSubInfoRecord(cursor);
-                        if (subInfo != null) {
-                            if (subList == null) {
-                                subList = new ArrayList<SubscriptionInfo>();
-                            }
-                            subList.add(subInfo);
+            if (cursor != null) {
+                while (cursor.moveToNext()) {
+                    SubscriptionInfo subInfo = getSubInfoRecord(cursor);
+                    if (subInfo != null) {
+                        if (subList == null) {
+                            subList = new ArrayList<SubscriptionInfo>();
                         }
+                        subList.add(subInfo);
                     }
                 }
-            } finally {
-                if (cursor != null) {
-                    cursor.close();
-                }
             }
-            if (DBG) logd("[getSubInfoUsingSlotIndex]- null info return");
-
-            return subList;
         } finally {
-            Binder.restoreCallingIdentity(identity);
+            if (cursor != null) {
+                cursor.close();
+            }
         }
+        if (DBG) logd("[getSubInfoUsingSlotIndex]- null info return");
+
+        return subList;
     }
 
     private void validateSubId(int subId) {
@@ -2076,7 +2095,8 @@ public class SubscriptionController extends ISub.Stub {
      */
     @Override
     public String getSubscriptionProperty(int subId, String propKey, String callingPackage) {
-        if (!canReadPhoneState(callingPackage, "getSubInfoUsingSlotIndexWithCheck")) {
+        if (!TelephonyPermissions.checkCallingOrSelfReadPhoneState(
+                mContext, subId, callingPackage, "getSubscriptionProperty")) {
             return null;
         }
         String resultValue = null;

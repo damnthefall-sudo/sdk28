@@ -28,7 +28,6 @@ import android.annotation.TestApi;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
-import android.content.UriPermission;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.ConfigurationInfo;
@@ -71,6 +70,7 @@ import com.android.internal.app.procstats.ProcessStats;
 import com.android.internal.os.RoSystemProperties;
 import com.android.internal.os.TransferPipe;
 import com.android.internal.util.FastPrintWriter;
+import com.android.internal.util.MemInfoReader;
 import com.android.server.LocalServices;
 
 import org.xmlpull.v1.XmlSerializer;
@@ -450,31 +450,6 @@ public class ActivityManager {
      */
     public static final int INTENT_SENDER_FOREGROUND_SERVICE = 5;
 
-    /**
-     * Extra included on intents that are delegating the call to
-     * ActivityManager#startActivityAsCaller to another app.  This token is necessary for that call
-     * to succeed.  Type is IBinder.
-     * @hide
-     */
-    public static final String EXTRA_PERMISSION_TOKEN = "android.app.extra.PERMISSION_TOKEN";
-
-    /**
-     * Extra included on intents that contain an EXTRA_INTENT, with options that the contained
-     * intent may want to be started with.  Type is Bundle.
-     * TODO: remove once the ChooserActivity moves to systemui
-     * @hide
-     */
-    public static final String EXTRA_OPTIONS = "android.app.extra.OPTIONS";
-
-    /**
-     * Extra included on intents that contain an EXTRA_INTENT, use this boolean value for the
-     * parameter of the same name when starting the contained intent.
-     * TODO: remove once the ChooserActivity moves to systemui
-     * @hide
-     */
-    public static final String EXTRA_IGNORE_TARGET_SECURITY =
-            "android.app.extra.EXTRA_IGNORE_TARGET_SECURITY";
-
     /** @hide User operation call: success! */
     public static final int USER_OP_SUCCESS = 0;
 
@@ -576,18 +551,68 @@ public class ActivityManager {
     /** @hide Process does not exist. */
     public static final int PROCESS_STATE_NONEXISTENT = 19;
 
-    // NOTE: If PROCESS_STATEs are added or changed, then new fields must be added
-    // to frameworks/base/core/proto/android/app/activitymanager.proto and the following method must
+    // NOTE: If PROCESS_STATEs are added, then new fields must be added
+    // to frameworks/base/core/proto/android/app/enums.proto and the following method must
     // be updated to correctly map between them.
+    // However, if the current ActivityManager values are merely modified, no update should be made
+    // to enums.proto, to which values can only be added but never modified. Note that the proto
+    // versions do NOT have the ordering restrictions of the ActivityManager process state.
     /**
-     * Maps ActivityManager.PROCESS_STATE_ values to ProcessState enum.
+     * Maps ActivityManager.PROCESS_STATE_ values to enums.proto ProcessStateEnum value.
      *
      * @param amInt a process state of the form ActivityManager.PROCESS_STATE_
-     * @return the value of the corresponding ActivityManager's ProcessState enum.
+     * @return the value of the corresponding enums.proto ProcessStateEnum value.
      * @hide
      */
     public static final int processStateAmToProto(int amInt) {
-        return amInt * 100;
+        switch (amInt) {
+            case PROCESS_STATE_UNKNOWN:
+                return AppProtoEnums.PROCESS_STATE_UNKNOWN;
+            case PROCESS_STATE_PERSISTENT:
+                return AppProtoEnums.PROCESS_STATE_PERSISTENT;
+            case PROCESS_STATE_PERSISTENT_UI:
+                return AppProtoEnums.PROCESS_STATE_PERSISTENT_UI;
+            case PROCESS_STATE_TOP:
+                return AppProtoEnums.PROCESS_STATE_TOP;
+            case PROCESS_STATE_FOREGROUND_SERVICE:
+                return AppProtoEnums.PROCESS_STATE_FOREGROUND_SERVICE;
+            case PROCESS_STATE_BOUND_FOREGROUND_SERVICE:
+                return AppProtoEnums.PROCESS_STATE_BOUND_FOREGROUND_SERVICE;
+            case PROCESS_STATE_IMPORTANT_FOREGROUND:
+                return AppProtoEnums.PROCESS_STATE_IMPORTANT_FOREGROUND;
+            case PROCESS_STATE_IMPORTANT_BACKGROUND:
+                return AppProtoEnums.PROCESS_STATE_IMPORTANT_BACKGROUND;
+            case PROCESS_STATE_TRANSIENT_BACKGROUND:
+                return AppProtoEnums.PROCESS_STATE_TRANSIENT_BACKGROUND;
+            case PROCESS_STATE_BACKUP:
+                return AppProtoEnums.PROCESS_STATE_BACKUP;
+            case PROCESS_STATE_SERVICE:
+                return AppProtoEnums.PROCESS_STATE_SERVICE;
+            case PROCESS_STATE_RECEIVER:
+                return AppProtoEnums.PROCESS_STATE_RECEIVER;
+            case PROCESS_STATE_TOP_SLEEPING:
+                return AppProtoEnums.PROCESS_STATE_TOP_SLEEPING;
+            case PROCESS_STATE_HEAVY_WEIGHT:
+                return AppProtoEnums.PROCESS_STATE_HEAVY_WEIGHT;
+            case PROCESS_STATE_HOME:
+                return AppProtoEnums.PROCESS_STATE_HOME;
+            case PROCESS_STATE_LAST_ACTIVITY:
+                return AppProtoEnums.PROCESS_STATE_LAST_ACTIVITY;
+            case PROCESS_STATE_CACHED_ACTIVITY:
+                return AppProtoEnums.PROCESS_STATE_CACHED_ACTIVITY;
+            case PROCESS_STATE_CACHED_ACTIVITY_CLIENT:
+                return AppProtoEnums.PROCESS_STATE_CACHED_ACTIVITY_CLIENT;
+            case PROCESS_STATE_CACHED_RECENT:
+                return AppProtoEnums.PROCESS_STATE_CACHED_RECENT;
+            case PROCESS_STATE_CACHED_EMPTY:
+                return AppProtoEnums.PROCESS_STATE_CACHED_EMPTY;
+            case PROCESS_STATE_NONEXISTENT:
+                return AppProtoEnums.PROCESS_STATE_NONEXISTENT;
+            default:
+                // ActivityManager process state (amInt)
+                // could not be mapped to an AppProtoEnums ProcessState state.
+                return AppProtoEnums.PROCESS_STATE_UNKNOWN_TO_PROTO;
+        }
     }
 
     /** @hide The lowest process state number */
@@ -934,8 +959,21 @@ public class ActivityManager {
      * @hide
      */
     static public boolean isHighEndGfx() {
-        return !isLowRamDeviceStatic() &&
-                !Resources.getSystem().getBoolean(com.android.internal.R.bool.config_avoidGfxAccel);
+        return !isLowRamDeviceStatic()
+                && !RoSystemProperties.CONFIG_AVOID_GFX_ACCEL
+                && !Resources.getSystem()
+                        .getBoolean(com.android.internal.R.bool.config_avoidGfxAccel);
+    }
+
+    /**
+     * Return the total number of bytes of RAM this device has.
+     * @hide
+     */
+    @TestApi
+    public long getTotalRam() {
+        MemInfoReader memreader = new MemInfoReader();
+        memreader.readMemInfo();
+        return memreader.getTotalSize();
     }
 
     /**
@@ -1667,7 +1705,7 @@ public class ActivityManager {
             if (maxNum < 0) {
                 throw new IllegalArgumentException("The requested number of tasks should be >= 0");
             }
-            return getService().getRecentTasks(maxNum, flags, UserHandle.myUserId()).getList();
+            return getService().getRecentTasks(maxNum, flags, mContext.getUserId()).getList();
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -2065,15 +2103,17 @@ public class ActivityManager {
         private final int mOrientation;
         private final Rect mContentInsets;
         private final boolean mReducedResolution;
+        private final boolean mIsRealSnapshot;
         private final float mScale;
 
         public TaskSnapshot(GraphicBuffer snapshot, int orientation, Rect contentInsets,
-                boolean reducedResolution, float scale) {
+                boolean reducedResolution, float scale, boolean isRealSnapshot) {
             mSnapshot = snapshot;
             mOrientation = orientation;
             mContentInsets = new Rect(contentInsets);
             mReducedResolution = reducedResolution;
             mScale = scale;
+            mIsRealSnapshot = isRealSnapshot;
         }
 
         private TaskSnapshot(Parcel source) {
@@ -2082,6 +2122,7 @@ public class ActivityManager {
             mContentInsets = source.readParcelable(null /* classLoader */);
             mReducedResolution = source.readBoolean();
             mScale = source.readFloat();
+            mIsRealSnapshot = source.readBoolean();
         }
 
         /**
@@ -2114,6 +2155,14 @@ public class ActivityManager {
         }
 
         /**
+         * @return Whether or not the snapshot is a real snapshot or an app-theme generated snapshot
+         * due to the task having a secure window or having previews disabled.
+         */
+        public boolean isRealSnapshot() {
+            return mIsRealSnapshot;
+        }
+
+        /**
          * @return The scale this snapshot was taken in.
          */
         public float getScale() {
@@ -2132,13 +2181,15 @@ public class ActivityManager {
             dest.writeParcelable(mContentInsets, 0);
             dest.writeBoolean(mReducedResolution);
             dest.writeFloat(mScale);
+            dest.writeBoolean(mIsRealSnapshot);
         }
 
         @Override
         public String toString() {
             return "TaskSnapshot{mSnapshot=" + mSnapshot + " mOrientation=" + mOrientation
                     + " mContentInsets=" + mContentInsets.toShortString()
-                    + " mReducedResolution=" + mReducedResolution + " mScale=" + mScale;
+                    + " mReducedResolution=" + mReducedResolution + " mScale=" + mScale
+                    + " mIsRealSnapshot=" + mIsRealSnapshot;
         }
 
         public static final Creator<TaskSnapshot> CREATOR = new Creator<TaskSnapshot>() {
@@ -2661,7 +2712,7 @@ public class ActivityManager {
     public boolean clearApplicationUserData(String packageName, IPackageDataObserver observer) {
         try {
             return getService().clearApplicationUserData(packageName, false,
-                    observer, UserHandle.myUserId());
+                    observer, mContext.getUserId());
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -2686,17 +2737,22 @@ public class ActivityManager {
     /**
      * Permits an application to get the persistent URI permissions granted to another.
      *
-     * <p>Typically called by Settings.
+     * <p>Typically called by Settings or DocumentsUI, requires
+     * {@code GET_APP_GRANTED_URI_PERMISSIONS}.
      *
-     * @param packageName application to look for the granted permissions
+     * @param packageName application to look for the granted permissions, or {@code null} to get
+     * granted permissions for all applications
      * @return list of granted URI permissions
      *
      * @hide
      */
-    public ParceledListSlice<UriPermission> getGrantedUriPermissions(String packageName) {
+    public ParceledListSlice<GrantedUriPermission> getGrantedUriPermissions(
+            @Nullable String packageName) {
         try {
-            return getService().getGrantedUriPermissions(packageName,
-                    UserHandle.myUserId());
+            @SuppressWarnings("unchecked")
+            final ParceledListSlice<GrantedUriPermission> castedList = getService()
+                    .getGrantedUriPermissions(packageName, mContext.getUserId());
+            return castedList;
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -2705,7 +2761,7 @@ public class ActivityManager {
     /**
      * Permits an application to clear the persistent URI permissions granted to another.
      *
-     * <p>Typically called by Settings.
+     * <p>Typically called by Settings, requires {@code CLEAR_APP_GRANTED_URI_PERMISSIONS}.
      *
      * @param packageName application to clear its granted permissions
      *
@@ -2714,7 +2770,7 @@ public class ActivityManager {
     public void clearGrantedUriPermissions(String packageName) {
         try {
             getService().clearGrantedUriPermissions(packageName,
-                    UserHandle.myUserId());
+                    mContext.getUserId());
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -3281,6 +3337,28 @@ public class ActivityManager {
     }
 
     /**
+     * Query whether the user has enabled background restrictions for this app.
+     *
+     * <p> The user may chose to do this, if they see that an app is consuming an unreasonable
+     * amount of battery while in the background. </p>
+     *
+     * <p> If true, any work that the app tries to do will be aggressively restricted while it is in
+     * the background. At a minimum, jobs and alarms will not execute and foreground services
+     * cannot be started unless an app activity is in the foreground. </p>
+     *
+     * <p><b> Note that these restrictions stay in effect even when the device is charging.</b></p>
+     *
+     * @return true if user has enforced background restrictions for this app, false otherwise.
+     */
+    public boolean isBackgroundRestricted() {
+        try {
+            return getService().isBackgroundRestricted(mContext.getOpPackageName());
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
      * Sets the memory trim mode for a process and schedules a memory trim operation.
      *
      * <p><b>Note: this method is only intended for testing framework.</b></p>
@@ -3499,7 +3577,7 @@ public class ActivityManager {
     public void killBackgroundProcesses(String packageName) {
         try {
             getService().killBackgroundProcesses(packageName,
-                    UserHandle.myUserId());
+                    mContext.getUserId());
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -3557,7 +3635,7 @@ public class ActivityManager {
     @SystemApi
     @RequiresPermission(Manifest.permission.FORCE_STOP_PACKAGES)
     public void forceStopPackage(String packageName) {
-        forceStopPackageAsUser(packageName, UserHandle.myUserId());
+        forceStopPackageAsUser(packageName, mContext.getUserId());
     }
 
     /**
@@ -3666,6 +3744,24 @@ public class ActivityManager {
      */
     public static boolean isRunningInTestHarness() {
         return SystemProperties.getBoolean("ro.test_harness", false);
+    }
+
+    /**
+     * Unsupported compiled sdk warning should always be shown for the intput activity
+     * even in cases where the system would normally not show the warning. E.g. when running in a
+     * test harness.
+     *
+     * @param activity The component name of the activity to always show the warning for.
+     *
+     * @hide
+     */
+    @TestApi
+    public void alwaysShowUnsupportedCompileSdkWarning(ComponentName activity) {
+        try {
+            getService().alwaysShowUnsupportedCompileSdkWarning(activity);
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
     }
 
     /**

@@ -39,28 +39,33 @@ import android.os.Looper;
 import android.os.Message;
 import android.os.SystemClock;
 import android.os.SystemProperties;
+import android.telephony.AccessNetworkConstants;
 import android.telephony.Rlog;
 import android.telephony.ServiceState;
 import android.telephony.TelephonyManager;
 import android.telephony.data.DataCallResponse;
 import android.telephony.data.DataProfile;
+import android.telephony.data.DataService;
+import android.telephony.data.DataServiceCallback;
 import android.text.TextUtils;
 import android.util.LocalLog;
 import android.util.Pair;
 import android.util.SparseArray;
+import android.util.StatsLog;
 import android.util.TimeUtils;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.telephony.CallTracker;
 import com.android.internal.telephony.CarrierSignalAgent;
-import com.android.internal.telephony.CommandException;
 import com.android.internal.telephony.DctConstants;
+import com.android.internal.telephony.LinkCapacityEstimate;
 import com.android.internal.telephony.Phone;
 import com.android.internal.telephony.PhoneConstants;
 import com.android.internal.telephony.RILConstants;
 import com.android.internal.telephony.RetryManager;
 import com.android.internal.telephony.ServiceStateTracker;
 import com.android.internal.telephony.TelephonyIntents;
+import com.android.internal.telephony.metrics.TelephonyMetrics;
 import com.android.internal.util.AsyncChannel;
 import com.android.internal.util.IndentingPrintWriter;
 import com.android.internal.util.Protocol;
@@ -72,7 +77,6 @@ import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Locale;
@@ -172,6 +176,7 @@ public class DataConnection extends StateMachine {
     private DcFailCause mDcFailCause;
 
     private Phone mPhone;
+    private DataServiceManager mDataServiceManager;
     private LinkProperties mLinkProperties = new LinkProperties();
     private long mCreateTime;
     private long mLastFailTime;
@@ -195,7 +200,6 @@ public class DataConnection extends StateMachine {
     static final int BASE = Protocol.BASE_DATA_CONNECTION;
     static final int EVENT_CONNECT = BASE + 0;
     static final int EVENT_SETUP_DATA_CONNECTION_DONE = BASE + 1;
-    static final int EVENT_GET_LAST_FAIL_DONE = BASE + 2;
     static final int EVENT_DEACTIVATE_DONE = BASE + 3;
     static final int EVENT_DISCONNECT = BASE + 4;
     static final int EVENT_RIL_CONNECTED = BASE + 5;
@@ -215,16 +219,16 @@ public class DataConnection extends StateMachine {
     static final int EVENT_KEEPALIVE_STOPPED = BASE + 20;
     static final int EVENT_KEEPALIVE_START_REQUEST = BASE + 21;
     static final int EVENT_KEEPALIVE_STOP_REQUEST = BASE + 22;
+    static final int EVENT_LINK_CAPACITY_CHANGED = BASE + 23;
 
     private static final int CMD_TO_STRING_COUNT =
-            EVENT_KEEPALIVE_STOP_REQUEST - BASE + 1;
+            EVENT_LINK_CAPACITY_CHANGED - BASE + 1;
 
     private static String[] sCmdToString = new String[CMD_TO_STRING_COUNT];
     static {
         sCmdToString[EVENT_CONNECT - BASE] = "EVENT_CONNECT";
         sCmdToString[EVENT_SETUP_DATA_CONNECTION_DONE - BASE] =
                 "EVENT_SETUP_DATA_CONNECTION_DONE";
-        sCmdToString[EVENT_GET_LAST_FAIL_DONE - BASE] = "EVENT_GET_LAST_FAIL_DONE";
         sCmdToString[EVENT_DEACTIVATE_DONE - BASE] = "EVENT_DEACTIVATE_DONE";
         sCmdToString[EVENT_DISCONNECT - BASE] = "EVENT_DISCONNECT";
         sCmdToString[EVENT_RIL_CONNECTED - BASE] = "EVENT_RIL_CONNECTED";
@@ -248,6 +252,7 @@ public class DataConnection extends StateMachine {
         sCmdToString[EVENT_KEEPALIVE_STOPPED - BASE] = "EVENT_KEEPALIVE_STOPPED";
         sCmdToString[EVENT_KEEPALIVE_START_REQUEST - BASE] = "EVENT_KEEPALIVE_START_REQUEST";
         sCmdToString[EVENT_KEEPALIVE_STOP_REQUEST - BASE] = "EVENT_KEEPALIVE_STOP_REQUEST";
+        sCmdToString[EVENT_LINK_CAPACITY_CHANGED - BASE] = "EVENT_LINK_CAPACITY_CHANGED";
     }
     // Convert cmd to string or null if unknown
     static String cmdToString(int cmd) {
@@ -271,11 +276,13 @@ public class DataConnection extends StateMachine {
      * @param id the connection id
      * @return DataConnection that was created.
      */
-    public static DataConnection makeDataConnection(Phone phone, int id,
-            DcTracker dct, DcTesterFailBringUpAll failBringUpAll,
-            DcController dcc) {
+    public static DataConnection makeDataConnection(Phone phone, int id, DcTracker dct,
+                                                    DataServiceManager dataServiceManager,
+                                                    DcTesterFailBringUpAll failBringUpAll,
+                                                    DcController dcc) {
         DataConnection dc = new DataConnection(phone,
-                "DC-" + mInstanceNumber.incrementAndGet(), id, dct, failBringUpAll, dcc);
+                "DC-" + mInstanceNumber.incrementAndGet(), id, dct, dataServiceManager,
+                failBringUpAll, dcc);
         dc.start();
         if (DBG) dc.log("Made " + dc.getName());
         return dc;
@@ -292,8 +299,20 @@ public class DataConnection extends StateMachine {
         return new LinkProperties(mLinkProperties);
     }
 
-    boolean getIsInactive() {
+    boolean isInactive() {
         return getCurrentState() == mInactiveState;
+    }
+
+    boolean isDisconnecting() {
+        return getCurrentState() == mDisconnectingState;
+    }
+
+    boolean isActive() {
+        return getCurrentState() == mActiveState;
+    }
+
+    boolean isActivating() {
+        return getCurrentState() == mActivatingState;
     }
 
     int getCid() {
@@ -323,11 +342,10 @@ public class DataConnection extends StateMachine {
      */
     public enum SetupResult {
         SUCCESS,
-        ERR_BadCommand,
-        ERR_UnacceptableParameter,
-        ERR_GetLastErrorFromRil,
-        ERR_Stale,
-        ERR_RilError;
+        ERROR_RADIO_NOT_AVAILABLE,
+        ERROR_INVALID_ARG,
+        ERROR_STALE,
+        ERROR_DATA_SERVICE_SPECIFIC_ERROR;
 
         public DcFailCause mFailCause;
 
@@ -375,12 +393,12 @@ public class DataConnection extends StateMachine {
         return ret;
     }
 
+    @VisibleForTesting
     public UpdateLinkPropertyResult updateLinkProperty(DataCallResponse newState) {
         UpdateLinkPropertyResult result = new UpdateLinkPropertyResult(mLinkProperties);
 
         if (newState == null) return result;
 
-        SetupResult setupResult;
         result.newLp = new LinkProperties();
 
         // set link properties based on data call response
@@ -442,7 +460,8 @@ public class DataConnection extends StateMachine {
 
     //***** Constructor (NOTE: uses dcc.getHandler() as its Handler)
     private DataConnection(Phone phone, String name, int id,
-                DcTracker dct, DcTesterFailBringUpAll failBringUpAll,
+                           DcTracker dct, DataServiceManager dataServiceManager,
+                           DcTesterFailBringUpAll failBringUpAll,
                 DcController dcc) {
         super(name, dcc.getHandler());
         setLogRecSize(300);
@@ -451,6 +470,7 @@ public class DataConnection extends StateMachine {
 
         mPhone = phone;
         mDct = dct;
+        mDataServiceManager = dataServiceManager;
         mDcTesterFailBringUpAll = failBringUpAll;
         mDcController = dcc;
         mId = id;
@@ -478,7 +498,7 @@ public class DataConnection extends StateMachine {
     /**
      * Begin setting up a data connection, calls setupDataCall
      * and the ConnectionParams will be returned with the
-     * EVENT_SETUP_DATA_CONNECTION_DONE AsyncResult.userObj.
+     * EVENT_SETUP_DATA_CONNECTION_DONE
      *
      * @param cp is the connection parameters
      */
@@ -510,7 +530,6 @@ public class DataConnection extends StateMachine {
         mLastFailTime = -1;
         mLastFailCause = DcFailCause.NONE;
 
-        // msg.obj will be returned in AsyncResult.userObj;
         Message msg = obtainMessage(EVENT_SETUP_DATA_CONNECTION_DONE, cp);
         msg.obj = cp;
 
@@ -527,7 +546,11 @@ public class DataConnection extends StateMachine {
         boolean allowRoaming = mPhone.getDataRoamingEnabled()
                 || (isModemRoaming && !mPhone.getServiceState().getDataRoaming());
 
-        mPhone.mCi.setupDataCall(cp.mRilRat, dp, isModemRoaming, allowRoaming, msg);
+        mDataServiceManager.setupDataCall(
+                ServiceState.rilRadioTechnologyToAccessNetworkType(cp.mRilRat), dp, isModemRoaming,
+                allowRoaming, DataService.REQUEST_REASON_NORMAL, null, msg);
+        TelephonyMetrics.getInstance().writeSetupDataCall(mPhone.getPhoneId(), cp.mRilRat,
+                dp.getProfileId(), dp.getApn(), dp.getProtocol());
     }
 
     public void onSubscriptionOverride(int overrideMask, int overrideValue) {
@@ -538,28 +561,26 @@ public class DataConnection extends StateMachine {
 
     /**
      * TearDown the data connection when the deactivation is complete a Message with
-     * msg.what == EVENT_DEACTIVATE_DONE and msg.obj == AsyncResult with AsyncResult.obj
-     * containing the parameter o.
+     * msg.what == EVENT_DEACTIVATE_DONE
      *
      * @param o is the object returned in the AsyncResult.obj.
      */
     private void tearDownData(Object o) {
-        int discReason = RILConstants.DEACTIVATE_REASON_NONE;
+        int discReason = DataService.REQUEST_REASON_NORMAL;
         ApnContext apnContext = null;
         if ((o != null) && (o instanceof DisconnectParams)) {
-            DisconnectParams dp = (DisconnectParams)o;
+            DisconnectParams dp = (DisconnectParams) o;
             apnContext = dp.mApnContext;
-            if (TextUtils.equals(dp.mReason, Phone.REASON_RADIO_TURNED_OFF)) {
-                discReason = RILConstants.DEACTIVATE_REASON_RADIO_OFF;
-            } else if (TextUtils.equals(dp.mReason, Phone.REASON_PDP_RESET)) {
-                discReason = RILConstants.DEACTIVATE_REASON_PDP_RESET;
+            if (TextUtils.equals(dp.mReason, Phone.REASON_RADIO_TURNED_OFF)
+                    || TextUtils.equals(dp.mReason, Phone.REASON_PDP_RESET)) {
+                discReason = DataService.REQUEST_REASON_SHUTDOWN;
             }
         }
 
         String str = "tearDownData. mCid=" + mCid + ", reason=" + discReason;
         if (DBG) log(str);
         if (apnContext != null) apnContext.requestLog(str);
-        mPhone.mCi.deactivateDataCall(mCid, discReason,
+        mDataServiceManager.deactivateDataCall(mCid, discReason,
                 obtainMessage(EVENT_DEACTIVATE_DONE, mTag, 0, o));
     }
 
@@ -715,39 +736,34 @@ public class DataConnection extends StateMachine {
     }
 
     /**
-     * Process setup completion.
+     * Process setup data completion result from data service
      *
-     * @param ar is the result
-     * @return SetupResult.
+     * @param resultCode The result code returned by data service
+     * @param response Data call setup response from data service
+     * @param cp The original connection params used for data call setup
+     * @return Setup result
      */
-    private SetupResult onSetupConnectionCompleted(AsyncResult ar) {
-        DataCallResponse response = (DataCallResponse) ar.result;
-        ConnectionParams cp = (ConnectionParams) ar.userObj;
+    private SetupResult onSetupConnectionCompleted(@DataServiceCallback.ResultCode int resultCode,
+                                                   DataCallResponse response,
+                                                   ConnectionParams cp) {
         SetupResult result;
 
         if (cp.mTag != mTag) {
             if (DBG) {
                 log("onSetupConnectionCompleted stale cp.tag=" + cp.mTag + ", mtag=" + mTag);
             }
-            result = SetupResult.ERR_Stale;
-        } else if (ar.exception != null) {
-            if (DBG) {
-                log("onSetupConnectionCompleted failed, ar.exception=" + ar.exception +
-                    " response=" + response);
-            }
-
-            if (ar.exception instanceof CommandException
-                    && ((CommandException) (ar.exception)).getCommandError()
-                    == CommandException.Error.RADIO_NOT_AVAILABLE) {
-                result = SetupResult.ERR_BadCommand;
+            result = SetupResult.ERROR_STALE;
+        } else if (resultCode == DataServiceCallback.RESULT_ERROR_ILLEGAL_STATE) {
+            result = SetupResult.ERROR_RADIO_NOT_AVAILABLE;
+            result.mFailCause = DcFailCause.RADIO_NOT_AVAILABLE;
+        } else if (response.getStatus() != 0) {
+            if (response.getStatus() == DcFailCause.RADIO_NOT_AVAILABLE.getErrorCode()) {
+                result = SetupResult.ERROR_RADIO_NOT_AVAILABLE;
                 result.mFailCause = DcFailCause.RADIO_NOT_AVAILABLE;
             } else {
-                result = SetupResult.ERR_RilError;
+                result = SetupResult.ERROR_DATA_SERVICE_SPECIFIC_ERROR;
                 result.mFailCause = DcFailCause.fromInt(response.getStatus());
             }
-        } else if (response.getStatus() != 0) {
-            result = SetupResult.ERR_RilError;
-            result.mFailCause = DcFailCause.fromInt(response.getStatus());
         } else {
             if (DBG) log("onSetupConnectionCompleted received successful DataCallResponse");
             mCid = response.getCallId();
@@ -1130,10 +1146,10 @@ public class DataConnection extends StateMachine {
                 result = SetupResult.SUCCESS;
             } catch (UnknownHostException e) {
                 log("setLinkProperties: UnknownHostException " + e);
-                result = SetupResult.ERR_UnacceptableParameter;
+                result = SetupResult.ERROR_INVALID_ARG;
             }
         } else {
-            result = SetupResult.ERR_RilError;
+            result = SetupResult.ERROR_DATA_SERVICE_SPECIFIC_ERROR;
         }
 
         // An error occurred so clear properties
@@ -1228,6 +1244,7 @@ public class DataConnection extends StateMachine {
             mDct = null;
             mApnSetting = null;
             mPhone = null;
+            mDataServiceManager = null;
             mLinkProperties = null;
             mLastFailCause = null;
             mUserData = null;
@@ -1268,7 +1285,7 @@ public class DataConnection extends StateMachine {
                     break;
                 }
                 case DcAsyncChannel.REQ_IS_INACTIVE: {
-                    boolean val = getIsInactive();
+                    boolean val = isInactive();
                     if (VDBG) log("REQ_IS_INACTIVE  isInactive=" + val);
                     mAc.replyToMessage(msg, DcAsyncChannel.RSP_IS_INACTIVE, val ? 1 : 0);
                     break;
@@ -1332,12 +1349,11 @@ public class DataConnection extends StateMachine {
                     }
                     deferMessage(msg);
                     break;
-
                 case EVENT_TEAR_DOWN_NOW:
                     if (DBG) log("DcDefaultState EVENT_TEAR_DOWN_NOW");
-                    mPhone.mCi.deactivateDataCall(mCid, 0,  null);
+                    mDataServiceManager.deactivateDataCall(mCid, DataService.REQUEST_REASON_NORMAL,
+                            null);
                     break;
-
                 case EVENT_LOST_CONNECTION:
                     if (DBG) {
                         String s = "DcDefaultState ignore EVENT_LOST_CONNECTION"
@@ -1461,6 +1477,12 @@ public class DataConnection extends StateMachine {
         public void enter() {
             mTag += 1;
             if (DBG) log("DcInactiveState: enter() mTag=" + mTag);
+            StatsLog.write(StatsLog.MOBILE_CONNECTION_STATE_CHANGED,
+                    StatsLog.MOBILE_CONNECTION_STATE_CHANGED__STATE__INACTIVE,
+                    mPhone.getPhoneId(), mId,
+                    mApnSetting != null ? (long) mApnSetting.typesBitmap : 0L,
+                    mApnSetting != null
+                        ? mApnSetting.canHandleType(PhoneConstants.APN_TYPE_DEFAULT) : false);
 
             if (mConnectionParams != null) {
                 if (DBG) {
@@ -1551,6 +1573,15 @@ public class DataConnection extends StateMachine {
      */
     private class DcActivatingState extends State {
         @Override
+        public void enter() {
+            StatsLog.write(StatsLog.MOBILE_CONNECTION_STATE_CHANGED,
+                    StatsLog.MOBILE_CONNECTION_STATE_CHANGED__STATE__ACTIVATING,
+                    mPhone.getPhoneId(), mId,
+                    mApnSetting != null ? (long) mApnSetting.typesBitmap : 0L,
+                    mApnSetting != null
+                        ? mApnSetting.canHandleType(PhoneConstants.APN_TYPE_DEFAULT) : false);
+        }
+        @Override
         public boolean processMessage(Message msg) {
             boolean retVal;
             AsyncResult ar;
@@ -1566,11 +1597,12 @@ public class DataConnection extends StateMachine {
                     break;
 
                 case EVENT_SETUP_DATA_CONNECTION_DONE:
-                    ar = (AsyncResult) msg.obj;
-                    cp = (ConnectionParams) ar.userObj;
+                    cp = (ConnectionParams) msg.obj;
 
-                    SetupResult result = onSetupConnectionCompleted(ar);
-                    if (result != SetupResult.ERR_Stale) {
+                    DataCallResponse dataCallResponse =
+                            msg.getData().getParcelable(DataServiceManager.DATA_CALL_RESPONSE);
+                    SetupResult result = onSetupConnectionCompleted(msg.arg1, dataCallResponse, cp);
+                    if (result != SetupResult.ERROR_STALE) {
                         if (mConnectionParams != cp) {
                             loge("DcActivatingState: WEIRD mConnectionsParams:"+ mConnectionParams
                                     + " != cp:" + cp);
@@ -1589,28 +1621,29 @@ public class DataConnection extends StateMachine {
                             mDcFailCause = DcFailCause.NONE;
                             transitionTo(mActiveState);
                             break;
-                        case ERR_BadCommand:
+                        case ERROR_RADIO_NOT_AVAILABLE:
                             // Vendor ril rejected the command and didn't connect.
                             // Transition to inactive but send notifications after
                             // we've entered the mInactive state.
                             mInactiveState.setEnterNotificationParams(cp, result.mFailCause);
                             transitionTo(mInactiveState);
                             break;
-                        case ERR_UnacceptableParameter:
+                        case ERROR_INVALID_ARG:
                             // The addresses given from the RIL are bad
                             tearDownData(cp);
                             transitionTo(mDisconnectingErrorCreatingConnection);
                             break;
-                        case ERR_RilError:
+                        case ERROR_DATA_SERVICE_SPECIFIC_ERROR:
 
                             // Retrieve the suggested retry delay from the modem and save it.
                             // If the modem want us to retry the current APN again, it will
                             // suggest a positive delay value (in milliseconds). Otherwise we'll get
                             // NO_SUGGESTED_RETRY_DELAY here.
-                            long delay = getSuggestedRetryDelay(ar);
+
+                            long delay = getSuggestedRetryDelay(dataCallResponse);
                             cp.mApnContext.setModemSuggestedDelay(delay);
 
-                            String str = "DcActivatingState: ERR_RilError "
+                            String str = "DcActivatingState: ERROR_DATA_SERVICE_SPECIFIC_ERROR "
                                     + " delay=" + delay
                                     + " result=" + result
                                     + " result.isRestartRadioFail=" +
@@ -1627,7 +1660,7 @@ public class DataConnection extends StateMachine {
                             mInactiveState.setEnterNotificationParams(cp, result.mFailCause);
                             transitionTo(mInactiveState);
                             break;
-                        case ERR_Stale:
+                        case ERROR_STALE:
                             loge("DcActivatingState: stale EVENT_SETUP_DATA_CONNECTION_DONE"
                                     + " tag:" + cp.mTag + " != mTag:" + mTag);
                             break;
@@ -1636,46 +1669,6 @@ public class DataConnection extends StateMachine {
                     }
                     retVal = HANDLED;
                     break;
-
-                case EVENT_GET_LAST_FAIL_DONE:
-                    ar = (AsyncResult) msg.obj;
-                    cp = (ConnectionParams) ar.userObj;
-                    if (cp.mTag == mTag) {
-                        if (mConnectionParams != cp) {
-                            loge("DcActivatingState: WEIRD mConnectionsParams:" + mConnectionParams
-                                    + " != cp:" + cp);
-                        }
-
-                        DcFailCause cause = DcFailCause.UNKNOWN;
-
-                        if (ar.exception == null) {
-                            int rilFailCause = ((int[]) (ar.result))[0];
-                            cause = DcFailCause.fromInt(rilFailCause);
-                            if (cause == DcFailCause.NONE) {
-                                if (DBG) {
-                                    log("DcActivatingState msg.what=EVENT_GET_LAST_FAIL_DONE"
-                                            + " BAD: error was NONE, change to UNKNOWN");
-                                }
-                                cause = DcFailCause.UNKNOWN;
-                            }
-                        }
-                        mDcFailCause = cause;
-
-                        if (DBG) {
-                            log("DcActivatingState msg.what=EVENT_GET_LAST_FAIL_DONE"
-                                    + " cause=" + cause + " dc=" + DataConnection.this);
-                        }
-
-                        mInactiveState.setEnterNotificationParams(cp, cause);
-                        transitionTo(mInactiveState);
-                    } else {
-                        loge("DcActivatingState: stale EVENT_GET_LAST_FAIL_DONE"
-                                + " tag:" + cp.mTag + " != mTag:" + mTag);
-                    }
-
-                    retVal = HANDLED;
-                    break;
-
                 default:
                     if (VDBG) {
                         log("DcActivatingState not handled msg.what=" +
@@ -1696,6 +1689,12 @@ public class DataConnection extends StateMachine {
 
         @Override public void enter() {
             if (DBG) log("DcActiveState: enter dc=" + DataConnection.this);
+            StatsLog.write(StatsLog.MOBILE_CONNECTION_STATE_CHANGED,
+                    StatsLog.MOBILE_CONNECTION_STATE_CHANGED__STATE__ACTIVE,
+                    mPhone.getPhoneId(), mId,
+                    mApnSetting != null ? (long) mApnSetting.typesBitmap : 0L,
+                    mApnSetting != null
+                        ? mApnSetting.canHandleType(PhoneConstants.APN_TYPE_DEFAULT) : false);
 
             updateNetworkInfo();
 
@@ -1731,6 +1730,8 @@ public class DataConnection extends StateMachine {
                     50, misc);
             mPhone.mCi.registerForNattKeepaliveStatus(
                     getHandler(), DataConnection.EVENT_KEEPALIVE_STATUS, null);
+            mPhone.mCi.registerForLceInfo(
+                    getHandler(), DataConnection.EVENT_LINK_CAPACITY_CHANGED, null);
         }
 
         @Override
@@ -1750,6 +1751,7 @@ public class DataConnection extends StateMachine {
             mNetworkInfo.setDetailedState(NetworkInfo.DetailedState.DISCONNECTED,
                     reason, mNetworkInfo.getExtraInfo());
             mPhone.mCi.unregisterForNattKeepaliveStatus(getHandler());
+            mPhone.mCi.unregisterForLceInfo(getHandler());
             if (mNetworkAgent != null) {
                 mNetworkAgent.sendNetworkInfo(mNetworkInfo);
                 mNetworkAgent = null;
@@ -1844,11 +1846,10 @@ public class DataConnection extends StateMachine {
                     if (ar.exception != null) {
                         log("EVENT_BW_REFRESH_RESPONSE: error ignoring, e=" + ar.exception);
                     } else {
-                        final ArrayList<Integer> capInfo = (ArrayList<Integer>)ar.result;
-                        final int lceBwDownKbps = capInfo.get(0);
+                        final LinkCapacityEstimate lce = (LinkCapacityEstimate) ar.result;
                         NetworkCapabilities nc = getNetworkCapabilities();
                         if (mPhone.getLceStatus() == RILConstants.LCE_ACTIVE) {
-                            nc.setLinkDownstreamBandwidthKbps(lceBwDownKbps);
+                            nc.setLinkDownstreamBandwidthKbps(lce.downlinkCapacityKbps);
                             if (mNetworkAgent != null) {
                                 mNetworkAgent.sendNetworkCapabilities(nc);
                             }
@@ -1872,10 +1873,26 @@ public class DataConnection extends StateMachine {
                     KeepalivePacketData pkt = (KeepalivePacketData) msg.obj;
                     int slotId = msg.arg1;
                     int intervalMillis = msg.arg2 * 1000;
-                    mPhone.mCi.startNattKeepalive(
-                            DataConnection.this.mCid, pkt, intervalMillis,
-                            DataConnection.this.obtainMessage(
-                                    EVENT_KEEPALIVE_STARTED, slotId, 0, null));
+                    if (mDataServiceManager.getTransportType()
+                            == AccessNetworkConstants.TransportType.WWAN) {
+                        mPhone.mCi.startNattKeepalive(
+                                DataConnection.this.mCid, pkt, intervalMillis,
+                                DataConnection.this.obtainMessage(
+                                        EVENT_KEEPALIVE_STARTED, slotId, 0, null));
+                    } else {
+                        // We currently do not support NATT Keepalive requests using the
+                        // DataService API, so unless the request is WWAN (always bound via
+                        // the CommandsInterface), the request cannot be honored.
+                        //
+                        // TODO: b/72331356 to add support for Keepalive to the DataService
+                        // so that keepalive requests can be handled (if supported) by the
+                        // underlying transport.
+                        if (mNetworkAgent != null) {
+                            mNetworkAgent.onPacketKeepaliveEvent(
+                                    msg.arg1,
+                                    ConnectivityManager.PacketKeepalive.ERROR_INVALID_NETWORK);
+                        }
+                    }
                     retVal = HANDLED;
                     break;
                 }
@@ -1947,6 +1964,26 @@ public class DataConnection extends StateMachine {
                     retVal = HANDLED;
                     break;
                 }
+                case EVENT_LINK_CAPACITY_CHANGED: {
+                    AsyncResult ar = (AsyncResult) msg.obj;
+                    if (ar.exception != null) {
+                        loge("EVENT_LINK_CAPACITY_CHANGED e=" + ar.exception);
+                    } else {
+                        LinkCapacityEstimate lce = (LinkCapacityEstimate) ar.result;
+                        NetworkCapabilities nc = getNetworkCapabilities();
+                        if (lce.downlinkCapacityKbps != LinkCapacityEstimate.INVALID) {
+                            nc.setLinkDownstreamBandwidthKbps(lce.downlinkCapacityKbps);
+                        }
+                        if (lce.uplinkCapacityKbps != LinkCapacityEstimate.INVALID) {
+                            nc.setLinkUpstreamBandwidthKbps(lce.uplinkCapacityKbps);
+                        }
+                        if (mNetworkAgent != null) {
+                            mNetworkAgent.sendNetworkCapabilities(nc);
+                        }
+                    }
+                    retVal = HANDLED;
+                    break;
+                }
                 default:
                     if (VDBG) {
                         log("DcActiveState not handled msg.what=" + getWhatToString(msg.what));
@@ -1964,6 +2001,15 @@ public class DataConnection extends StateMachine {
      */
     private class DcDisconnectingState extends State {
         @Override
+        public void enter() {
+            StatsLog.write(StatsLog.MOBILE_CONNECTION_STATE_CHANGED,
+                    StatsLog.MOBILE_CONNECTION_STATE_CHANGED__STATE__DISCONNECTING,
+                    mPhone.getPhoneId(), mId,
+                    mApnSetting != null ? (long) mApnSetting.typesBitmap : 0L,
+                    mApnSetting != null
+                        ? mApnSetting.canHandleType(PhoneConstants.APN_TYPE_DEFAULT) : false);
+        }
+        @Override
         public boolean processMessage(Message msg) {
             boolean retVal;
 
@@ -1976,8 +2022,7 @@ public class DataConnection extends StateMachine {
                     break;
 
                 case EVENT_DEACTIVATE_DONE:
-                    AsyncResult ar = (AsyncResult) msg.obj;
-                    DisconnectParams dp = (DisconnectParams) ar.userObj;
+                    DisconnectParams dp = (DisconnectParams) msg.obj;
 
                     String str = "DcDisconnectingState msg.what=EVENT_DEACTIVATE_DONE RefCount="
                             + mApnContexts.size();
@@ -1987,7 +2032,7 @@ public class DataConnection extends StateMachine {
                     if (dp.mTag == mTag) {
                         // Transition to inactive but send notifications after
                         // we've entered the mInactive state.
-                        mInactiveState.setEnterNotificationParams((DisconnectParams) ar.userObj);
+                        mInactiveState.setEnterNotificationParams(dp);
                         transitionTo(mInactiveState);
                     } else {
                         if (DBG) log("DcDisconnectState stale EVENT_DEACTIVATE_DONE"
@@ -2014,13 +2059,21 @@ public class DataConnection extends StateMachine {
      */
     private class DcDisconnectionErrorCreatingConnection extends State {
         @Override
+        public void enter() {
+            StatsLog.write(StatsLog.MOBILE_CONNECTION_STATE_CHANGED,
+                    StatsLog.MOBILE_CONNECTION_STATE_CHANGED__STATE__DISCONNECTION_ERROR_CREATING_CONNECTION,
+                    mPhone.getPhoneId(), mId,
+                    mApnSetting != null ? (long) mApnSetting.typesBitmap : 0L,
+                    mApnSetting != null
+                        ? mApnSetting.canHandleType(PhoneConstants.APN_TYPE_DEFAULT) : false);
+        }
+        @Override
         public boolean processMessage(Message msg) {
             boolean retVal;
 
             switch (msg.what) {
                 case EVENT_DEACTIVATE_DONE:
-                    AsyncResult ar = (AsyncResult) msg.obj;
-                    ConnectionParams cp = (ConnectionParams) ar.userObj;
+                    ConnectionParams cp = (ConnectionParams) msg.obj;
                     if (cp.mTag == mTag) {
                         String str = "DcDisconnectionErrorCreatingConnection" +
                                 " msg.what=EVENT_DEACTIVATE_DONE";
@@ -2067,8 +2120,6 @@ public class DataConnection extends StateMachine {
             super(l, c, TAG, ni, nc, lp, score, misc);
             mNetCapsLocalLog.log("New network agent created. capabilities=" + nc);
             mNetworkCapabilities = nc;
-            mPhone.mCi.registerForNattKeepaliveStatus(
-                    getHandler(), EVENT_KEEPALIVE_STATUS, null);
         }
 
         @Override
@@ -2272,14 +2323,11 @@ public class DataConnection extends StateMachine {
     /**
      * Using the result of the SETUP_DATA_CALL determine the retry delay.
      *
-     * @param ar is the result from SETUP_DATA_CALL
+     * @param response The response from setup data call
      * @return NO_SUGGESTED_RETRY_DELAY if no retry is needed otherwise the delay to the
      *         next SETUP_DATA_CALL
      */
-    private long getSuggestedRetryDelay(AsyncResult ar) {
-
-        DataCallResponse response = (DataCallResponse) ar.result;
-
+    private long getSuggestedRetryDelay(DataCallResponse response) {
         /** According to ril.h
          * The value < 0 means no value is suggested
          * The value 0 means retry should be done ASAP.

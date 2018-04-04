@@ -17,8 +17,6 @@ package com.android.systemui.statusbar.phone;
 import static android.app.StatusBarManager.DISABLE_NOTIFICATION_ICONS;
 import static android.app.StatusBarManager.DISABLE_SYSTEM_INFO;
 
-import static com.android.systemui.statusbar.phone.StatusBar.reinflateSignalCluster;
-
 import android.annotation.Nullable;
 import android.app.Fragment;
 import android.app.StatusBarManager;
@@ -34,7 +32,6 @@ import com.android.systemui.Interpolators;
 import com.android.systemui.R;
 import com.android.systemui.SysUiServiceProvider;
 import com.android.systemui.statusbar.CommandQueue;
-import com.android.systemui.statusbar.SignalClusterView;
 import com.android.systemui.statusbar.phone.StatusBarIconController.DarkIconManager;
 import com.android.systemui.statusbar.policy.DarkIconDispatcher;
 import com.android.systemui.statusbar.policy.EncryptionHelper;
@@ -51,6 +48,9 @@ public class CollapsedStatusBarFragment extends Fragment implements CommandQueue
 
     public static final String TAG = "CollapsedStatusBarFragment";
     private static final String EXTRA_PANEL_STATE = "panel_state";
+    public static final String STATUS_BAR_ICON_MANAGER_TAG = "status_bar_icon_manager";
+    public static final int FADE_IN_DURATION = 320;
+    public static final int FADE_IN_DELAY = 50;
     private PhoneStatusBarView mStatusBar;
     private KeyguardMonitor mKeyguardMonitor;
     private NetworkController mNetworkController;
@@ -60,7 +60,6 @@ public class CollapsedStatusBarFragment extends Fragment implements CommandQueue
     private int mDisabled1;
     private StatusBar mStatusBarComponent;
     private DarkIconManager mDarkIconManager;
-    private SignalClusterView mSignalClusterView;
     private View mOperatorNameFrame;
 
     private SignalCallback mSignalCallback = new SignalCallback() {
@@ -92,12 +91,10 @@ public class CollapsedStatusBarFragment extends Fragment implements CommandQueue
             mStatusBar.go(savedInstanceState.getInt(EXTRA_PANEL_STATE));
         }
         mDarkIconManager = new DarkIconManager(view.findViewById(R.id.statusIcons));
+        mDarkIconManager.setShouldLog(true);
         Dependency.get(StatusBarIconController.class).addIconGroup(mDarkIconManager);
         mSystemIconArea = mStatusBar.findViewById(R.id.system_icon_area);
         mClockView = mStatusBar.findViewById(R.id.clock);
-        mSignalClusterView = mStatusBar.findViewById(R.id.signal_cluster);
-        Dependency.get(DarkIconDispatcher.class).addDarkReceiver(mSignalClusterView);
-        // Default to showing until we know otherwise.
         showSystemIconArea(false);
         initEmergencyCryptkeeperText();
         initOperatorName();
@@ -124,7 +121,6 @@ public class CollapsedStatusBarFragment extends Fragment implements CommandQueue
     @Override
     public void onDestroyView() {
         super.onDestroyView();
-        Dependency.get(DarkIconDispatcher.class).removeDarkReceiver(mSignalClusterView);
         Dependency.get(StatusBarIconController.class).removeIconGroup(mDarkIconManager);
         if (mNetworkController.hasEmergencyCryptKeeperText()) {
             mNetworkController.removeCallback(mSignalCallback);
@@ -257,9 +253,9 @@ public class CollapsedStatusBarFragment extends Fragment implements CommandQueue
         }
         v.animate()
                 .alpha(1f)
-                .setDuration(320)
+                .setDuration(FADE_IN_DURATION)
                 .setInterpolator(Interpolators.ALPHA_IN)
-                .setStartDelay(50)
+                .setStartDelay(FADE_IN_DELAY)
 
                 // We need to clean up any pending end action from animateHide if we call
                 // both hide and show in the same frame before the animation actually gets started.

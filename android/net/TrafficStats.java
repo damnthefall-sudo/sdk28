@@ -16,7 +16,6 @@
 
 package android.net;
 
-import android.annotation.RequiresPermission;
 import android.annotation.SuppressLint;
 import android.annotation.SystemApi;
 import android.annotation.TestApi;
@@ -259,20 +258,33 @@ public class TrafficStats {
     /**
      * Set specific UID to use when accounting {@link Socket} traffic
      * originating from the current thread. Designed for use when performing an
-     * operation on behalf of another application.
+     * operation on behalf of another application, or when another application
+     * is performing operations on your behalf.
+     * <p>
+     * Any app can <em>accept</em> blame for traffic performed on a socket
+     * originally created by another app by calling this method with the
+     * {@link android.system.Os#getuid()} value. However, only apps holding the
+     * {@code android.Manifest.permission#UPDATE_DEVICE_STATS} permission may
+     * <em>assign</em> blame to another UIDs.
      * <p>
      * Changes only take effect during subsequent calls to
      * {@link #tagSocket(Socket)}.
-     * <p>
-     * To take effect, caller must hold
-     * {@link android.Manifest.permission#UPDATE_DEVICE_STATS} permission.
-     *
-     * @hide
      */
     @SystemApi
-    @RequiresPermission(android.Manifest.permission.UPDATE_DEVICE_STATS)
+    @SuppressLint("Doclava125")
     public static void setThreadStatsUid(int uid) {
         NetworkManagementSocketTagger.setThreadSocketStatsUid(uid);
+    }
+
+    /**
+     * Get the active UID used when accounting {@link Socket} traffic originating
+     * from the current thread. Only one active tag per thread is supported.
+     * {@link #tagSocket(Socket)}.
+     *
+     * @see #setThreadStatsUid(int)
+     */
+    public static int getThreadStatsUid() {
+        return NetworkManagementSocketTagger.getThreadSocketStatsUid();
     }
 
     /**
@@ -282,7 +294,11 @@ public class TrafficStats {
      * <p>
      * Changes only take effect during subsequent calls to
      * {@link #tagSocket(Socket)}.
+     *
+     * @removed
+     * @deprecated use {@link #setThreadStatsUid(int)} instead.
      */
+    @Deprecated
     public static void setThreadStatsUidSelf() {
         setThreadStatsUid(android.os.Process.myUid());
     }
@@ -439,6 +455,10 @@ public class TrafficStats {
         }
     }
 
+    private static long addIfSupported(long stat) {
+        return (stat == UNSUPPORTED) ? 0 : stat;
+    }
+
     /**
      * Return number of packets transmitted across mobile networks since device
      * boot. Counts packets across all mobile network interfaces, and always
@@ -451,7 +471,7 @@ public class TrafficStats {
     public static long getMobileTxPackets() {
         long total = 0;
         for (String iface : getMobileIfaces()) {
-            total += getTxPackets(iface);
+            total += addIfSupported(getTxPackets(iface));
         }
         return total;
     }
@@ -468,7 +488,7 @@ public class TrafficStats {
     public static long getMobileRxPackets() {
         long total = 0;
         for (String iface : getMobileIfaces()) {
-            total += getRxPackets(iface);
+            total += addIfSupported(getRxPackets(iface));
         }
         return total;
     }
@@ -485,7 +505,7 @@ public class TrafficStats {
     public static long getMobileTxBytes() {
         long total = 0;
         for (String iface : getMobileIfaces()) {
-            total += getTxBytes(iface);
+            total += addIfSupported(getTxBytes(iface));
         }
         return total;
     }
@@ -502,7 +522,7 @@ public class TrafficStats {
     public static long getMobileRxBytes() {
         long total = 0;
         for (String iface : getMobileIfaces()) {
-            total += getRxBytes(iface);
+            total += addIfSupported(getRxBytes(iface));
         }
         return total;
     }
@@ -517,9 +537,7 @@ public class TrafficStats {
             } catch (RemoteException e) {
                 throw e.rethrowFromSystemServer();
             }
-            if (stat != UNSUPPORTED) {
-                total += stat;
-            }
+            total += addIfSupported(stat);
         }
         return total;
     }
@@ -534,9 +552,7 @@ public class TrafficStats {
             } catch (RemoteException e) {
                 throw e.rethrowFromSystemServer();
             }
-            if (stat != UNSUPPORTED) {
-                total += stat;
-            }
+            total += addIfSupported(stat);
         }
         return total;
     }

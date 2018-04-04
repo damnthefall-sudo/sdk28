@@ -19,20 +19,17 @@ package com.android.server.wm;
 import static android.view.Surface.ROTATION_180;
 import static android.view.Surface.ROTATION_270;
 import static android.view.Surface.ROTATION_90;
-import static com.android.server.wm.proto.DisplayFramesProto.STABLE_BOUNDS;
+import static com.android.server.wm.DisplayFramesProto.STABLE_BOUNDS;
 
 import android.annotation.NonNull;
-import android.content.res.Resources;
-import android.graphics.Point;
 import android.graphics.Rect;
 import android.util.proto.ProtoOutputStream;
 import android.view.DisplayCutout;
 import android.view.DisplayInfo;
 
-import com.android.internal.annotations.VisibleForTesting;
+import com.android.server.wm.utils.WmDisplayCutout;
 
 import java.io.PrintWriter;
-import java.util.Arrays;
 
 /**
  * Container class for all the display frames that affect how we do window layout on a display.
@@ -102,10 +99,10 @@ public class DisplayFrames {
     public final Rect mDock = new Rect();
 
     /** The display cutout used for layout (after rotation) */
-    @NonNull public DisplayCutout mDisplayCutout = DisplayCutout.NO_CUTOUT;
+    @NonNull public WmDisplayCutout mDisplayCutout = WmDisplayCutout.NO_CUTOUT;
 
     /** The cutout as supplied by display info */
-    @NonNull private DisplayCutout mDisplayInfoCutout = DisplayCutout.NO_CUTOUT;
+    @NonNull public WmDisplayCutout mDisplayInfoCutout = WmDisplayCutout.NO_CUTOUT;
 
     /**
      * During layout, the frame that is display-cutout safe, i.e. that does not intersect with it.
@@ -119,19 +116,18 @@ public class DisplayFrames {
 
     public int mRotation;
 
-    public DisplayFrames(int displayId, DisplayInfo info) {
+    public DisplayFrames(int displayId, DisplayInfo info, WmDisplayCutout displayCutout) {
         mDisplayId = displayId;
-        onDisplayInfoUpdated(info);
+        onDisplayInfoUpdated(info, displayCutout);
     }
 
-    public void onDisplayInfoUpdated(DisplayInfo info) {
+    public void onDisplayInfoUpdated(DisplayInfo info, WmDisplayCutout displayCutout) {
         mDisplayWidth = info.logicalWidth;
         mDisplayHeight = info.logicalHeight;
         mRotation = info.rotation;
         mDisplayInfoOverscan.set(
                 info.overscanLeft, info.overscanTop, info.overscanRight, info.overscanBottom);
-        mDisplayInfoCutout = info.displayCutout != null
-                ? info.displayCutout : DisplayCutout.NO_CUTOUT;
+        mDisplayInfoCutout = displayCutout != null ? displayCutout : WmDisplayCutout.NO_CUTOUT;
     }
 
     public void onBeginLayout() {
@@ -173,11 +169,11 @@ public class DisplayFrames {
         mStableFullscreen.set(mUnrestricted);
         mCurrent.set(mUnrestricted);
 
-        mDisplayCutout = mDisplayInfoCutout.calculateRelativeTo(mOverscan);
+        mDisplayCutout = mDisplayInfoCutout;
         mDisplayCutoutSafe.set(Integer.MIN_VALUE, Integer.MIN_VALUE,
                 Integer.MAX_VALUE, Integer.MAX_VALUE);
-        if (!mDisplayCutout.isEmpty()) {
-            final DisplayCutout c = mDisplayCutout;
+        if (!mDisplayCutout.getDisplayCutout().isEmpty()) {
+            final DisplayCutout c = mDisplayCutout.getDisplayCutout();
             if (c.getSafeInsetLeft() > 0) {
                 mDisplayCutoutSafe.left = mRestrictedOverscan.left + c.getSafeInsetLeft();
             }

@@ -17,18 +17,19 @@
 package com.android.server.wm;
 
 import static android.view.WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER;
+
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_ADD_REMOVE;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_FOCUS;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_WINDOW_MOVEMENT;
 import static com.android.server.wm.WindowManagerDebugConfig.TAG_WITH_CLASS_NAME;
 import static com.android.server.wm.WindowManagerDebugConfig.TAG_WM;
 import static com.android.server.wm.WindowManagerService.UPDATE_FOCUS_NORMAL;
-import static com.android.server.wm.proto.WindowTokenProto.HASH_CODE;
-import static com.android.server.wm.proto.WindowTokenProto.HIDDEN;
-import static com.android.server.wm.proto.WindowTokenProto.PAUSED;
-import static com.android.server.wm.proto.WindowTokenProto.WAITING_TO_SHOW;
-import static com.android.server.wm.proto.WindowTokenProto.WINDOWS;
-import static com.android.server.wm.proto.WindowTokenProto.WINDOW_CONTAINER;
+import static com.android.server.wm.WindowTokenProto.HASH_CODE;
+import static com.android.server.wm.WindowTokenProto.HIDDEN;
+import static com.android.server.wm.WindowTokenProto.PAUSED;
+import static com.android.server.wm.WindowTokenProto.WAITING_TO_SHOW;
+import static com.android.server.wm.WindowTokenProto.WINDOWS;
+import static com.android.server.wm.WindowTokenProto.WINDOW_CONTAINER;
 
 import android.annotation.CallSuper;
 import android.os.Debug;
@@ -52,6 +53,9 @@ class WindowToken extends WindowContainer<WindowState> {
 
     // The type of window this token is for, as per WindowManager.LayoutParams.
     final int windowType;
+
+    /** {@code true} if this holds the rounded corner overlay */
+    final boolean mRoundedCornerOverlay;
 
     // Set if this token was explicitly added by a client, so should
     // persist (not be removed) when all windows are removed.
@@ -105,11 +109,18 @@ class WindowToken extends WindowContainer<WindowState> {
 
     WindowToken(WindowManagerService service, IBinder _token, int type, boolean persistOnEmpty,
             DisplayContent dc, boolean ownerCanManageAppTokens) {
+        this(service, _token, type, persistOnEmpty, dc, ownerCanManageAppTokens,
+                false /* roundedCornersOverlay */);
+    }
+
+    WindowToken(WindowManagerService service, IBinder _token, int type, boolean persistOnEmpty,
+            DisplayContent dc, boolean ownerCanManageAppTokens, boolean roundedCornerOverlay) {
         super(service);
         token = _token;
         windowType = type;
         mPersistOnEmpty = persistOnEmpty;
         mOwnerCanManageAppTokens = ownerCanManageAppTokens;
+        mRoundedCornerOverlay = roundedCornerOverlay;
         onDisplayChanged(dc);
     }
 
@@ -258,6 +269,12 @@ class WindowToken extends WindowContainer<WindowState> {
     void onDisplayChanged(DisplayContent dc) {
         dc.reParentWindowToken(this);
         mDisplayContent = dc;
+
+        // The rounded corner overlay should not be rotated. We ensure that by moving it outside
+        // the windowing layer.
+        if (mRoundedCornerOverlay) {
+            mDisplayContent.reparentToOverlay(mPendingTransaction, mSurfaceControl);
+        }
 
         // TODO(b/36740756): One day this should perhaps be hooked
         // up with goodToGo, so we don't move a window

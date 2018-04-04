@@ -20,9 +20,9 @@ import static android.security.keystore.recovery.KeyChainProtectionParams.TYPE_L
 
 import android.annotation.Nullable;
 import android.content.Context;
-import android.security.keystore.recovery.KeyDerivationParams;
 import android.security.keystore.recovery.KeyChainProtectionParams;
 import android.security.keystore.recovery.KeyChainSnapshot;
+import android.security.keystore.recovery.KeyDerivationParams;
 import android.security.keystore.recovery.WrappedApplicationKey;
 import android.util.Log;
 
@@ -44,6 +44,8 @@ import java.security.NoSuchAlgorithmException;
 import java.security.PublicKey;
 import java.security.SecureRandom;
 import java.security.UnrecoverableKeyException;
+import java.security.cert.CertPath;
+import java.security.cert.CertificateException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -72,9 +74,10 @@ public class KeySyncTask implements Runnable {
     private final int mCredentialType;
     private final String mCredential;
     private final boolean mCredentialUpdated;
-    private final PlatformKeyManager.Factory mPlatformKeyManagerFactory;
+    private final PlatformKeyManager mPlatformKeyManager;
     private final RecoverySnapshotStorage mRecoverySnapshotStorage;
     private final RecoverySnapshotListenersStorage mSnapshotListenersStorage;
+    private final TestOnlyInsecureCertificateHelper mTestOnlyInsecureCertificateHelper;
 
     public static KeySyncTask newInstance(
             Context context,
@@ -94,7 +97,8 @@ public class KeySyncTask implements Runnable {
                 credentialType,
                 credential,
                 credentialUpdated,
-                () -> PlatformKeyManager.getInstance(context, recoverableKeyStoreDb));
+                PlatformKeyManager.getInstance(context, recoverableKeyStoreDb),
+                new TestOnlyInsecureCertificateHelper());
     }
 
     /**
@@ -105,9 +109,8 @@ public class KeySyncTask implements Runnable {
      * @param credentialType The type of credential as defined in {@code LockPatternUtils}
      * @param credential The credential, encoded as a {@link String}.
      * @param credentialUpdated signals weather credentials were updated.
-     * @param platformKeyManagerFactory Instantiates a {@link PlatformKeyManager} for the user.
-     *     This is a factory to enable unit testing, as otherwise it would be impossible to test
-     *     without a screen unlock occurring!
+     * @param platformKeyManager platform key manager
+     * @param TestOnlyInsecureCertificateHelper utility class used for end-to-end tests
      */
     @VisibleForTesting
     KeySyncTask(
@@ -118,15 +121,17 @@ public class KeySyncTask implements Runnable {
             int credentialType,
             String credential,
             boolean credentialUpdated,
-            PlatformKeyManager.Factory platformKeyManagerFactory) {
+            PlatformKeyManager platformKeyManager,
+            TestOnlyInsecureCertificateHelper TestOnlyInsecureCertificateHelper) {
         mSnapshotListenersStorage = recoverySnapshotListenersStorage;
         mRecoverableKeyStoreDb = recoverableKeyStoreDb;
         mUserId = userId;
         mCredentialType = credentialType;
         mCredential = credential;
         mCredentialUpdated = credentialUpdated;
-        mPlatformKeyManagerFactory = platformKeyManagerFactory;
+        mPlatformKeyManager = platformKeyManager;
         mRecoverySnapshotStorage = snapshotStorage;
+        mTestOnlyInsecureCertificateHelper = TestOnlyInsecureCertificateHelper;
     }
 
     @Override
@@ -145,6 +150,13 @@ public class KeySyncTask implements Runnable {
         if (mCredentialType == LockPatternUtils.CREDENTIAL_TYPE_NONE) {
             // Application keys for the user will not be available for sync.
             Log.w(TAG, "Credentials are not set for user " + mUserId);
+            int generation = mPlatformKeyManager.getGenerationId(mUserId);
+            mPlatformKeyManager.invalidatePlatformKey(mUserId, generation);
+            return;
+        }
+        if (isCustomLockScreen()) {
+            Log.w(TAG, "Unsupported credential type " + mCredentialType + "for user " + mUserId);
+            mRecoverableKeyStoreDb.invalidateKeysForUserIdOnCustomScreenLock(mUserId);
             return;
         }
 
@@ -157,19 +169,42 @@ public class KeySyncTask implements Runnable {
         }
     }
 
+    private boolean isCustomLockScreen() {
+        return mCredentialType != LockPatternUtils.CREDENTIAL_TYPE_NONE
+            && mCredentialType != LockPatternUtils.CREDENTIAL_TYPE_PATTERN
+            && mCredentialType != LockPatternUtils.CREDENTIAL_TYPE_PASSWORD;
+    }
+
     private void syncKeysForAgent(int recoveryAgentUid) {
-        if (!shoudCreateSnapshot(recoveryAgentUid)) {
-            Log.d(TAG, "Key sync not needed.");
-            return;
+        boolean recreateCurrentVersion = false;
+        if (!shouldCreateSnapshot(recoveryAgentUid)) {
+            recreateCurrentVersion =
+                    (mRecoverableKeyStoreDb.getSnapshotVersion(mUserId, recoveryAgentUid) != null)
+                    && (mRecoverySnapshotStorage.get(recoveryAgentUid) == null);
+            if (recreateCurrentVersion) {
+                Log.d(TAG, "Recreating most recent snapshot");
+            } else {
+                Log.d(TAG, "Key sync not needed.");
+                return;
+            }
         }
 
-        if (!mSnapshotListenersStorage.hasListener(recoveryAgentUid)) {
-            Log.w(TAG, "No pending intent registered for recovery agent " + recoveryAgentUid);
-            return;
-        }
+        PublicKey publicKey;
+        String rootCertAlias =
+                mRecoverableKeyStoreDb.getActiveRootOfTrust(mUserId, recoveryAgentUid);
+        rootCertAlias = mTestOnlyInsecureCertificateHelper
+                .getDefaultCertificateAliasIfEmpty(rootCertAlias);
 
-        PublicKey publicKey = mRecoverableKeyStoreDb.getRecoveryServicePublicKey(mUserId,
-                recoveryAgentUid);
+        CertPath certPath = mRecoverableKeyStoreDb.getRecoveryServiceCertPath(mUserId,
+                recoveryAgentUid, rootCertAlias);
+        if (certPath != null) {
+            Log.d(TAG, "Using the public key in stored CertPath for syncing");
+            publicKey = certPath.getCertificates().get(0).getPublicKey();
+        } else {
+            Log.d(TAG, "Using the stored raw public key for syncing");
+            publicKey = mRecoverableKeyStoreDb.getRecoveryServicePublicKey(mUserId,
+                    recoveryAgentUid);
+        }
         if (publicKey == null) {
             Log.w(TAG, "Not initialized for KeySync: no public key set. Cancelling task.");
             return;
@@ -179,6 +214,20 @@ public class KeySyncTask implements Runnable {
         if (vaultHandle == null) {
             Log.w(TAG, "No device ID set for user " + mUserId);
             return;
+        }
+
+        if (mTestOnlyInsecureCertificateHelper.isTestOnlyCertificateAlias(rootCertAlias)) {
+            Log.w(TAG, "Insecure root certificate is used by recovery agent "
+                    + recoveryAgentUid);
+            if (mTestOnlyInsecureCertificateHelper.doesCredentialSupportInsecureMode(
+                    mCredentialType, mCredential)) {
+                Log.w(TAG, "Whitelisted credential is used to generate snapshot by "
+                        + "recovery agent "+ recoveryAgentUid);
+            } else {
+                Log.w(TAG, "Non whitelisted credential is used to generate recovery snapshot by "
+                        + recoveryAgentUid + " - ignore attempt.");
+                return; // User secret will not be used.
+            }
         }
 
         byte[] salt = generateSalt();
@@ -200,6 +249,10 @@ public class KeySyncTask implements Runnable {
             return;
         }
 
+        // Only include insecure key material for test
+        if (mTestOnlyInsecureCertificateHelper.isTestOnlyCertificateAlias(rootCertAlias)) {
+            rawKeys = mTestOnlyInsecureCertificateHelper.keepOnlyWhitelistedInsecureKeys(rawKeys);
+        }
         SecretKey recoveryKey;
         try {
             recoveryKey = generateRecoveryKey();
@@ -230,9 +283,6 @@ public class KeySyncTask implements Runnable {
             }
         }
 
-        // TODO: make sure the same counter id is used during recovery and remove temporary fix.
-        counterId = 1L;
-
         byte[] vaultParams = KeySyncUtils.packVaultParams(
                 publicKey,
                 counterId,
@@ -253,39 +303,48 @@ public class KeySyncTask implements Runnable {
             Log.e(TAG,"Could not encrypt with recovery key", e);
             return;
         }
-        // TODO: store raw data in RecoveryServiceMetadataEntry and generate Parcelables later
-        // TODO: use Builder.
-        KeyChainProtectionParams metadata = new KeyChainProtectionParams(
-                /*userSecretType=*/ TYPE_LOCKSCREEN,
-                /*lockScreenUiFormat=*/ getUiFormat(mCredentialType, mCredential),
-                /*keyDerivationParams=*/ KeyDerivationParams.createSha256Params(salt),
-                /*secret=*/ new byte[0]);
+        KeyChainProtectionParams metadata = new KeyChainProtectionParams.Builder()
+                .setUserSecretType(TYPE_LOCKSCREEN)
+                .setLockScreenUiFormat(getUiFormat(mCredentialType, mCredential))
+                .setKeyDerivationParams(KeyDerivationParams.createSha256Params(salt))
+                .setSecret(new byte[0])
+                .build();
+
         ArrayList<KeyChainProtectionParams> metadataList = new ArrayList<>();
         metadataList.add(metadata);
-
-        int snapshotVersion = incrementSnapshotVersion(recoveryAgentUid);
 
         // If application keys are not updated, snapshot will not be created on next unlock.
         mRecoverableKeyStoreDb.setShouldCreateSnapshot(mUserId, recoveryAgentUid, false);
 
-        mRecoverySnapshotStorage.put(recoveryAgentUid, new KeyChainSnapshot.Builder()
-                .setSnapshotVersion(snapshotVersion)
+        KeyChainSnapshot.Builder keyChainSnapshotBuilder = new KeyChainSnapshot.Builder()
+                .setSnapshotVersion(getSnapshotVersion(recoveryAgentUid, recreateCurrentVersion))
                 .setMaxAttempts(TRUSTED_HARDWARE_MAX_ATTEMPTS)
                 .setCounterId(counterId)
                 .setTrustedHardwarePublicKey(SecureBox.encodePublicKey(publicKey))
                 .setServerParams(vaultHandle)
                 .setKeyChainProtectionParams(metadataList)
                 .setWrappedApplicationKeys(createApplicationKeyEntries(encryptedApplicationKeys))
-                .setEncryptedRecoveryKeyBlob(encryptedRecoveryKey)
-                .build());
-
+                .setEncryptedRecoveryKeyBlob(encryptedRecoveryKey);
+        try {
+            keyChainSnapshotBuilder.setTrustedHardwareCertPath(certPath);
+        } catch(CertificateException e) {
+            // Should not happen, as it's just deserialized from bytes stored in the db
+            Log.wtf(TAG, "Cannot serialize CertPath when calling setTrustedHardwareCertPath", e);
+            return;
+        }
+        mRecoverySnapshotStorage.put(recoveryAgentUid, keyChainSnapshotBuilder.build());
         mSnapshotListenersStorage.recoverySnapshotAvailable(recoveryAgentUid);
     }
 
     @VisibleForTesting
-    int incrementSnapshotVersion(int recoveryAgentUid) {
+    int getSnapshotVersion(int recoveryAgentUid, boolean recreateCurrentVersion) {
         Long snapshotVersion = mRecoverableKeyStoreDb.getSnapshotVersion(mUserId, recoveryAgentUid);
-        snapshotVersion = snapshotVersion == null ? 1 : snapshotVersion + 1;
+        if (recreateCurrentVersion) {
+            // version shouldn't be null at this moment.
+            snapshotVersion = snapshotVersion == null ? 1 : snapshotVersion;
+        } else {
+            snapshotVersion = snapshotVersion == null ? 1 : snapshotVersion + 1;
+        }
         mRecoverableKeyStoreDb.setSnapshotVersion(mUserId, recoveryAgentUid, snapshotVersion);
 
         return snapshotVersion.intValue();
@@ -304,8 +363,7 @@ public class KeySyncTask implements Runnable {
             throws InsecureUserException, KeyStoreException, UnrecoverableKeyException,
             NoSuchAlgorithmException, NoSuchPaddingException, BadPlatformKeyException,
             InvalidKeyException, InvalidAlgorithmParameterException {
-        PlatformKeyManager platformKeyManager = mPlatformKeyManagerFactory.newInstance();
-        PlatformDecryptionKey decryptKey = platformKeyManager.getDecryptKey(mUserId);
+        PlatformDecryptionKey decryptKey = mPlatformKeyManager.getDecryptKey(mUserId);;
         Map<String, WrappedKey> wrappedKeys = mRecoverableKeyStoreDb.getAllKeys(
                 mUserId, recoveryAgentUid, decryptKey.getGenerationId());
         return WrappedKey.unwrapKeys(decryptKey, wrappedKeys);
@@ -315,7 +373,7 @@ public class KeySyncTask implements Runnable {
      * Returns {@code true} if a sync is pending.
      * @param recoveryAgentUid uid of the recovery agent.
      */
-    private boolean shoudCreateSnapshot(int recoveryAgentUid) {
+    private boolean shouldCreateSnapshot(int recoveryAgentUid) {
         int[] types = mRecoverableKeyStoreDb.getRecoverySecretTypes(mUserId, recoveryAgentUid);
         if (!ArrayUtils.contains(types, KeyChainProtectionParams.TYPE_LOCKSCREEN)) {
             // Only lockscreen type is supported.
@@ -414,10 +472,10 @@ public class KeySyncTask implements Runnable {
             Map<String, byte[]> encryptedApplicationKeys) {
         ArrayList<WrappedApplicationKey> keyEntries = new ArrayList<>();
         for (String alias : encryptedApplicationKeys.keySet()) {
-            keyEntries.add(
-                    new WrappedApplicationKey(
-                            alias,
-                            encryptedApplicationKeys.get(alias)));
+            keyEntries.add(new WrappedApplicationKey.Builder()
+                    .setAlias(alias)
+                    .setEncryptedKeyMaterial(encryptedApplicationKeys.get(alias))
+                    .build());
         }
         return keyEntries;
     }

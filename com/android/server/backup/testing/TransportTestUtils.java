@@ -115,6 +115,7 @@ public class TransportTestUtils {
                     .thenReturn(transportDirName);
             when(transportManager.getTransportDirName(eq(transportComponent)))
                     .thenReturn(transportDirName);
+            when(transportManager.isTransportRegistered(eq(transportName))).thenReturn(true);
             // TODO: Mock rest of description methods
         } else {
             // Transport not registered
@@ -127,6 +128,7 @@ public class TransportTestUtils {
                     .thenThrow(TransportNotRegisteredException.class);
             when(transportManager.getTransportDirName(eq(transportComponent)))
                     .thenThrow(TransportNotRegisteredException.class);
+            when(transportManager.isTransportRegistered(eq(transportName))).thenReturn(false);
         }
         return transportMock;
     }
@@ -144,12 +146,14 @@ public class TransportTestUtils {
                 // Transport registered and available
                 IBackupTransport transportMock = mockTransportBinder(transport);
                 when(transportClientMock.connectOrThrow(any())).thenReturn(transportMock);
+                when(transportClientMock.connect(any())).thenReturn(transportMock);
 
                 return new TransportMock(transportClientMock, transportMock);
             } else {
                 // Transport registered but unavailable
                 when(transportClientMock.connectOrThrow(any()))
                         .thenThrow(TransportNotAvailableException.class);
+                when(transportClientMock.connect(any())).thenReturn(null);
 
                 return new TransportMock(transportClientMock, null);
             }

@@ -34,6 +34,7 @@ import android.service.autofill.SaveInfo;
 import android.service.autofill.ValueFinder;
 import android.text.TextUtils;
 import android.util.Slog;
+import android.view.KeyEvent;
 import android.view.autofill.AutofillId;
 import android.view.autofill.AutofillManager;
 import android.view.autofill.IAutofillWindowPresenter;
@@ -78,6 +79,7 @@ public final class AutoFillUI {
                 IAutofillWindowPresenter presenter);
         void requestHideFillUi(AutofillId id);
         void startIntentSender(IntentSender intentSender);
+        void dispatchUnhandledKey(AutofillId id, KeyEvent keyEvent);
     }
 
     public AutoFillUI(@NonNull Context context) {
@@ -134,7 +136,7 @@ public final class AutoFillUI {
      * Hides the fill UI.
      */
     public void hideFillUi(@NonNull AutoFillUiCallback callback) {
-        mHandler.post(() -> hideFillUiUiThread(callback));
+        mHandler.post(() -> hideFillUiUiThread(callback, true));
     }
 
     /**
@@ -187,7 +189,7 @@ public final class AutoFillUI {
                 @Override
                 public void onResponsePicked(FillResponse response) {
                     log.setType(MetricsEvent.TYPE_DETAIL);
-                    hideFillUiUiThread(callback);
+                    hideFillUiUiThread(callback, true);
                     if (mCallback != null) {
                         mCallback.authenticate(response.getRequestId(),
                                 AutofillManager.AUTHENTICATION_ID_DATASET_ID_UNDEFINED,
@@ -198,7 +200,7 @@ public final class AutoFillUI {
                 @Override
                 public void onDatasetPicked(Dataset dataset) {
                     log.setType(MetricsEvent.TYPE_ACTION);
-                    hideFillUiUiThread(callback);
+                    hideFillUiUiThread(callback, true);
                     if (mCallback != null) {
                         final int datasetIndex = response.getDatasets().indexOf(dataset);
                         mCallback.fill(response.getRequestId(), datasetIndex, dataset);
@@ -208,7 +210,7 @@ public final class AutoFillUI {
                 @Override
                 public void onCanceled() {
                     log.setType(MetricsEvent.TYPE_DISMISS);
-                    hideFillUiUiThread(callback);
+                    hideFillUiUiThread(callback, true);
                 }
 
                 @Override
@@ -238,6 +240,13 @@ public final class AutoFillUI {
                 public void startIntentSender(IntentSender intentSender) {
                     if (mCallback != null) {
                         mCallback.startIntentSender(intentSender);
+                    }
+                }
+
+                @Override
+                public void dispatchUnhandledKey(KeyEvent keyEvent) {
+                    if (mCallback != null) {
+                        mCallback.dispatchUnhandledKey(focusedId, keyEvent);
                     }
                 }
             });
@@ -358,9 +367,9 @@ public final class AutoFillUI {
     }
 
     @android.annotation.UiThread
-    private void hideFillUiUiThread(@Nullable AutoFillUiCallback callback) {
+    private void hideFillUiUiThread(@Nullable AutoFillUiCallback callback, boolean notifyClient) {
         if (mFillUi != null && (callback == null || callback == mCallback)) {
-            mFillUi.destroy();
+            mFillUi.destroy(notifyClient);
             mFillUi = null;
         }
     }
@@ -404,13 +413,13 @@ public final class AutoFillUI {
     @android.annotation.UiThread
     private void destroyAllUiThread(@Nullable PendingUi pendingSaveUi,
             @Nullable AutoFillUiCallback callback, boolean notifyClient) {
-        hideFillUiUiThread(callback);
+        hideFillUiUiThread(callback, notifyClient);
         destroySaveUiUiThread(pendingSaveUi, notifyClient);
     }
 
     @android.annotation.UiThread
     private void hideAllUiThread(@Nullable AutoFillUiCallback callback) {
-        hideFillUiUiThread(callback);
+        hideFillUiUiThread(callback, true);
         final PendingUi pendingSaveUi = hideSaveUiUiThread(callback);
         if (pendingSaveUi != null && pendingSaveUi.getState() == PendingUi.STATE_FINISHED) {
             if (sDebug) {

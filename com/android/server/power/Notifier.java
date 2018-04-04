@@ -85,12 +85,13 @@ final class Notifier {
     private static final int MSG_WIRELESS_CHARGING_STARTED = 3;
     private static final int MSG_SCREEN_BRIGHTNESS_BOOST_CHANGED = 4;
     private static final int MSG_PROFILE_TIMED_OUT = 5;
+    private static final int MSG_WIRED_CHARGING_STARTED = 6;
 
     private final Object mLock = new Object();
 
     private final Context mContext;
     private final IBatteryStats mBatteryStats;
-    private final IAppOpsService mAppOps;
+    private final AppOpsManager mAppOps;
     private final SuspendBlocker mSuspendBlocker;
     private final WindowManagerPolicy mPolicy;
     private final ActivityManagerInternal mActivityManagerInternal;
@@ -133,11 +134,10 @@ final class Notifier {
     private boolean mUserActivityPending;
 
     public Notifier(Looper looper, Context context, IBatteryStats batteryStats,
-            IAppOpsService appOps, SuspendBlocker suspendBlocker,
-            WindowManagerPolicy policy) {
+            SuspendBlocker suspendBlocker, WindowManagerPolicy policy) {
         mContext = context;
         mBatteryStats = batteryStats;
-        mAppOps = appOps;
+        mAppOps = mContext.getSystemService(AppOpsManager.class);
         mSuspendBlocker = suspendBlocker;
         mPolicy = policy;
         mActivityManagerInternal = LocalServices.getService(ActivityManagerInternal.class);
@@ -193,8 +193,7 @@ final class Notifier {
                     mBatteryStats.noteStartWakelock(ownerUid, ownerPid, tag, historyTag,
                             monitorType, unimportantForLogging);
                     // XXX need to deal with disabled operations.
-                    mAppOps.startOperation(AppOpsManager.getToken(mAppOps),
-                            AppOpsManager.OP_WAKE_LOCK, ownerUid, packageName);
+                    mAppOps.startOpNoThrow(AppOpsManager.OP_WAKE_LOCK, ownerUid, packageName);
                 }
             } catch (RemoteException ex) {
                 // Ignore
@@ -294,8 +293,7 @@ final class Notifier {
                 } else {
                     mBatteryStats.noteStopWakelock(ownerUid, ownerPid, tag,
                             historyTag, monitorType);
-                    mAppOps.finishOperation(AppOpsManager.getToken(mAppOps),
-                            AppOpsManager.OP_WAKE_LOCK, ownerUid, packageName);
+                    mAppOps.finishOp(AppOpsManager.OP_WAKE_LOCK, ownerUid, packageName);
                 }
             } catch (RemoteException ex) {
                 // Ignore
@@ -538,12 +536,11 @@ final class Notifier {
         try {
             mBatteryStats.noteWakeUp(reason, reasonUid);
             if (opPackageName != null) {
-                mAppOps.noteOperation(AppOpsManager.OP_TURN_SCREEN_ON, opUid, opPackageName);
+                mAppOps.noteOpNoThrow(AppOpsManager.OP_TURN_SCREEN_ON, opUid, opPackageName);
             }
         } catch (RemoteException ex) {
             // Ignore
         }
-
     }
 
     /**
@@ -568,6 +565,20 @@ final class Notifier {
         Message msg = mHandler.obtainMessage(MSG_WIRELESS_CHARGING_STARTED);
         msg.setAsynchronous(true);
         msg.arg1 = batteryLevel;
+        mHandler.sendMessage(msg);
+    }
+
+    /**
+     * Called when wired charging has started so as to provide user feedback
+     */
+    public void onWiredChargingStarted() {
+        if (DEBUG) {
+            Slog.d(TAG, "onWiredChargingStarted");
+        }
+
+        mSuspendBlocker.acquire();
+        Message msg = mHandler.obtainMessage(MSG_WIRED_CHARGING_STARTED);
+        msg.setAsynchronous(true);
         mHandler.sendMessage(msg);
     }
 
@@ -703,12 +714,18 @@ final class Notifier {
         }
     };
 
-    private void playWirelessChargingStartedSound() {
+    /**
+     * Plays the wireless charging sound for both wireless and non-wireless charging
+     */
+    private void playChargingStartedSound() {
         final boolean enabled = Settings.Global.getInt(mContext.getContentResolver(),
                 Settings.Global.CHARGING_SOUNDS_ENABLED, 1) != 0;
+        final boolean dndOff = Settings.Global.getInt(mContext.getContentResolver(),
+                Settings.Global.ZEN_MODE, Settings.Global.ZEN_MODE_IMPORTANT_INTERRUPTIONS)
+                == Settings.Global.ZEN_MODE_OFF;
         final String soundPath = Settings.Global.getString(mContext.getContentResolver(),
-                Settings.Global.WIRELESS_CHARGING_STARTED_SOUND);
-        if (enabled && soundPath != null) {
+                Settings.Global.CHARGING_STARTED_SOUND);
+        if (enabled && dndOff && soundPath != null) {
             final Uri soundUri = Uri.parse("file://" + soundPath);
             if (soundUri != null) {
                 final Ringtone sfx = RingtoneManager.getRingtone(mContext, soundUri);
@@ -721,8 +738,13 @@ final class Notifier {
     }
 
     private void showWirelessChargingStarted(int batteryLevel) {
-        playWirelessChargingStartedSound();
+        playChargingStartedSound();
         mStatusBarManagerInternal.showChargingAnimation(batteryLevel);
+        mSuspendBlocker.release();
+    }
+
+    private void showWiredChargingStarted() {
+        playChargingStartedSound();
         mSuspendBlocker.release();
     }
 
@@ -753,6 +775,8 @@ final class Notifier {
                 case MSG_PROFILE_TIMED_OUT:
                     lockProfile(msg.arg1);
                     break;
+                case MSG_WIRED_CHARGING_STARTED:
+                    showWiredChargingStarted();
             }
         }
     }

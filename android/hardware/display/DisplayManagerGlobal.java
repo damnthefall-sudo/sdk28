@@ -384,6 +384,17 @@ public final class DisplayManagerGlobal {
         }
     }
 
+    /**
+     * Set the level of color saturation to apply to the display.
+     */
+    public void setSaturationLevel(float level) {
+        try {
+            mDm.setSaturationLevel(level);
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+
     public VirtualDisplay createVirtualDisplay(Context context, MediaProjection projection,
             String name, int width, int height, int densityDpi, Surface surface, int flags,
             VirtualDisplay.Callback callback, Handler handler, String uniqueId) {
@@ -490,6 +501,32 @@ public final class DisplayManagerGlobal {
     }
 
     /**
+     * Gets the global brightness configuration for a given user or null if one hasn't been set.
+     *
+     * @hide
+     */
+    public BrightnessConfiguration getBrightnessConfigurationForUser(int userId) {
+        try {
+            return mDm.getBrightnessConfigurationForUser(userId);
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Gets the default brightness configuration or null if one hasn't been configured.
+     *
+     * @hide
+     */
+    public BrightnessConfiguration getDefaultBrightnessConfiguration() {
+        try {
+            return mDm.getDefaultBrightnessConfiguration();
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+
+    /**
      * Temporarily sets the brightness of the display.
      * <p>
      * Requires the {@link android.Manifest.permission#CONTROL_DISPLAY_BRIGHTNESS} permission.
@@ -520,6 +557,21 @@ public final class DisplayManagerGlobal {
     public void setTemporaryAutoBrightnessAdjustment(float adjustment) {
         try {
             mDm.setTemporaryAutoBrightnessAdjustment(adjustment);
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+
+    /**
+     * Retrieves ambient brightness stats.
+     */
+    public List<AmbientBrightnessDayStats> getAmbientBrightnessStats() {
+        try {
+            ParceledListSlice<AmbientBrightnessDayStats> stats = mDm.getAmbientBrightnessStats();
+            if (stats == null) {
+                return Collections.emptyList();
+            }
+            return stats.getList();
         } catch (RemoteException ex) {
             throw ex.rethrowFromSystemServer();
         }

@@ -18,10 +18,10 @@ package com.android.server.fingerprint;
 
 import android.content.Context;
 import android.hardware.biometrics.fingerprint.V2_1.IBiometricsFingerprint;
+import android.hardware.biometrics.BiometricDialog;
+import android.hardware.biometrics.IBiometricDialogReceiver;
 import android.hardware.fingerprint.Fingerprint;
-import android.hardware.fingerprint.FingerprintDialog;
 import android.hardware.fingerprint.FingerprintManager;
-import android.hardware.fingerprint.IFingerprintDialogReceiver;
 import android.hardware.fingerprint.IFingerprintServiceReceiver;
 import android.os.Bundle;
 import android.os.IBinder;
@@ -46,22 +46,22 @@ public abstract class AuthenticationClient extends ClientMonitor {
     public static final int LOCKOUT_PERMANENT = 2;
 
     // Callback mechanism received from the client
-    // (FingerprintDialog -> FingerprintManager -> FingerprintService -> AuthenticationClient)
-    private IFingerprintDialogReceiver mDialogReceiverFromClient;
+    // (BiometricDialog -> FingerprintManager -> FingerprintService -> AuthenticationClient)
+    private IBiometricDialogReceiver mDialogReceiverFromClient;
     private Bundle mBundle;
     private IStatusBarService mStatusBarService;
     private boolean mInLockout;
     private final FingerprintManager mFingerprintManager;
     protected boolean mDialogDismissed;
 
-    // Receives events from SystemUI
-    protected IFingerprintDialogReceiver mDialogReceiver = new IFingerprintDialogReceiver.Stub() {
+    // Receives events from SystemUI and handles them before forwarding them to FingerprintDialog
+    protected IBiometricDialogReceiver mDialogReceiver = new IBiometricDialogReceiver.Stub() {
         @Override // binder call
         public void onDialogDismissed(int reason) {
             if (mBundle != null && mDialogReceiverFromClient != null) {
                 try {
                     mDialogReceiverFromClient.onDialogDismissed(reason);
-                    if (reason == FingerprintDialog.DISMISSED_REASON_USER_CANCEL) {
+                    if (reason == BiometricDialog.DISMISSED_REASON_USER_CANCEL) {
                         onError(FingerprintManager.FINGERPRINT_ERROR_USER_CANCELED,
                                 0 /* vendorCode */);
                     }
@@ -74,10 +74,21 @@ public abstract class AuthenticationClient extends ClientMonitor {
         }
     };
 
+    /**
+     * This method is called when authentication starts.
+     */
+    public abstract void onStart();
+
+    /**
+     * This method is called when a fingerprint is authenticated or authentication is stopped
+     * (cancelled by the user, or an error such as lockout has occurred).
+     */
+    public abstract void onStop();
+
     public AuthenticationClient(Context context, long halDeviceId, IBinder token,
             IFingerprintServiceReceiver receiver, int targetUserId, int groupId, long opId,
             boolean restricted, String owner, Bundle bundle,
-            IFingerprintDialogReceiver dialogReceiver, IStatusBarService statusBarService) {
+            IBiometricDialogReceiver dialogReceiver, IStatusBarService statusBarService) {
         super(context, halDeviceId, token, receiver, targetUserId, groupId, restricted, owner);
         mOpId = opId;
         mBundle = bundle;
@@ -220,6 +231,7 @@ public abstract class AuthenticationClient extends ClientMonitor {
             }
             result |= true; // we have a valid fingerprint, done
             resetFailedAttempts();
+            onStop();
         }
         return result;
     }
@@ -234,6 +246,7 @@ public abstract class AuthenticationClient extends ClientMonitor {
             Slog.w(TAG, "start authentication: no fingerprint HAL!");
             return ERROR_ESRCH;
         }
+        onStart();
         try {
             final int result = daemon.authenticate(mOpId, getGroupId());
             if (result != 0) {
@@ -266,6 +279,7 @@ public abstract class AuthenticationClient extends ClientMonitor {
             return 0;
         }
 
+        onStop();
         IBiometricsFingerprint daemon = getFingerprintDaemon();
         if (daemon == null) {
             Slog.w(TAG, "stopAuthentication: no fingerprint HAL!");
@@ -285,7 +299,7 @@ public abstract class AuthenticationClient extends ClientMonitor {
             // If the user already cancelled authentication (via some interaction with the
             // dialog, we do not need to hide it since it's already hidden.
             // If the device is in lockout, don't hide the dialog - it will automatically hide
-            // after FingerprintDialog.HIDE_DIALOG_DELAY
+            // after BiometricDialog.HIDE_DIALOG_DELAY
             if (mBundle != null && !mDialogDismissed && !mInLockout) {
                 try {
                     mStatusBarService.hideFingerprintDialog();

@@ -89,6 +89,8 @@ public class BluetoothTile extends QSTileImpl<BooleanState> {
     protected void handleClick() {
         // Secondary clicks are header clicks, just toggle.
         final boolean isEnabled = mState.value;
+        // Immediately enter transient enabling state when turning bluetooth on.
+        refreshState(isEnabled ? null : ARG_SHOW_TRANSIENT_ENABLING);
         mController.setBluetoothEnabled(!isEnabled);
     }
 
@@ -117,9 +119,10 @@ public class BluetoothTile extends QSTileImpl<BooleanState> {
 
     @Override
     protected void handleUpdateState(BooleanState state, Object arg) {
-        final boolean enabled = mController.isBluetoothEnabled();
+        final boolean transientEnabling = arg == ARG_SHOW_TRANSIENT_ENABLING;
+        final boolean enabled = transientEnabling || mController.isBluetoothEnabled();
         final boolean connected = mController.isBluetoothConnected();
-        state.isTransient = mController.isBluetoothConnecting()
+        state.isTransient = transientEnabling || mController.isBluetoothConnecting()
                 || mController.getBluetoothState() == BluetoothAdapter.STATE_TURNING_ON;
         state.dualTarget = true;
         state.value = enabled;
@@ -128,23 +131,11 @@ public class BluetoothTile extends QSTileImpl<BooleanState> {
         }
         state.slash.isSlashed = !enabled;
         state.label = mContext.getString(R.string.quick_settings_bluetooth_label);
-
         if (enabled) {
             if (connected) {
-                state.icon = ResourceIcon.get(R.drawable.ic_qs_bluetooth_connected);
+                state.icon = new BluetoothConnectedTileIcon();
                 state.contentDescription = mContext.getString(
                         R.string.accessibility_bluetooth_name, state.label);
-
-                final CachedBluetoothDevice lastDevice = mController.getLastDevice();
-                if (lastDevice != null) {
-                    final int batteryLevel = lastDevice.getBatteryLevel();
-                    if (batteryLevel != BluetoothDevice.BATTERY_LEVEL_UNKNOWN) {
-                        state.icon = new BluetoothBatteryTileIcon(
-                                batteryLevel,
-                                mContext.getResources().getFraction(
-                                        R.fraction.bt_battery_scale_fraction, 1, 1));
-                    }
-                }
 
                 state.label = mController.getLastDeviceName();
             } else if (state.isTransient) {
@@ -165,8 +156,7 @@ public class BluetoothTile extends QSTileImpl<BooleanState> {
             state.state = Tile.STATE_INACTIVE;
         }
 
-        state.secondaryLabel = getSecondaryLabel(enabled, connected);
-
+        state.secondaryLabel = getSecondaryLabel(enabled, connected, state.isTransient);
         state.dualLabelContentDescription = mContext.getResources().getString(
                 R.string.accessibility_quick_settings_open_settings, getTileLabel());
         state.expandedAccessibilityClassName = Switch.class.getName();
@@ -179,9 +169,13 @@ public class BluetoothTile extends QSTileImpl<BooleanState> {
      *
      * @param enabled whether bluetooth is enabled
      * @param connected whether there's a device connected via bluetooth
+     * @param isTransient whether bluetooth is currently in a transient state turning on
      */
     @Nullable
-    private String getSecondaryLabel(boolean enabled, boolean connected) {
+    private String getSecondaryLabel(boolean enabled, boolean connected, boolean isTransient) {
+        if (isTransient) {
+            return mContext.getString(R.string.quick_settings_bluetooth_secondary_label_transient);
+        }
         final CachedBluetoothDevice lastDevice = mController.getLastDevice();
 
         if (enabled && connected && lastDevice != null) {
@@ -278,6 +272,25 @@ public class BluetoothTile extends QSTileImpl<BooleanState> {
                     R.drawable.ic_qs_bluetooth_connected,
                     mBatteryLevel,
                     mIconScale);
+        }
+    }
+
+
+    /**
+     * Bluetooth icon wrapper (when connected with no battery indicator) for Quick Settings. This is
+     * used instead of {@link com.android.systemui.qs.tileimpl.QSTileImpl.DrawableIcon} in order to
+     * use a context that reflects dark/light theme attributes.
+     */
+    private class BluetoothConnectedTileIcon extends Icon {
+
+        BluetoothConnectedTileIcon() {
+            // Do nothing. Default constructor to limit visibility.
+        }
+
+        @Override
+        public Drawable getDrawable(Context context) {
+            // This method returns Pair<Drawable, String> - the first value is the drawable.
+            return context.getDrawable(R.drawable.ic_qs_bluetooth_connected);
         }
     }
 

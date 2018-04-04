@@ -85,7 +85,10 @@ import java.util.List;
  * or after {@link #onListenerDisconnected()}.
  * </p>
  * <p> Notification listeners cannot get notification access or be bound by the system on
- * {@link ActivityManager#isLowRamDevice() low ram} devices</p>
+ * {@linkplain ActivityManager#isLowRamDevice() low-RAM} devices. The system also ignores
+ * notification listeners running in a work profile. A
+ * {@link android.app.admin.DevicePolicyManager} might block notifications originating from a work
+ * profile.</p>
  */
 public abstract class NotificationListenerService extends Service {
 
@@ -146,13 +149,19 @@ public abstract class NotificationListenerService extends Service {
     /**
      * Whether notification suppressed by DND should not interruption visually when the screen is
      * off.
+     *
+     * @deprecated Use the more specific visual effects in {@link NotificationManager.Policy}.
      */
+    @Deprecated
     public static final int SUPPRESSED_EFFECT_SCREEN_OFF =
             NotificationManager.Policy.SUPPRESSED_EFFECT_SCREEN_OFF;
     /**
      * Whether notification suppressed by DND should not interruption visually when the screen is
      * on.
+     *
+     * @deprecated Use the more specific visual effects in {@link NotificationManager.Policy}.
      */
+    @Deprecated
     public static final int SUPPRESSED_EFFECT_SCREEN_ON =
             NotificationManager.Policy.SUPPRESSED_EFFECT_SCREEN_ON;
 
@@ -1217,6 +1226,7 @@ public abstract class NotificationListenerService extends Service {
                 // convert icon metadata to legacy format for older clients
                 createLegacyIconExtras(sbn.getNotification());
                 maybePopulateRemoteViews(sbn.getNotification());
+                maybePopulatePeople(sbn.getNotification());
             } catch (IllegalArgumentException e) {
                 // warn and drop corrupt notification
                 Log.w(TAG, "onNotificationPosted: can't rebuild notification from " +
@@ -1343,6 +1353,7 @@ public abstract class NotificationListenerService extends Service {
     /**
      * @hide
      */
+    @GuardedBy("mLock")
     public final void applyUpdateLocked(NotificationRankingUpdate update) {
         mRankingMap = new RankingMap(update);
     }
@@ -1407,6 +1418,7 @@ public abstract class NotificationListenerService extends Service {
         private ArrayList<SnoozeCriterion> mSnoozeCriteria;
         private boolean mShowBadge;
         private @UserSentiment int mUserSentiment = USER_SENTIMENT_NEUTRAL;
+        private boolean mHidden;
 
         public Ranking() {}
 
@@ -1448,7 +1460,8 @@ public abstract class NotificationListenerService extends Service {
 
         /**
          * Returns the type(s) of visual effects that should be suppressed for this notification.
-         * See {@link #SUPPRESSED_EFFECT_SCREEN_OFF}, {@link #SUPPRESSED_EFFECT_SCREEN_ON}.
+         * See {@link NotificationManager.Policy}, e.g.
+         * {@link NotificationManager.Policy#SUPPRESSED_EFFECT_LIGHTS}.
          */
         public int getSuppressedVisualEffects() {
             return mSuppressedVisualEffects;
@@ -1545,6 +1558,16 @@ public abstract class NotificationListenerService extends Service {
         }
 
         /**
+         * Returns whether the app that posted this notification is suspended, so this notification
+         * should be hidden.
+         *
+         * @return true if the notification should be hidden, false otherwise.
+         */
+        public boolean isSuspended() {
+            return mHidden;
+        }
+
+        /**
          * @hide
          */
         @VisibleForTesting
@@ -1553,7 +1576,7 @@ public abstract class NotificationListenerService extends Service {
                 CharSequence explanation, String overrideGroupKey,
                 NotificationChannel channel, ArrayList<String> overridePeople,
                 ArrayList<SnoozeCriterion> snoozeCriteria, boolean showBadge,
-                int userSentiment) {
+                int userSentiment, boolean hidden) {
             mKey = key;
             mRank = rank;
             mIsAmbient = importance < NotificationManager.IMPORTANCE_LOW;
@@ -1568,6 +1591,7 @@ public abstract class NotificationListenerService extends Service {
             mSnoozeCriteria = snoozeCriteria;
             mShowBadge = showBadge;
             mUserSentiment = userSentiment;
+            mHidden = hidden;
         }
 
         /**
@@ -1616,6 +1640,7 @@ public abstract class NotificationListenerService extends Service {
         private ArrayMap<String, ArrayList<SnoozeCriterion>> mSnoozeCriteria;
         private ArrayMap<String, Boolean> mShowBadge;
         private ArrayMap<String, Integer> mUserSentiment;
+        private ArrayMap<String, Boolean> mHidden;
 
         private RankingMap(NotificationRankingUpdate rankingUpdate) {
             mRankingUpdate = rankingUpdate;
@@ -1644,7 +1669,7 @@ public abstract class NotificationListenerService extends Service {
                     getVisibilityOverride(key), getSuppressedVisualEffects(key),
                     getImportance(key), getImportanceExplanation(key), getOverrideGroupKey(key),
                     getChannel(key), getOverridePeople(key), getSnoozeCriteria(key),
-                    getShowBadge(key), getUserSentiment(key));
+                    getShowBadge(key), getUserSentiment(key), getHidden(key));
             return rank >= 0;
         }
 
@@ -1772,6 +1797,16 @@ public abstract class NotificationListenerService extends Service {
                     ? Ranking.USER_SENTIMENT_NEUTRAL : userSentiment.intValue();
         }
 
+        private boolean getHidden(String key) {
+            synchronized (this) {
+                if (mHidden == null) {
+                    buildHiddenLocked();
+                }
+            }
+            Boolean hidden = mHidden.get(key);
+            return hidden == null ? false : hidden.booleanValue();
+        }
+
         // Locked by 'this'
         private void buildRanksLocked() {
             String[] orderedKeys = mRankingUpdate.getOrderedKeys();
@@ -1877,6 +1912,15 @@ public abstract class NotificationListenerService extends Service {
             mUserSentiment = new ArrayMap<>(userSentiment.size());
             for (String key : userSentiment.keySet()) {
                 mUserSentiment.put(key, userSentiment.getInt(key));
+            }
+        }
+
+        // Locked by 'this'
+        private void buildHiddenLocked() {
+            Bundle hidden = mRankingUpdate.getHidden();
+            mHidden = new ArrayMap<>(hidden.size());
+            for (String key : hidden.keySet()) {
+                mHidden.put(key, hidden.getBoolean(key));
             }
         }
 

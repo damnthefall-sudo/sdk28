@@ -16,11 +16,13 @@
 
 package com.android.server.wm;
 
-import static android.app.ActivityManager.StackId.INVALID_STACK_ID;
 import static android.app.ActivityManagerInternal.APP_TRANSITION_SNAPSHOT;
 import static android.app.ActivityManagerInternal.APP_TRANSITION_SPLASH_SCREEN;
 import static android.app.ActivityManagerInternal.APP_TRANSITION_WINDOWS_DRAWN;
 
+import static android.view.WindowManager.TRANSIT_DOCK_TASK_FROM_RECENTS;
+import static android.view.WindowManager.TRANSIT_TRANSLUCENT_ACTIVITY_CLOSE;
+import static android.view.WindowManager.TRANSIT_TRANSLUCENT_ACTIVITY_OPEN;
 import static com.android.server.policy.WindowManagerPolicy.FINISH_LAYOUT_REDO_CONFIG;
 import static com.android.server.policy.WindowManagerPolicy.FINISH_LAYOUT_REDO_LAYOUT;
 import static android.view.WindowManager.TRANSIT_ACTIVITY_CLOSE;
@@ -41,6 +43,7 @@ import static android.view.WindowManager.TRANSIT_WALLPAPER_INTRA_CLOSE;
 import static android.view.WindowManager.TRANSIT_WALLPAPER_INTRA_OPEN;
 import static android.view.WindowManager.TRANSIT_WALLPAPER_OPEN;
 import static com.android.server.wm.AppTransition.isKeyguardGoingAwayTransit;
+import static com.android.server.wm.AppTransition.isTaskTransit;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_APP_TRANSITIONS;
 import static com.android.server.wm.WindowManagerDebugConfig.SHOW_LIGHT_TRANSACTIONS;
@@ -51,6 +54,7 @@ import static com.android.server.wm.WindowManagerService.H.REPORT_WINDOWS_CHANGE
 import static com.android.server.wm.WindowManagerService.LAYOUT_REPEAT_THRESHOLD;
 import static com.android.server.wm.WindowManagerService.UPDATE_FOCUS_PLACING_SURFACES;
 
+import android.app.WindowConfiguration;
 import android.os.Debug;
 import android.os.Trace;
 import android.util.ArraySet;
@@ -59,16 +63,15 @@ import android.util.SparseIntArray;
 import android.view.Display;
 import android.view.RemoteAnimationAdapter;
 import android.view.RemoteAnimationDefinition;
-import android.view.SurfaceControl;
 import android.view.WindowManager;
 import android.view.WindowManager.LayoutParams;
 import android.view.WindowManager.TransitionType;
 import android.view.animation.Animation;
 
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.server.wm.WindowManagerService.H;
 
 import java.io.PrintWriter;
-import java.util.ArrayList;
 import java.util.function.Predicate;
 
 /**
@@ -102,7 +105,6 @@ class WindowSurfacePlacer {
     }
     private final LayerAndToken mTmpLayerAndToken = new LayerAndToken();
 
-    private final ArrayList<SurfaceControl> mPendingDestroyingSurfaces = new ArrayList<>();
     private final SparseIntArray mTempTransitionReasons = new SparseIntArray();
 
     private final Runnable mPerformSurfacePlacement;
@@ -287,6 +289,7 @@ class WindowSurfacePlacer {
         final boolean closingAppHasWallpaper = canBeWallpaperTarget(mService.mClosingApps)
                 && hasWallpaperTarget;
 
+        transit = maybeUpdateTransitToTranslucentAnim(transit);
         transit = maybeUpdateTransitToWallpaper(transit, openingAppHasWallpaper,
                 closingAppHasWallpaper);
 
@@ -294,12 +297,14 @@ class WindowSurfacePlacer {
         // what will control the animation theme. If all closing windows are obscured, then there is
         // no need to do an animation. This is the case, for example, when this transition is being
         // done behind a dream window.
+        final ArraySet<Integer> activityTypes = collectActivityTypes(mService.mOpeningApps,
+                mService.mClosingApps);
         final AppWindowToken animLpToken = mService.mPolicy.allowAppAnimationsLw()
-                ? findAnimLayoutParamsToken(transit)
+                ? findAnimLayoutParamsToken(transit, activityTypes)
                 : null;
 
         final LayoutParams animLp = getAnimLp(animLpToken);
-        overrideWithRemoteAnimationIfSet(animLpToken, transit);
+        overrideWithRemoteAnimationIfSet(animLpToken, transit, activityTypes);
 
         final boolean voiceInteraction = containsVoiceInteraction(mService.mOpeningApps)
                 || containsVoiceInteraction(mService.mOpeningApps);
@@ -361,13 +366,14 @@ class WindowSurfacePlacer {
      * Overrides the pending transition with the remote animation defined for the transition in the
      * set of defined remote animations in the app window token.
      */
-    private void overrideWithRemoteAnimationIfSet(AppWindowToken animLpToken, int transit) {
+    private void overrideWithRemoteAnimationIfSet(AppWindowToken animLpToken, int transit,
+            ArraySet<Integer> activityTypes) {
         if (animLpToken == null) {
             return;
         }
         final RemoteAnimationDefinition definition = animLpToken.getRemoteAnimationDefinition();
         if (definition != null) {
-            final RemoteAnimationAdapter adapter = definition.getAdapter(transit);
+            final RemoteAnimationAdapter adapter = definition.getAdapter(transit, activityTypes);
             if (adapter != null) {
                 mService.mAppTransition.overridePendingAppTransitionRemote(adapter);
             }
@@ -377,13 +383,14 @@ class WindowSurfacePlacer {
     /**
      * @return The window token that determines the animation theme.
      */
-    private AppWindowToken findAnimLayoutParamsToken(@TransitionType int transit) {
+    private AppWindowToken findAnimLayoutParamsToken(@TransitionType int transit,
+            ArraySet<Integer> activityTypes) {
         AppWindowToken result;
 
         // Remote animations always win, but fullscreen tokens override non-fullscreen tokens.
         result = lookForHighestTokenWithFilter(mService.mClosingApps, mService.mOpeningApps,
                 w -> w.getRemoteAnimationDefinition() != null
-                        && w.getRemoteAnimationDefinition().hasTransition(transit));
+                        && w.getRemoteAnimationDefinition().hasTransition(transit, activityTypes));
         if (result != null) {
             return result;
         }
@@ -396,6 +403,22 @@ class WindowSurfacePlacer {
                 w -> w.findMainWindow() != null);
     }
 
+    /**
+     * @return The set of {@link WindowConfiguration.ActivityType}s contained in the set of apps in
+     *         {@code array1} and {@code array2}.
+     */
+    private ArraySet<Integer> collectActivityTypes(ArraySet<AppWindowToken> array1,
+            ArraySet<AppWindowToken> array2) {
+        final ArraySet<Integer> result = new ArraySet<>();
+        for (int i = array1.size() - 1; i >= 0; i--) {
+            result.add(array1.valueAt(i).getActivityType());
+        }
+        for (int i = array2.size() - 1; i >= 0; i--) {
+            result.add(array2.valueAt(i).getActivityType());
+        }
+        return result;
+    }
+
     private AppWindowToken lookForHighestTokenWithFilter(ArraySet<AppWindowToken> array1,
             ArraySet<AppWindowToken> array2, Predicate<AppWindowToken> filter) {
         final int array1count = array1.size();
@@ -403,12 +426,9 @@ class WindowSurfacePlacer {
         int bestPrefixOrderIndex = Integer.MIN_VALUE;
         AppWindowToken bestToken = null;
         for (int i = 0; i < count; i++) {
-            final AppWindowToken wtoken;
-            if (i < array1count) {
-                wtoken = array1.valueAt(i);
-            } else {
-                wtoken = array2.valueAt(i - array1count);
-            }
+            final AppWindowToken wtoken = i < array1count
+                    ? array1.valueAt(i)
+                    : array2.valueAt(i - array1count);
             final int prefixOrderIndex = wtoken.getPrefixOrderIndex();
             if (filter.test(wtoken) && prefixOrderIndex > bestPrefixOrderIndex) {
                 bestPrefixOrderIndex = prefixOrderIndex;
@@ -436,7 +456,7 @@ class WindowSurfacePlacer {
             AppWindowToken wtoken = mService.mOpeningApps.valueAt(i);
             if (DEBUG_APP_TRANSITIONS) Slog.v(TAG, "Now opening app" + wtoken);
 
-            if (!wtoken.setVisibility(animLp, true, transit, false, voiceInteraction)){
+            if (!wtoken.setVisibility(animLp, true, transit, false, voiceInteraction)) {
                 // This token isn't going to be animating. Add it to the list of tokens to
                 // be notified of app transition complete since the notification will not be
                 // sent be the app window animator.
@@ -559,21 +579,22 @@ class WindowSurfacePlacer {
                         + wtoken.allDrawn + " startingDisplayed="
                         + wtoken.startingDisplayed + " startingMoved="
                         + wtoken.startingMoved + " isRelaunching()="
-                        + wtoken.isRelaunching());
+                        + wtoken.isRelaunching() + " startingWindow="
+                        + wtoken.startingWindow);
 
 
                 final boolean allDrawn = wtoken.allDrawn && !wtoken.isRelaunching();
                 if (!allDrawn && !wtoken.startingDisplayed && !wtoken.startingMoved) {
                     return false;
                 }
-                final TaskStack stack = wtoken.getStack();
-                final int stackId = stack != null ? stack.mStackId : INVALID_STACK_ID;
+                final int windowingMode = wtoken.getWindowingMode();
                 if (allDrawn) {
-                    outReasons.put(stackId,  APP_TRANSITION_WINDOWS_DRAWN);
+                    outReasons.put(windowingMode,  APP_TRANSITION_WINDOWS_DRAWN);
                 } else {
-                    outReasons.put(stackId, wtoken.startingData instanceof SplashScreenStartingData
-                            ? APP_TRANSITION_SPLASH_SCREEN
-                            : APP_TRANSITION_SNAPSHOT);
+                    outReasons.put(windowingMode,
+                            wtoken.startingData instanceof SplashScreenStartingData
+                                    ? APP_TRANSITION_SPLASH_SCREEN
+                                    : APP_TRANSITION_SNAPSHOT);
                 }
             }
 
@@ -607,6 +628,10 @@ class WindowSurfacePlacer {
         // Given no app transition pass it through instead of a wallpaper transition
         if (transit == TRANSIT_NONE) {
             return TRANSIT_NONE;
+        }
+        // Never update the transition for the wallpaper if we are just docking from recents
+        if (transit == TRANSIT_DOCK_TASK_FROM_RECENTS) {
+            return TRANSIT_DOCK_TASK_FROM_RECENTS;
         }
 
         // if wallpaper is animating in or out set oldWallpaper to null else to wallpaper
@@ -653,14 +678,59 @@ class WindowSurfacePlacer {
                 transit = TRANSIT_WALLPAPER_CLOSE;
                 if (DEBUG_APP_TRANSITIONS) Slog.v(TAG, "New transit away from wallpaper: "
                         + AppTransition.appTransitionToString(transit));
-            } else if (wallpaperTarget != null && wallpaperTarget.isVisibleLw() &&
-                    openingApps.contains(wallpaperTarget.mAppToken)) {
+            } else if (wallpaperTarget != null && wallpaperTarget.isVisibleLw()
+                    && openingApps.contains(wallpaperTarget.mAppToken)
+                    && transit != TRANSIT_TRANSLUCENT_ACTIVITY_CLOSE) {
                 // We are transitioning from an activity without
                 // a wallpaper to now showing the wallpaper
                 transit = TRANSIT_WALLPAPER_OPEN;
                 if (DEBUG_APP_TRANSITIONS) Slog.v(TAG, "New transit into wallpaper: "
                         + AppTransition.appTransitionToString(transit));
             }
+        }
+        return transit;
+    }
+
+    /**
+     * There are cases where we open/close a new task/activity, but in reality only a translucent
+     * activity on top of existing activities is opening/closing. For that one, we have a different
+     * animation because non of the task/activity animations actually work well with translucent
+     * apps.
+     *
+     * @param transit The current transition type.
+     * @return The current transition type or
+     *         {@link WindowManager#TRANSIT_TRANSLUCENT_ACTIVITY_CLOSE}/
+     *         {@link WindowManager#TRANSIT_TRANSLUCENT_ACTIVITY_OPEN} if appropriate for the
+     *         situation.
+     */
+    @VisibleForTesting
+    int maybeUpdateTransitToTranslucentAnim(int transit) {
+        final boolean taskOrActivity = AppTransition.isTaskTransit(transit)
+                || AppTransition.isActivityTransit(transit);
+        boolean allOpeningVisible = true;
+        boolean allTranslucentOpeningApps = !mService.mOpeningApps.isEmpty();
+        for (int i = mService.mOpeningApps.size() - 1; i >= 0; i--) {
+            final AppWindowToken token = mService.mOpeningApps.valueAt(i);
+            if (!token.isVisible()) {
+                allOpeningVisible = false;
+                if (token.fillsParent()) {
+                    allTranslucentOpeningApps = false;
+                }
+            }
+        }
+        boolean allTranslucentClosingApps = !mService.mClosingApps.isEmpty();
+        for (int i = mService.mClosingApps.size() - 1; i >= 0; i--) {
+            if (mService.mClosingApps.valueAt(i).fillsParent()) {
+                allTranslucentClosingApps = false;
+                break;
+            }
+        }
+
+        if (taskOrActivity && allTranslucentClosingApps && allOpeningVisible) {
+            return TRANSIT_TRANSLUCENT_ACTIVITY_CLOSE;
+        }
+        if (taskOrActivity && allTranslucentOpeningApps && mService.mClosingApps.isEmpty()) {
+            return TRANSIT_TRANSLUCENT_ACTIVITY_OPEN;
         }
         return transit;
     }
@@ -695,25 +765,6 @@ class WindowSurfacePlacer {
             mTraversalScheduled = true;
             mService.mAnimationHandler.post(mPerformSurfacePlacement);
         }
-    }
-
-    /**
-     * Puts the {@param surface} into a pending list to be destroyed after the current transaction
-     * has been committed.
-     */
-    void destroyAfterTransaction(SurfaceControl surface) {
-        mPendingDestroyingSurfaces.add(surface);
-    }
-
-    /**
-     * Destroys any surfaces that have been put into the pending list with
-     * {@link #destroyAfterTransaction}.
-     */
-    void destroyPendingSurfaces() {
-        for (int i = mPendingDestroyingSurfaces.size() - 1; i >= 0; i--) {
-            mPendingDestroyingSurfaces.get(i).destroy();
-        }
-        mPendingDestroyingSurfaces.clear();
     }
 
     public void dump(PrintWriter pw, String prefix) {

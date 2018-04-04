@@ -458,7 +458,7 @@ public class WallpaperManagerService extends IWallpaperManager.Stub
         if (cropFile != null) {
             Bitmap bitmap = BitmapFactory.decodeFile(cropFile);
             if (bitmap != null) {
-                colors = WallpaperColors.fromBitmap(bitmap);
+                colors = WallpaperColors.fromBitmap(bitmap, true /* computeHints */);
                 bitmap.recycle();
             }
         }
@@ -859,6 +859,17 @@ public class WallpaperManagerService extends IWallpaperManager.Stub
             }
         }
 
+        public void scheduleTimeoutLocked() {
+            // If we didn't reset it right away, do so after we couldn't connect to
+            // it for an extended amount of time to avoid having a black wallpaper.
+            final Handler fgHandler = FgThread.getHandler();
+            fgHandler.removeCallbacks(mResetRunnable);
+            fgHandler.postDelayed(mResetRunnable, WALLPAPER_RECONNECT_TIMEOUT_MS);
+            if (DEBUG_LIVE) {
+                Slog.i(TAG, "Started wallpaper reconnect timeout for " + mWallpaper.wallpaperComponent);
+            }
+        }
+
         private void processDisconnect(final ServiceConnection connection) {
             synchronized (mLock) {
                 // The wallpaper disappeared.  If this isn't a system-default one, track
@@ -883,13 +894,13 @@ public class WallpaperManagerService extends IWallpaperManager.Stub
                         } else {
                             mWallpaper.lastDiedTime = SystemClock.uptimeMillis();
 
-                            // If we didn't reset it right away, do so after we couldn't connect to
-                            // it for an extended amount of time to avoid having a black wallpaper.
-                            final Handler fgHandler = FgThread.getHandler();
-                            fgHandler.removeCallbacks(mResetRunnable);
-                            fgHandler.postDelayed(mResetRunnable, WALLPAPER_RECONNECT_TIMEOUT_MS);
-                            if (DEBUG_LIVE) {
-                                Slog.i(TAG, "Started wallpaper reconnect timeout for " + wpService);
+                            clearWallpaperComponentLocked(mWallpaper);
+                            if (bindWallpaperComponentLocked(
+                                    wpService, false, false, mWallpaper, null)) {
+                                mWallpaper.connection.scheduleTimeoutLocked();
+                            } else {
+                                Slog.w(TAG, "Reverting to built-in wallpaper!");
+                                clearWallpaperLocked(true, FLAG_SYSTEM, mWallpaper.userId, null);
                             }
                         }
                         final String flattened = wpService.flattenToString();
@@ -1417,7 +1428,7 @@ public class WallpaperManagerService extends IWallpaperManager.Stub
 
     void clearWallpaperLocked(boolean defaultFailed, int which, int userId, IRemoteCallback reply) {
         if (which != FLAG_SYSTEM && which != FLAG_LOCK) {
-            throw new IllegalArgumentException("Must specify exactly one kind of wallpaper to read");
+            throw new IllegalArgumentException("Must specify exactly one kind of wallpaper to clear");
         }
 
         WallpaperData wallpaper = null;

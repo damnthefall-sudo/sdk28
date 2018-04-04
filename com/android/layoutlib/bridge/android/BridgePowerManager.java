@@ -166,4 +166,9 @@ public class BridgePowerManager implements IPowerManager {
     public int getLastShutdownReason() {
         return PowerManager.SHUTDOWN_REASON_UNKNOWN;
     }
+
+    @Override
+    public void setDozeAfterScreenOff(boolean mode) throws RemoteException {
+        // pass for now.
+    }
 }

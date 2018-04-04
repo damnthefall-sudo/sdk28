@@ -16,6 +16,7 @@
 package android.app;
 
 import android.Manifest;
+import android.annotation.Nullable;
 import android.annotation.RequiresPermission;
 import android.annotation.SystemApi;
 import android.os.IBinder;
@@ -30,28 +31,47 @@ import android.util.Slog;
  * @hide
  */
 @SystemApi
-public final class StatsManager extends android.util.StatsManager { // TODO: Remove the extends.
+public final class StatsManager {
     IStatsManager mService;
     private static final String TAG = "StatsManager";
+    private static final boolean DEBUG = false;
 
-    /** Long extra of uid that added the relevant stats config. */
-    public static final String EXTRA_STATS_CONFIG_UID =
-            "android.app.extra.STATS_CONFIG_UID";
-    /** Long extra of the relevant stats config's configKey. */
-    public static final String EXTRA_STATS_CONFIG_KEY =
-            "android.app.extra.STATS_CONFIG_KEY";
-    /** Long extra of the relevant statsd_config.proto's Subscription.id. */
+    /**
+     * Long extra of uid that added the relevant stats config.
+     */
+    public static final String EXTRA_STATS_CONFIG_UID = "android.app.extra.STATS_CONFIG_UID";
+    /**
+     * Long extra of the relevant stats config's configKey.
+     */
+    public static final String EXTRA_STATS_CONFIG_KEY = "android.app.extra.STATS_CONFIG_KEY";
+    /**
+     * Long extra of the relevant statsd_config.proto's Subscription.id.
+     */
     public static final String EXTRA_STATS_SUBSCRIPTION_ID =
             "android.app.extra.STATS_SUBSCRIPTION_ID";
-    /** Long extra of the relevant statsd_config.proto's Subscription.rule_id. */
+    /**
+     * Long extra of the relevant statsd_config.proto's Subscription.rule_id.
+     */
     public static final String EXTRA_STATS_SUBSCRIPTION_RULE_ID =
             "android.app.extra.STATS_SUBSCRIPTION_RULE_ID";
+    /**
+     *   List<String> of the relevant statsd_config.proto's BroadcastSubscriberDetails.cookie.
+     *   Obtain using {@link android.content.Intent#getStringArrayListExtra(String)}.
+     */
+    public static final String EXTRA_STATS_BROADCAST_SUBSCRIBER_COOKIES =
+            "android.app.extra.STATS_BROADCAST_SUBSCRIBER_COOKIES";
     /**
      * Extra of a {@link android.os.StatsDimensionsValue} representing sliced dimension value
      * information.
      */
     public static final String EXTRA_STATS_DIMENSIONS_VALUE =
             "android.app.extra.STATS_DIMENSIONS_VALUE";
+
+    /**
+     * Broadcast Action: Statsd has started.
+     * Configurations and PendingIntents can now be sent to it.
+     */
+    public static final String ACTION_STATSD_STARTED = "android.app.action.STATSD_STARTED";
 
     /**
      * Constructor for StatsManagerClient.
@@ -68,22 +88,20 @@ public final class StatsManager extends android.util.StatsManager { // TODO: Rem
      * @param configKey An arbitrary integer that allows clients to track the configuration.
      * @param config    Wire-encoded StatsDConfig proto that specifies metrics (and all
      *                  dependencies eg, conditions and matchers).
-     * @param pkg       The package name to receive the broadcast.
-     * @param cls       The name of the class that receives the broadcast.
      * @return true if successful
      */
     @RequiresPermission(Manifest.permission.DUMP)
-    public boolean addConfiguration(long configKey, byte[] config, String pkg, String cls) {
+    public boolean addConfiguration(long configKey, byte[] config) {
         synchronized (this) {
             try {
                 IStatsManager service = getIStatsManagerLocked();
                 if (service == null) {
-                    Slog.d(TAG, "Failed to find statsd when adding configuration");
+                    Slog.e(TAG, "Failed to find statsd when adding configuration");
                     return false;
                 }
-                return service.addConfiguration(configKey, config, pkg, cls);
+                return service.addConfiguration(configKey, config);
             } catch (RemoteException e) {
-                Slog.d(TAG, "Failed to connect to statsd when adding configuration");
+                Slog.e(TAG, "Failed to connect to statsd when adding configuration");
                 return false;
             }
         }
@@ -101,12 +119,12 @@ public final class StatsManager extends android.util.StatsManager { // TODO: Rem
             try {
                 IStatsManager service = getIStatsManagerLocked();
                 if (service == null) {
-                    Slog.d(TAG, "Failed to find statsd when removing configuration");
+                    Slog.e(TAG, "Failed to find statsd when removing configuration");
                     return false;
                 }
                 return service.removeConfiguration(configKey);
             } catch (RemoteException e) {
-                Slog.d(TAG, "Failed to connect to statsd when removing configuration");
+                Slog.e(TAG, "Failed to connect to statsd when removing configuration");
                 return false;
             }
         }
@@ -115,43 +133,40 @@ public final class StatsManager extends android.util.StatsManager { // TODO: Rem
     /**
      * Set the PendingIntent to be used when broadcasting subscriber information to the given
      * subscriberId within the given config.
-     *
      * <p>
      * Suppose that the calling uid has added a config with key configKey, and that in this config
      * it is specified that when a particular anomaly is detected, a broadcast should be sent to
      * a BroadcastSubscriber with id subscriberId. This function links the given pendingIntent with
      * that subscriberId (for that config), so that this pendingIntent is used to send the broadcast
      * when the anomaly is detected.
-     *
      * <p>
      * When statsd sends the broadcast, the PendingIntent will used to send an intent with
      * information of
-     *   {@link #EXTRA_STATS_CONFIG_UID},
-     *   {@link #EXTRA_STATS_CONFIG_KEY},
-     *   {@link #EXTRA_STATS_SUBSCRIPTION_ID},
-     *   {@link #EXTRA_STATS_SUBSCRIPTION_RULE_ID}, and
-     *   {@link #EXTRA_STATS_DIMENSIONS_VALUE}.
-     *
+     * {@link #EXTRA_STATS_CONFIG_UID},
+     * {@link #EXTRA_STATS_CONFIG_KEY},
+     * {@link #EXTRA_STATS_SUBSCRIPTION_ID},
+     * {@link #EXTRA_STATS_SUBSCRIPTION_RULE_ID},
+     * {@link #EXTRA_STATS_BROADCAST_SUBSCRIBER_COOKIES}, and
+     * {@link #EXTRA_STATS_DIMENSIONS_VALUE}.
      * <p>
      * This function can only be called by the owner (uid) of the config. It must be called each
      * time statsd starts. The config must have been added first (via addConfiguration()).
      *
-     * @param configKey The integer naming the config to which this subscriber is attached.
-     * @param subscriberId ID of the subscriber, as used in the config.
+     * @param configKey     The integer naming the config to which this subscriber is attached.
+     * @param subscriberId  ID of the subscriber, as used in the config.
      * @param pendingIntent the PendingIntent to use when broadcasting info to the subscriber
      *                      associated with the given subscriberId. May be null, in which case
      *                      it undoes any previous setting of this subscriberId.
      * @return true if successful
      */
     @RequiresPermission(Manifest.permission.DUMP)
-    public boolean setBroadcastSubscriber(long configKey,
-                                          long subscriberId,
-                                          PendingIntent pendingIntent) {
+    public boolean setBroadcastSubscriber(
+            long configKey, long subscriberId, PendingIntent pendingIntent) {
         synchronized (this) {
             try {
                 IStatsManager service = getIStatsManagerLocked();
                 if (service == null) {
-                    Slog.w(TAG, "Failed to find statsd when adding broadcast subscriber");
+                    Slog.e(TAG, "Failed to find statsd when adding broadcast subscriber");
                     return false;
                 }
                 if (pendingIntent != null) {
@@ -162,7 +177,45 @@ public final class StatsManager extends android.util.StatsManager { // TODO: Rem
                     return service.unsetBroadcastSubscriber(configKey, subscriberId);
                 }
             } catch (RemoteException e) {
-                Slog.w(TAG, "Failed to connect to statsd when adding broadcast subscriber", e);
+                Slog.e(TAG, "Failed to connect to statsd when adding broadcast subscriber", e);
+                return false;
+            }
+        }
+    }
+
+    /**
+     * Registers the operation that is called to retrieve the metrics data. This must be called
+     * each time statsd starts. The config must have been added first (via addConfiguration(),
+     * although addConfiguration could have been called on a previous boot). This operation allows
+     * statsd to send metrics data whenever statsd determines that the metrics in memory are
+     * approaching the memory limits. The fetch operation should call {@link #getData} to fetch the
+     * data, which also deletes the retrieved metrics from statsd's memory.
+     *
+     * @param configKey     The integer naming the config to which this operation is attached.
+     * @param pendingIntent the PendingIntent to use when broadcasting info to the subscriber
+     *                      associated with the given subscriberId. May be null, in which case
+     *                      it removes any associated pending intent with this configKey.
+     * @return true if successful
+     */
+    @RequiresPermission(Manifest.permission.DUMP)
+    public boolean setDataFetchOperation(long configKey, PendingIntent pendingIntent) {
+        synchronized (this) {
+            try {
+                IStatsManager service = getIStatsManagerLocked();
+                if (service == null) {
+                    Slog.e(TAG, "Failed to find statsd when registering data listener.");
+                    return false;
+                }
+                if (pendingIntent == null) {
+                    return service.removeDataFetchOperation(configKey);
+                } else {
+                    // Extracts IIntentSender from the PendingIntent and turns it into an IBinder.
+                    IBinder intentSender = pendingIntent.getTarget().asBinder();
+                    return service.setDataFetchOperation(configKey, intentSender);
+                }
+
+            } catch (RemoteException e) {
+                Slog.e(TAG, "Failed to connect to statsd when registering data listener.");
                 return false;
             }
         }
@@ -173,20 +226,21 @@ public final class StatsManager extends android.util.StatsManager { // TODO: Rem
      * the retrieved metrics from statsd memory.
      *
      * @param configKey Configuration key to retrieve data from.
-     * @return Serialized ConfigMetricsReportList proto. Returns null on failure.
+     * @return Serialized ConfigMetricsReportList proto. Returns null on failure (eg, if statsd
+     * crashed).
      */
     @RequiresPermission(Manifest.permission.DUMP)
-    public byte[] getData(long configKey) {
+    public @Nullable byte[] getData(long configKey) {
         synchronized (this) {
             try {
                 IStatsManager service = getIStatsManagerLocked();
                 if (service == null) {
-                    Slog.d(TAG, "Failed to find statsd when getting data");
+                    Slog.e(TAG, "Failed to find statsd when getting data");
                     return null;
                 }
                 return service.getData(configKey);
             } catch (RemoteException e) {
-                Slog.d(TAG, "Failed to connecto statsd when getting data");
+                Slog.e(TAG, "Failed to connect to statsd when getting data");
                 return null;
             }
         }
@@ -197,20 +251,20 @@ public final class StatsManager extends android.util.StatsManager { // TODO: Rem
      * the actual metrics themselves (metrics must be collected via {@link #getData(String)}.
      * This getter is not destructive and will not reset any metrics/counters.
      *
-     * @return Serialized StatsdStatsReport proto. Returns null on failure.
+     * @return Serialized StatsdStatsReport proto. Returns null on failure (eg, if statsd crashed).
      */
     @RequiresPermission(Manifest.permission.DUMP)
-    public byte[] getMetadata() {
+    public @Nullable byte[] getMetadata() {
         synchronized (this) {
             try {
                 IStatsManager service = getIStatsManagerLocked();
                 if (service == null) {
-                    Slog.d(TAG, "Failed to find statsd when getting metadata");
+                    Slog.e(TAG, "Failed to find statsd when getting metadata");
                     return null;
                 }
                 return service.getMetadata();
             } catch (RemoteException e) {
-                Slog.d(TAG, "Failed to connecto statsd when getting metadata");
+                Slog.e(TAG, "Failed to connect to statsd when getting metadata");
                 return null;
             }
         }

@@ -16,6 +16,7 @@
 
 package android.telephony;
 
+import android.annotation.Nullable;
 import android.os.Parcel;
 import android.text.TextUtils;
 
@@ -39,7 +40,7 @@ public final class CellIdentityTdscdma extends CellIdentity {
      * @hide
      */
     public CellIdentityTdscdma() {
-        super(TAG, TYPE_TDSCDMA, null, null);
+        super(TAG, TYPE_TDSCDMA, null, null, null, null);
         mLac = Integer.MAX_VALUE;
         mCid = Integer.MAX_VALUE;
         mCpid = Integer.MAX_VALUE;
@@ -55,7 +56,7 @@ public final class CellIdentityTdscdma extends CellIdentity {
      * @hide
      */
     public CellIdentityTdscdma(int mcc, int mnc, int lac, int cid, int cpid) {
-        this(String.valueOf(mcc), String.valueOf(mnc), lac, cid, cpid);
+        this(String.valueOf(mcc), String.valueOf(mnc), lac, cid, cpid, null, null);
     }
 
     /**
@@ -65,17 +66,38 @@ public final class CellIdentityTdscdma extends CellIdentity {
      * @param cid 28-bit UMTS Cell Identity described in TS 25.331, 0..268435455, INT_MAX if unknown
      * @param cpid 8-bit Cell Parameters ID described in TS 25.331, 0..127, INT_MAX if unknown
      *
+     * FIXME: This is a temporary constructor to facilitate migration.
      * @hide
      */
     public CellIdentityTdscdma(String mcc, String mnc, int lac, int cid, int cpid) {
-        super(TAG, TYPE_TDSCDMA, mcc, mnc);
+        super(TAG, TYPE_TDSCDMA, mcc, mnc, null, null);
+        mLac = lac;
+        mCid = cid;
+        mCpid = cpid;
+    }
+
+    /**
+     * @param mcc 3-digit Mobile Country Code in string format
+     * @param mnc 2 or 3-digit Mobile Network Code in string format
+     * @param lac 16-bit Location Area Code, 0..65535, INT_MAX if unknown
+     * @param cid 28-bit UMTS Cell Identity described in TS 25.331, 0..268435455, INT_MAX if unknown
+     * @param cpid 8-bit Cell Parameters ID described in TS 25.331, 0..127, INT_MAX if unknown
+     * @param alphal long alpha Operator Name String or Enhanced Operator Name String
+     * @param alphas short alpha Operator Name String or Enhanced Operator Name String
+     *
+     * @hide
+     */
+    public CellIdentityTdscdma(String mcc, String mnc, int lac, int cid, int cpid,
+            String alphal, String alphas) {
+        super(TAG, TYPE_TDSCDMA, mcc, mnc, alphal, alphas);
         mLac = lac;
         mCid = cid;
         mCpid = cpid;
     }
 
     private CellIdentityTdscdma(CellIdentityTdscdma cid) {
-        this(cid.mMccStr, cid.mMncStr, cid.mLac, cid.mCid, cid.mCpid);
+        this(cid.mMccStr, cid.mMncStr, cid.mLac, cid.mCid,
+                cid.mCpid, cid.mAlphaLong, cid.mAlphaShort);
     }
 
     CellIdentityTdscdma copy() {
@@ -86,7 +108,7 @@ public final class CellIdentityTdscdma extends CellIdentity {
      * Get Mobile Country Code in string format
      * @return Mobile Country Code in string format, null if unknown
      */
-    public String getMccStr() {
+    public String getMccString() {
         return mMccStr;
     }
 
@@ -94,7 +116,7 @@ public final class CellIdentityTdscdma extends CellIdentity {
      * Get Mobile Network Code in string format
      * @return Mobile Network Code in string format, null if unknown
      */
-    public String getMncStr() {
+    public String getMncString() {
         return mMncStr;
     }
 
@@ -121,7 +143,7 @@ public final class CellIdentityTdscdma extends CellIdentity {
 
     @Override
     public int hashCode() {
-        return Objects.hash(mMccStr, mMncStr, mLac, mCid, mCpid);
+        return Objects.hash(mLac, mCid, mCpid, super.hashCode());
     }
 
     @Override
@@ -139,7 +161,8 @@ public final class CellIdentityTdscdma extends CellIdentity {
                 && TextUtils.equals(mMncStr, o.mMncStr)
                 && mLac == o.mLac
                 && mCid == o.mCid
-                && mCpid == o.mCpid;
+                && mCpid == o.mCpid
+                && super.equals(other);
     }
 
     @Override
@@ -150,6 +173,8 @@ public final class CellIdentityTdscdma extends CellIdentity {
         .append(" mLac=").append(mLac)
         .append(" mCid=").append(mCid)
         .append(" mCpid=").append(mCpid)
+        .append(" mAlphaLong=").append(mAlphaLong)
+        .append(" mAlphaShort=").append(mAlphaShort)
         .append("}").toString();
     }
 

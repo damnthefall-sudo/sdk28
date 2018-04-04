@@ -16,6 +16,7 @@
 
 package android.media.session;
 
+import android.annotation.CallbackExecutor;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.RequiresPermission;
@@ -24,8 +25,8 @@ import android.annotation.SystemService;
 import android.content.ComponentName;
 import android.content.Context;
 import android.media.AudioManager;
-import android.media.IMediaSession2;
 import android.media.IRemoteVolumeController;
+import android.media.ISessionTokensListener;
 import android.media.MediaSession2;
 import android.media.MediaSessionService2;
 import android.media.SessionToken2;
@@ -36,7 +37,9 @@ import android.os.RemoteException;
 import android.os.ResultReceiver;
 import android.os.ServiceManager;
 import android.os.UserHandle;
+import android.service.media.MediaBrowserService;
 import android.service.notification.NotificationListenerService;
+import android.text.TextUtils;
 import android.util.ArrayMap;
 import android.util.Log;
 import android.view.KeyEvent;
@@ -44,6 +47,7 @@ import android.view.KeyEvent;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.Executor;
 
 /**
  * Provides support for interacting with {@link MediaSession media sessions}
@@ -71,6 +75,8 @@ public final class MediaSessionManager {
 
     private final ArrayMap<OnActiveSessionsChangedListener, SessionsChangedWrapper> mListeners
             = new ArrayMap<OnActiveSessionsChangedListener, SessionsChangedWrapper>();
+    private final ArrayMap<OnSessionTokensChangedListener, SessionTokensChangedWrapper>
+            mSessionTokensListener = new ArrayMap<>();
     private final Object mLock = new Object();
     private final ISessionManager mService;
 
@@ -336,37 +342,74 @@ public final class MediaSessionManager {
     }
 
     /**
-     * Called when a {@link MediaSession2} is created.
+     * Returns whether the app is trusted.
+     * <p>
+     * An app is trusted if the app holds the android.Manifest.permission.MEDIA_CONTENT_CONTROL
+     * permission or has an enabled notification listener.
      *
-     * @hide
+     * @param userInfo The remote user info
      */
-    // TODO(jaewan): System API
-    public SessionToken2 createSessionToken(@NonNull String callingPackage, @NonNull String id,
-            @NonNull IMediaSession2 binder) {
+    public boolean isTrustedForMediaControl(RemoteUserInfo userInfo) {
+        if (userInfo.getPackageName() == null) {
+            return false;
+        }
         try {
-            Bundle bundle = mService.createSessionToken(callingPackage, id, binder);
-            return SessionToken2.fromBundle(bundle);
+            return mService.isTrusted(
+                    userInfo.getPackageName(), userInfo.getPid(), userInfo.getUid());
         } catch (RemoteException e) {
             Log.wtf(TAG, "Cannot communicate with the service.", e);
         }
-        return null;
+        return false;
     }
 
     /**
+     * Called when a {@link MediaSession2} is created.
+     * @hide
+     */
+    public boolean createSession2(@NonNull SessionToken2 token) {
+        if (token == null) {
+            return false;
+        }
+        try {
+            return mService.createSession2(token.toBundle());
+        } catch (RemoteException e) {
+            Log.wtf(TAG, "Cannot communicate with the service.", e);
+        }
+        return false;
+    }
+
+    /**
+     * Called when a {@link MediaSession2} is destroyed.
+     * @hide
+     */
+    public void destroySession2(@NonNull SessionToken2 token) {
+        if (token == null) {
+            return;
+        }
+        try {
+            mService.destroySession2(token.toBundle());
+        } catch (RemoteException e) {
+            Log.wtf(TAG, "Cannot communicate with the service.", e);
+        }
+    }
+
+    /**
+     * @hide
      * Get {@link List} of {@link SessionToken2} whose sessions are active now. This list represents
      * active sessions regardless of whether they're {@link MediaSession2} or
      * {@link MediaSessionService2}.
+     * <p>
+     * This requires the android.Manifest.permission.MEDIA_CONTENT_CONTROL permission be held by the
+     * calling app. You may also retrieve this list if your app is an enabled notification listener
+     * using the {@link NotificationListenerService} APIs.
      *
-     * @return list of Tokens
-     * @hide
+     * @return list of tokens
      */
-    // TODO(jaewan): Unhide
-    // TODO(jaewan): Protect this with permission.
-    // TODO(jaewna): Add listener for change in lists.
     public List<SessionToken2> getActiveSessionTokens() {
         try {
             List<Bundle> bundles = mService.getSessionTokens(
-                    /* activeSessionOnly */ true, /* sessionServiceOnly */ false);
+                    /* activeSessionOnly */ true, /* sessionServiceOnly */ false,
+                    mContext.getPackageName());
             return toTokenList(bundles);
         } catch (RemoteException e) {
             Log.wtf(TAG, "Cannot communicate with the service.", e);
@@ -375,18 +418,21 @@ public final class MediaSessionManager {
     }
 
     /**
+     * @hide
      * Get {@link List} of {@link SessionToken2} for {@link MediaSessionService2} regardless of their
      * activeness. This list represents media apps that support background playback.
+     * <p>
+     * This requires the android.Manifest.permission.MEDIA_CONTENT_CONTROL permission be held by the
+     * calling app. You may also retrieve this list if your app is an enabled notification listener
+     * using the {@link NotificationListenerService} APIs.
      *
-     * @return list of Tokens
-     * @hide
+     * @return list of tokens
      */
-    // TODO(jaewan): Unhide
-    // TODO(jaewna): Add listener for change in lists.
     public List<SessionToken2> getSessionServiceTokens() {
         try {
             List<Bundle> bundles = mService.getSessionTokens(
-                    /* activeSessionOnly */ false, /* sessionServiceOnly */ true);
+                    /* activeSessionOnly */ false, /* sessionServiceOnly */ true,
+                    mContext.getPackageName());
             return toTokenList(bundles);
         } catch (RemoteException e) {
             Log.wtf(TAG, "Cannot communicate with the service.", e);
@@ -395,25 +441,105 @@ public final class MediaSessionManager {
     }
 
     /**
+     * @hide
      * Get all {@link SessionToken2}s. This is the combined list of {@link #getActiveSessionTokens()}
      * and {@link #getSessionServiceTokens}.
+     * <p>
+     * This requires the android.Manifest.permission.MEDIA_CONTENT_CONTROL permission be held by the
+     * calling app. You may also retrieve this list if your app is an enabled notification listener
+     * using the {@link NotificationListenerService} APIs.
      *
-     * @return list of Tokens
+     * @return list of tokens
      * @see #getActiveSessionTokens
      * @see #getSessionServiceTokens
-     * @hide
      */
-    // TODO(jaewan): Unhide
-    // TODO(jaewan): Protect this with permission.
-    // TODO(jaewna): Add listener for change in lists.
     public List<SessionToken2> getAllSessionTokens() {
         try {
             List<Bundle> bundles = mService.getSessionTokens(
-                    /* activeSessionOnly */ false, /* sessionServiceOnly */ false);
+                    /* activeSessionOnly */ false, /* sessionServiceOnly */ false,
+                    mContext.getPackageName());
             return toTokenList(bundles);
         } catch (RemoteException e) {
             Log.wtf(TAG, "Cannot communicate with the service.", e);
             return Collections.emptyList();
+        }
+    }
+
+    /**
+     * @hide
+     * Add a listener to be notified when the {@link #getAllSessionTokens()} changes.
+     * <p>
+     * This requires the android.Manifest.permission.MEDIA_CONTENT_CONTROL permission be held by the
+     * calling app. You may also retrieve this list if your app is an enabled notification listener
+     * using the {@link NotificationListenerService} APIs.
+     *
+     * @param executor executor to run this command
+     * @param listener The listener to add.
+     */
+    public void addOnSessionTokensChangedListener(@NonNull @CallbackExecutor Executor executor,
+            @NonNull OnSessionTokensChangedListener listener) {
+        addOnSessionTokensChangedListener(UserHandle.myUserId(), executor, listener);
+    }
+
+    /**
+     * Add a listener to be notified when the {@link #getAllSessionTokens()} changes.
+     * <p>
+     * This requires the android.Manifest.permission.MEDIA_CONTENT_CONTROL permission be held by the
+     * calling app. You may also retrieve this list if your app is an enabled notification listener
+     * using the {@link NotificationListenerService} APIs.
+     *
+     * @param userId The userId to listen for changes on.
+     * @param executor executor to run this command
+     * @param listener The listener to add.
+     * @hide
+     */
+    public void addOnSessionTokensChangedListener(int userId,
+            @NonNull @CallbackExecutor Executor executor,
+            @NonNull OnSessionTokensChangedListener listener) {
+        if (executor == null) {
+            throw new IllegalArgumentException("executor may not be null");
+        }
+        if (listener == null) {
+            throw new IllegalArgumentException("listener may not be null");
+        }
+        synchronized (mLock) {
+            if (mSessionTokensListener.get(listener) != null) {
+                Log.w(TAG, "Attempted to add session listener twice, ignoring.");
+                return;
+            }
+            SessionTokensChangedWrapper wrapper = new SessionTokensChangedWrapper(
+                    mContext, executor, listener);
+            try {
+                mService.addSessionTokensListener(wrapper.mStub, userId, mContext.getPackageName());
+                mSessionTokensListener.put(listener, wrapper);
+            } catch (RemoteException e) {
+                Log.e(TAG, "Error in addSessionTokensListener.", e);
+            }
+        }
+    }
+
+    /**
+     * @hide
+     * Stop receiving session token updates on the specified listener.
+     *
+     * @param listener The listener to remove.
+     */
+    public void removeOnSessionTokensChangedListener(
+            @NonNull OnSessionTokensChangedListener listener) {
+        if (listener == null) {
+            throw new IllegalArgumentException("listener may not be null");
+        }
+        synchronized (mLock) {
+            SessionTokensChangedWrapper wrapper = mSessionTokensListener.remove(listener);
+            if (wrapper != null) {
+                try {
+                    mService.removeSessionTokensListener(wrapper.mStub, mContext.getPackageName());
+                } catch (RemoteException e) {
+                    Log.e(TAG, "Error in removeSessionTokensListener.", e);
+                } finally {
+                    wrapper.release();
+                }
+            }
         }
     }
 
@@ -552,6 +678,15 @@ public final class MediaSessionManager {
     }
 
     /**
+     * @hide
+     * Listens for changes to the {@link #getAllSessionTokens()}. This can be added
+     * using {@link #addOnActiveSessionsChangedListener}.
+     */
+    public interface OnSessionTokensChangedListener {
+        void onSessionTokensChanged(@NonNull List<SessionToken2> tokens);
+    }
+
+    /**
      * Listens the volume key long-presses.
      * @hide
      */
@@ -631,6 +766,56 @@ public final class MediaSessionManager {
         public abstract void onAddressedPlayerChanged(ComponentName mediaButtonReceiver);
     }
 
+    /**
+     * Information of a remote user of {@link MediaSession} or {@link MediaBrowserService}.
+     * This can be used to decide whether the remote user is trusted app.
+     *
+     * @see #isTrustedForMediaControl(RemoteUserInfo)
+     */
+    public static final class RemoteUserInfo {
+        private String mPackageName;
+        private int mPid;
+        private int mUid;
+
+        public RemoteUserInfo(String packageName, int pid, int uid) {
+            mPackageName = packageName;
+            mPid = pid;
+            mUid = uid;
+        }
+
+        /**
+         * @return package name of the controller
+         */
+        public String getPackageName() {
+            return mPackageName;
+        }
+
+        /**
+         * @return pid of the controller
+         */
+        public int getPid() {
+            return mPid;
+        }
+
+        /**
+         * @return uid of the controller
+         */
+        public int getUid() {
+            return mUid;
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            if (!(obj instanceof RemoteUserInfo)) {
+                return false;
+            }
+            RemoteUserInfo otherUserInfo = (RemoteUserInfo) obj;
+            return TextUtils.equals(mPackageName, otherUserInfo.mPackageName)
+                    && mPid == otherUserInfo.mPid
+                    && mUid == otherUserInfo.mUid;
+        }
+    }
+
     private static final class SessionsChangedWrapper {
         private Context mContext;
         private OnActiveSessionsChangedListener mListener;
@@ -653,8 +838,7 @@ public final class MediaSessionManager {
                         public void run() {
                             final Context context = mContext;
                             if (context != null) {
-                                ArrayList<MediaController> controllers
-                                        = new ArrayList<MediaController>();
+                                ArrayList<MediaController> controllers = new ArrayList<>();
                                 int size = tokens.size();
                                 for (int i = 0; i < size; i++) {
                                     controllers.add(new MediaController(context, tokens.get(i)));
@@ -674,6 +858,41 @@ public final class MediaSessionManager {
             mListener = null;
             mContext = null;
             mHandler = null;
+        }
+    }
+
+    private static final class SessionTokensChangedWrapper {
+        private Context mContext;
+        private Executor mExecutor;
+        private OnSessionTokensChangedListener mListener;
+
+        public SessionTokensChangedWrapper(Context context, Executor executor,
+                OnSessionTokensChangedListener listener) {
+            mContext = context;
+            mExecutor = executor;
+            mListener = listener;
+        }
+
+        private final ISessionTokensListener.Stub mStub = new ISessionTokensListener.Stub() {
+            @Override
+            public void onSessionTokensChanged(final List<Bundle> bundles) {
+                final Executor executor = mExecutor;
+                if (executor != null) {
+                    executor.execute(() -> {
+                        final Context context = mContext;
+                        final OnSessionTokensChangedListener listener = mListener;
+                        if (context != null && listener != null) {
+                            listener.onSessionTokensChanged(toTokenList(bundles));
+                        }
+                    });
+                }
+            }
+        };
+
+        private void release() {
+            mListener = null;
+            mContext = null;
+            mExecutor = null;
         }
     }
 

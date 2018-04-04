@@ -44,6 +44,7 @@ import android.util.Slog;
 import android.util.SparseArray;
 import android.util.SparseBooleanArray;
 import android.util.Xml;
+
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.os.BackgroundThread;
 import com.android.internal.os.SomeArgs;
@@ -51,6 +52,7 @@ import com.android.internal.util.ArrayUtils;
 import com.android.internal.util.XmlUtils;
 
 import libcore.io.IoUtils;
+
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
 import org.xmlpull.v1.XmlSerializer;
@@ -272,7 +274,7 @@ class InstantAppRegistry {
             }
 
             // Propagate permissions before removing any state
-            propagateInstantAppPermissionsIfNeeded(pkg.packageName, userId);
+            propagateInstantAppPermissionsIfNeeded(pkg, userId);
 
             // Track instant apps
             if (ps.getInstantApp(userId)) {
@@ -295,25 +297,26 @@ class InstantAppRegistry {
                 continue;
             }
 
+            String cookieName = currentCookieFile.getName();
+            String currentCookieSha256 =
+                    cookieName.substring(INSTANT_APP_COOKIE_FILE_PREFIX.length(),
+                            cookieName.length() - INSTANT_APP_COOKIE_FILE_SIFFIX.length());
+
             // Before we used only the first signature to compute the SHA 256 but some
             // apps could be singed by multiple certs and the cert order is undefined.
             // We prefer the modern computation procedure where all certs are taken
             // into account but also allow the value from the old computation to avoid
             // data loss.
-            final String[] signaturesSha256Digests = PackageUtils.computeSignaturesSha256Digests(
-                    pkg.mSigningDetails.signatures);
-            final String signaturesSha256Digest = PackageUtils.computeSignaturesSha256Digest(
-                    signaturesSha256Digests);
-
-            // We prefer a match based on all signatures
-            if (currentCookieFile.equals(computeInstantCookieFile(pkg.packageName,
-                    signaturesSha256Digest, userId))) {
+            if (pkg.mSigningDetails.checkCapability(currentCookieSha256,
+                    PackageParser.SigningDetails.CertCapabilities.INSTALLED_DATA)) {
                 return;
             }
 
-            // For backwards compatibility we accept match based on first signature
-            if (pkg.mSigningDetails.signatures.length > 1 && currentCookieFile.equals(computeInstantCookieFile(
-                    pkg.packageName, signaturesSha256Digests[0], userId))) {
+            // For backwards compatibility we accept match based on first signature only in the case
+            // of multiply-signed packagse
+            final String[] signaturesSha256Digests =
+                    PackageUtils.computeSignaturesSha256Digests(pkg.mSigningDetails.signatures);
+            if (signaturesSha256Digests[0].equals(currentCookieSha256)) {
                 return;
             }
 
@@ -866,10 +869,10 @@ class InstantAppRegistry {
         return uninstalledApps;
     }
 
-    private void propagateInstantAppPermissionsIfNeeded(@NonNull String packageName,
+    private void propagateInstantAppPermissionsIfNeeded(@NonNull PackageParser.Package pkg,
             @UserIdInt int userId) {
         InstantAppInfo appInfo = peekOrParseUninstalledInstantAppInfo(
-                packageName, userId);
+                pkg.packageName, userId);
         if (appInfo == null) {
             return;
         }
@@ -881,8 +884,8 @@ class InstantAppRegistry {
             for (String grantedPermission : appInfo.getGrantedPermissions()) {
                 final boolean propagatePermission =
                         mService.mSettings.canPropagatePermissionToInstantApp(grantedPermission);
-                if (propagatePermission) {
-                    mService.grantRuntimePermission(packageName, grantedPermission, userId);
+                if (propagatePermission && pkg.requestedPermissions.contains(grantedPermission)) {
+                    mService.grantRuntimePermission(pkg.packageName, grantedPermission, userId);
                 }
             }
         } finally {

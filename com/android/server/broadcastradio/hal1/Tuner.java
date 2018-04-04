@@ -48,7 +48,7 @@ class Tuner extends ITuner.Stub {
 
     private boolean mIsClosed = false;
     private boolean mIsMuted = false;
-    private int mRegion;  // TODO(b/62710330): find better solution to handle regions
+    private int mRegion;
     private final boolean mWithAudio;
 
     Tuner(@NonNull ITunerCallback clientCallback, int halRev,
@@ -89,7 +89,6 @@ class Tuner extends ITuner.Stub {
 
     private native void nativeCancelAnnouncement(long nativeContext);
 
-    private native RadioManager.ProgramInfo nativeGetProgramInformation(long nativeContext);
     private native boolean nativeStartBackgroundScan(long nativeContext);
     private native List<RadioManager.ProgramInfo> nativeGetProgramList(long nativeContext,
             Map<String, String> vendorFilter);
@@ -98,12 +97,6 @@ class Tuner extends ITuner.Stub {
 
     private native boolean nativeIsAnalogForced(long nativeContext);
     private native void nativeSetAnalogForced(long nativeContext, boolean isForced);
-
-    private native Map<String, String> nativeSetParameters(long nativeContext,
-            Map<String, String> parameters);
-    private native Map<String, String> nativeGetParameters(long nativeContext, List<String> keys);
-
-    private native boolean nativeIsAntennaConnected(long nativeContext);
 
     @Override
     public void close() {
@@ -125,6 +118,12 @@ class Tuner extends ITuner.Stub {
         if (mIsClosed) {
             throw new IllegalStateException("Tuner is closed, no further operations are allowed");
         }
+    }
+
+    private boolean checkConfiguredLocked() {
+        if (mTunerCallback.isInitialConfigurationDone()) return true;
+        Slog.w(TAG, "Initial configuration is still pending, skipping the operation");
+        return false;
     }
 
     @Override
@@ -177,6 +176,7 @@ class Tuner extends ITuner.Stub {
     public void step(boolean directionDown, boolean skipSubChannel) {
         synchronized (mLock) {
             checkNotClosedLocked();
+            if (!checkConfiguredLocked()) return;
             nativeStep(mNativeContext, directionDown, skipSubChannel);
         }
     }
@@ -185,6 +185,7 @@ class Tuner extends ITuner.Stub {
     public void scan(boolean directionDown, boolean skipSubChannel) {
         synchronized (mLock) {
             checkNotClosedLocked();
+            if (!checkConfiguredLocked()) return;
             nativeScan(mNativeContext, directionDown, skipSubChannel);
         }
     }
@@ -197,6 +198,7 @@ class Tuner extends ITuner.Stub {
         Slog.i(TAG, "Tuning to " + selector);
         synchronized (mLock) {
             checkNotClosedLocked();
+            if (!checkConfiguredLocked()) return;
             nativeTune(mNativeContext, selector);
         }
     }
@@ -214,14 +216,6 @@ class Tuner extends ITuner.Stub {
         synchronized (mLock) {
             checkNotClosedLocked();
             nativeCancelAnnouncement(mNativeContext);
-        }
-    }
-
-    @Override
-    public RadioManager.ProgramInfo getProgramInformation() {
-        synchronized (mLock) {
-            checkNotClosedLocked();
-            return nativeGetProgramInformation(mNativeContext);
         }
     }
 
@@ -302,34 +296,11 @@ class Tuner extends ITuner.Stub {
 
     @Override
     public Map setParameters(Map parameters) {
-        Map<String, String> results;
-        synchronized (mLock) {
-            checkNotClosedLocked();
-            results = nativeSetParameters(mNativeContext, Objects.requireNonNull(parameters));
-        }
-        if (results == null) return Collections.emptyMap();
-        return results;
+        throw new UnsupportedOperationException("Not supported by HAL 1.x");
     }
 
     @Override
     public Map getParameters(List<String> keys) {
-        if (keys == null) {
-            throw new IllegalArgumentException("The argument must not be a null pointer");
-        }
-        Map<String, String> results;
-        synchronized (mLock) {
-            checkNotClosedLocked();
-            results = nativeGetParameters(mNativeContext, keys);
-        }
-        if (results == null) return Collections.emptyMap();
-        return results;
-    }
-
-    @Override
-    public boolean isAntennaConnected() {
-        synchronized (mLock) {
-            checkNotClosedLocked();
-            return nativeIsAntennaConnected(mNativeContext);
-        }
+        throw new UnsupportedOperationException("Not supported by HAL 1.x");
     }
 }

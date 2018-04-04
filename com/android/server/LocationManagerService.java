@@ -19,6 +19,7 @@ package com.android.server;
 import static android.content.pm.PackageManager.PERMISSION_GRANTED;
 
 import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.app.ActivityManager;
 import android.app.AppOpsManager;
 import android.app.PendingIntent;
@@ -67,6 +68,7 @@ import android.os.SystemClock;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.os.WorkSource;
+import android.os.WorkSource.WorkChain;
 import android.provider.Settings;
 import android.text.TextUtils;
 import android.util.ArrayMap;
@@ -81,8 +83,6 @@ import com.android.internal.os.BackgroundThread;
 import com.android.internal.util.ArrayUtils;
 import com.android.internal.util.DumpUtils;
 import com.android.server.location.ActivityRecognitionProxy;
-import com.android.server.location.FlpHardwareProvider;
-import com.android.server.location.FusedProxy;
 import com.android.server.location.GeocoderProxy;
 import com.android.server.location.GeofenceManager;
 import com.android.server.location.GeofenceProxy;
@@ -490,13 +490,6 @@ public class LocationManagerService extends ILocationManager.Stub {
         if (gpsProvider != null && gpsProvider.isEnabled()) {
             gpsProvider.disable();
         }
-
-        // it is needed to check if FLP HW provider is supported before accessing the instance, this
-        // avoids an exception to be thrown by the singleton factory method
-        if (FlpHardwareProvider.isSupported()) {
-            FlpHardwareProvider flpHardwareProvider = FlpHardwareProvider.getInstance(mContext);
-            flpHardwareProvider.cleanup();
-        }
     }
 
     /**
@@ -685,27 +678,6 @@ public class LocationManagerService extends ILocationManager.Stub {
             Slog.e(TAG, "no geocoder provider found");
         }
 
-        // bind to fused hardware provider if supported
-        // in devices without support, requesting an instance of FlpHardwareProvider will raise an
-        // exception, so make sure we only do that when supported
-        FlpHardwareProvider flpHardwareProvider;
-        if (FlpHardwareProvider.isSupported()) {
-            flpHardwareProvider = FlpHardwareProvider.getInstance(mContext);
-            FusedProxy fusedProxy = FusedProxy.createAndBind(
-                    mContext,
-                    mLocationHandler,
-                    flpHardwareProvider.getLocationHardware(),
-                    com.android.internal.R.bool.config_enableHardwareFlpOverlay,
-                    com.android.internal.R.string.config_hardwareFlpPackageName,
-                    com.android.internal.R.array.config_locationProviderPackageNames);
-            if (fusedProxy == null) {
-                Slog.d(TAG, "Unable to bind FusedProxy.");
-            }
-        } else {
-            flpHardwareProvider = null;
-            Slog.d(TAG, "FLP HAL not supported");
-        }
-
         // bind to geofence provider
         GeofenceProxy provider = GeofenceProxy.createAndBind(
                 mContext, com.android.internal.R.bool.config_enableGeofenceOverlay,
@@ -713,7 +685,7 @@ public class LocationManagerService extends ILocationManager.Stub {
                 com.android.internal.R.array.config_locationProviderPackageNames,
                 mLocationHandler,
                 mGpsGeofenceProxy,
-                flpHardwareProvider != null ? flpHardwareProvider.getGeofenceHardware() : null);
+                null);
         if (provider == null) {
             Slog.d(TAG, "Unable to bind FLP Geofence proxy.");
         }
@@ -829,7 +801,7 @@ public class LocationManagerService extends ILocationManager.Stub {
             }
             mAllowedResolutionLevel = getAllowedResolutionLevel(pid, uid);
             mIdentity = new Identity(uid, pid, packageName);
-            if (workSource != null && workSource.size() <= 0) {
+            if (workSource != null && workSource.isEmpty()) {
                 workSource = null;
             }
             mWorkSource = workSource;
@@ -1160,11 +1132,12 @@ public class LocationManagerService extends ILocationManager.Stub {
      * Returns the model name of the GNSS hardware.
      */
     @Override
+    @Nullable
     public String getGnssHardwareModelName() {
         if (mGnssSystemInfoProvider != null) {
             return mGnssSystemInfoProvider.getGnssHardwareModelName();
         } else {
-            return LocationManager.GNSS_HARDWARE_MODEL_NAME_UNKNOWN;
+            return null;
         }
     }
 
@@ -1396,23 +1369,6 @@ public class LocationManagerService extends ILocationManager.Stub {
     }
 
     /**
-     * Returns "true" if access to the specified location provider is allowed by the specified
-     * user's settings. Access to all location providers is forbidden to non-location-provider
-     * processes belonging to background users.
-     *
-     * @param provider the name of the location provider
-     * @param uid      the requestor's UID
-     * @param userId   the user id to query
-     */
-    private boolean isAllowedByUserSettingsLockedForUser(
-            String provider, int uid, int userId) {
-        if (!isCurrentProfile(UserHandle.getUserId(uid)) && !isUidALocationProvider(uid)) {
-            return false;
-        }
-        return isLocationProviderEnabledForUser(provider, userId);
-    }
-
-    /**
      * Returns the permission string associated with the specified resolution level.
      *
      * @param resolutionLevel the resolution level
@@ -1576,13 +1532,22 @@ public class LocationManagerService extends ILocationManager.Stub {
     }
 
     /**
-     * Returns all providers by name, including passive, but excluding
-     * fused, also including ones that are not permitted to
-     * be accessed by the calling activity or are currently disabled.
+     * Returns all providers by name, including passive and the ones that are not permitted to
+     * be accessed by the calling activity or are currently disabled, but excluding fused.
      */
     @Override
     public List<String> getAllProviders() {
-        List<String> out = getProviders(null /*criteria*/, false /*enabledOnly*/);
+        ArrayList<String> out;
+        synchronized (mLock) {
+            out = new ArrayList<>(mProviders.size());
+            for (LocationProviderInterface provider : mProviders) {
+                String name = provider.getName();
+                if (LocationManager.FUSED_PROVIDER.equals(name)) {
+                    continue;
+                }
+                out.add(name);
+            }
+        }
         if (D) Log.d(TAG, "getAllProviders()=" + out);
         return out;
     }
@@ -1814,13 +1779,11 @@ public class LocationManagerService extends ILocationManager.Stub {
 
                         if (locationRequest.getInterval() <= thresholdInterval) {
                             if (record.mReceiver.mWorkSource != null
-                                    && record.mReceiver.mWorkSource.size() > 0
-                                    && record.mReceiver.mWorkSource.getName(0) != null) {
-                                // Assign blame to another work source.
-                                // Can only assign blame if the WorkSource contains names.
+                                    && isValidWorkSource(record.mReceiver.mWorkSource)) {
                                 worksource.add(record.mReceiver.mWorkSource);
                             } else {
-                                // Assign blame to caller.
+                                // Assign blame to caller if there's no WorkSource associated with
+                                // the request or if it's invalid.
                                 worksource.add(
                                         record.mReceiver.mIdentity.mUid,
                                         record.mReceiver.mIdentity.mPackageName);
@@ -1833,6 +1796,23 @@ public class LocationManagerService extends ILocationManager.Stub {
 
         if (D) Log.d(TAG, "provider request: " + provider + " " + providerRequest);
         p.setRequest(providerRequest, worksource);
+    }
+
+    /**
+     * Whether a given {@code WorkSource} associated with a Location request is valid.
+     */
+    private static boolean isValidWorkSource(WorkSource workSource) {
+        if (workSource.size() > 0) {
+            // If the WorkSource has one or more non-chained UIDs, make sure they're accompanied
+            // by tags.
+            return workSource.getName(0) != null;
+        } else {
+            // For now, make sure callers have supplied an attribution tag for use with
+            // AppOpsManager. This might be relaxed in the future.
+            final ArrayList<WorkChain> workChains = workSource.getWorkChains();
+            return workChains != null && !workChains.isEmpty() &&
+                    workChains.get(0).getAttributionTag() != null;
+        }
     }
 
     @Override
@@ -2057,7 +2037,7 @@ public class LocationManagerService extends ILocationManager.Stub {
         checkResolutionLevelIsSufficientForProviderUse(allowedResolutionLevel,
                 request.getProvider());
         WorkSource workSource = request.getWorkSource();
-        if (workSource != null && workSource.size() > 0) {
+        if (workSource != null && !workSource.isEmpty()) {
             checkDeviceStatsAllowed();
         }
         boolean hideFromAppOps = request.getHideFromAppOps();
@@ -2560,121 +2540,6 @@ public class LocationManagerService extends ILocationManager.Stub {
     }
 
     /**
-     * Method for enabling or disabling location.
-     *
-     * @param enabled true to enable location. false to disable location
-     * @param userId the user id to set
-     */
-    @Override
-    public void setLocationEnabledForUser(boolean enabled, int userId) {
-        // Check INTERACT_ACROSS_USERS permission if userId is not current user id.
-        checkInteractAcrossUsersPermission(userId);
-
-        // Enable or disable all location providers
-        synchronized (mLock) {
-            for(String provider : getAllProviders()) {
-                setProviderEnabledForUser(provider, enabled, userId);
-            }
-        }
-    }
-
-    /**
-     * Returns the current enabled/disabled status of location
-     *
-     * @param userId the user id to query
-     * @return true if location is enabled. false if location is disabled.
-     */
-    @Override
-    public boolean isLocationEnabledForUser(int userId) {
-        // Check INTERACT_ACROSS_USERS permission if userId is not current user id.
-        checkInteractAcrossUsersPermission(userId);
-
-        // If at least one location provider is enabled, return true
-        synchronized (mLock) {
-            for (String provider : getAllProviders()) {
-                if (isProviderEnabledForUser(provider, userId)) {
-                    return true;
-                }
-            }
-            return false;
-        }
-    }
-
-    @Override
-    public boolean isProviderEnabled(String provider) {
-        return isProviderEnabledForUser(provider, UserHandle.getCallingUserId());
-    }
-
-    /**
-     * Method for determining if a location provider is enabled.
-     *
-     * @param provider the location provider to query
-     * @param userId the user id to query
-     * @return true if the provider is enabled
-     */
-    @Override
-    public boolean isProviderEnabledForUser(String provider, int userId) {
-        // Check INTERACT_ACROSS_USERS permission if userId is not current user id.
-        checkInteractAcrossUsersPermission(userId);
-
-        // Fused provider is accessed indirectly via criteria rather than the provider-based APIs,
-        // so we discourage its use
-        if (LocationManager.FUSED_PROVIDER.equals(provider)) return false;
-
-        int uid = Binder.getCallingUid();
-        long identity = Binder.clearCallingIdentity();
-        try {
-            synchronized (mLock) {
-                LocationProviderInterface p = mProvidersByName.get(provider);
-                return p != null
-                    && isAllowedByUserSettingsLockedForUser(provider, uid, userId);
-            }
-        } finally {
-            Binder.restoreCallingIdentity(identity);
-        }
-    }
-
-    /**
-     * Method for enabling or disabling a single location provider.
-     *
-     * @param provider the name of the provider
-     * @param enabled true to enable the provider. false to disable the provider
-     * @param userId the user id to set
-     * @return true if the value was set successfully. false on failure.
-     */
-    @Override
-    public boolean setProviderEnabledForUser(
-            String provider, boolean enabled, int userId) {
-        mContext.enforceCallingPermission(
-                android.Manifest.permission.WRITE_SECURE_SETTINGS,
-                "Requires WRITE_SECURE_SETTINGS permission");
-
-        // Check INTERACT_ACROSS_USERS permission if userId is not current user id.
-        checkInteractAcrossUsersPermission(userId);
-
-        final long identity = Binder.clearCallingIdentity();
-        try {
-            synchronized (mLock) {
-                // to ensure thread safety, we write the provider name with a '+' or '-'
-                // and let the SettingsProvider handle it rather than reading and modifying
-                // the list of enabled providers.
-                if (enabled) {
-                    provider = "+" + provider;
-                } else {
-                    provider = "-" + provider;
-                }
-                return Settings.Secure.putStringForUser(
-                        mContext.getContentResolver(),
-                        Settings.Secure.LOCATION_PROVIDERS_ALLOWED,
-                        provider,
-                        userId);
-            }
-        } finally {
-            Binder.restoreCallingIdentity(identity);
-        }
-    }
-
-    /**
      * Read location provider status from Settings.Secure
      *
      * @param provider the location provider to query
@@ -2691,23 +2556,6 @@ public class LocationManagerService extends ILocationManager.Stub {
             return TextUtils.delimitedStringContains(allowedProviders, ',', provider);
         } finally {
             Binder.restoreCallingIdentity(identity);
-        }
-    }
-
-    /**
-     * Method for checking INTERACT_ACROSS_USERS permission if specified user id is not the same as
-     * current user id
-     *
-     * @param userId the user id to get or set value
-     */
-    private void checkInteractAcrossUsersPermission(int userId) {
-        int uid = Binder.getCallingUid();
-        if (UserHandle.getUserId(uid) != userId) {
-            if (ActivityManager.checkComponentPermission(
-                android.Manifest.permission.INTERACT_ACROSS_USERS, uid, -1, true)
-                != PERMISSION_GRANTED) {
-                throw new SecurityException("Requires INTERACT_ACROSS_USERS permission");
-            }
         }
     }
 

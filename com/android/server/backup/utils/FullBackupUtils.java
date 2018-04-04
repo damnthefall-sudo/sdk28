@@ -16,8 +16,8 @@
 
 package com.android.server.backup.utils;
 
-import static com.android.server.backup.RefactoredBackupManagerService.BACKUP_MANIFEST_VERSION;
-import static com.android.server.backup.RefactoredBackupManagerService.TAG;
+import static com.android.server.backup.BackupManagerService.BACKUP_MANIFEST_VERSION;
+import static com.android.server.backup.BackupManagerService.TAG;
 
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
@@ -104,11 +104,16 @@ public class FullBackupUtils {
         printer.println((installerName != null) ? installerName : "");
 
         printer.println(withApk ? "1" : "0");
-        if (pkg.signatures == null) {
+
+        // write the signature block
+        Signature[][] signingHistory = pkg.signingCertificateHistory;
+        if (signingHistory == null) {
             printer.println("0");
         } else {
-            printer.println(Integer.toString(pkg.signatures.length));
-            for (Signature sig : pkg.signatures) {
+            // retrieve the newest sigs to write
+            Signature[] signatures = signingHistory[signingHistory.length - 1];
+            printer.println(Integer.toString(signatures.length));
+            for (Signature sig : signatures) {
                 printer.println(sig.toCharsString());
             }
         }

@@ -2040,6 +2040,10 @@ public class PhoneWindow extends Window implements MenuBuilder.Callback {
                 if (getKeyguardManager().inKeyguardRestrictedInputMode()) {
                     break;
                 }
+                if ((getContext().getResources().getConfiguration().uiMode
+                        & Configuration.UI_MODE_TYPE_MASK) == Configuration.UI_MODE_TYPE_WATCH) {
+                    break;
+                }
                 if (event.isTracking() && !event.isCanceled()) {
                     launchDefaultSearch(event);
                 }
@@ -2459,6 +2463,15 @@ public class PhoneWindow extends Window implements MenuBuilder.Callback {
         if (a.getBoolean(R.styleable.Window_windowLightNavigationBar, false)) {
             decor.setSystemUiVisibility(
                     decor.getSystemUiVisibility() | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+        }
+        if (a.hasValue(R.styleable.Window_windowLayoutInDisplayCutoutMode)) {
+            int mode = a.getInt(R.styleable.Window_windowLayoutInDisplayCutoutMode, -1);
+            if (mode < LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
+                    || mode > LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER) {
+                throw new UnsupportedOperationException("Unknown windowLayoutInDisplayCutoutMode: "
+                        + a.getString(R.styleable.Window_windowLayoutInDisplayCutoutMode));
+            }
+            params.layoutInDisplayCutoutMode = mode;
         }
 
         if (mAlwaysReadCloseOnTouchAttr || getContext().getApplicationInfo().targetSdkVersion
@@ -3158,7 +3171,7 @@ public class PhoneWindow extends Window implements MenuBuilder.Callback {
             Bundle args = new Bundle();
             args.putInt(Intent.EXTRA_ASSIST_INPUT_DEVICE_ID, event.getDeviceId());
             return ((SearchManager)getContext().getSystemService(Context.SEARCH_SERVICE))
-                    .launchLegacyAssist(null, UserHandle.myUserId(), args);
+                    .launchLegacyAssist(null, getContext().getUserId(), args);
         }
         return result;
     }

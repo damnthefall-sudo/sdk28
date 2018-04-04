@@ -16,6 +16,8 @@
 
 package com.android.server.wifi;
 
+import android.app.ActivityManager;
+import android.app.AppOpsManager;
 import android.content.Context;
 import android.content.Intent;
 import android.net.wifi.ScanResult;
@@ -24,8 +26,10 @@ import android.net.wifi.WifiScanner;
 import android.os.Binder;
 import android.os.UserHandle;
 import android.os.WorkSource;
+import android.util.ArrayMap;
 import android.util.Log;
 
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.server.wifi.util.WifiPermissionsUtil;
 
 import java.util.ArrayList;
@@ -46,28 +50,43 @@ import javax.annotation.concurrent.NotThreadSafe;
  * {@link WifiManager#getScanResults()} is invoked.
  * c) Will send out the {@link WifiManager#SCAN_RESULTS_AVAILABLE_ACTION} broadcast when new
  * scan results are available.
+ * d) Throttle scan requests from non-setting apps:
+ *    d.1) For foreground apps, throttle to a max of 1 scan per app every 30 seconds.
+ *    d.2) For background apps, throttle to a max of 1 scan from any app every 30 minutes.
  * Note: This class is not thread-safe. It needs to be invoked from WifiStateMachine thread only.
- * TODO (b/68987915): Port over scan throttling logic from WifiService for all apps.
- * TODO: Port over idle mode handling from WifiService.
  */
 @NotThreadSafe
 public class ScanRequestProxy {
     private static final String TAG = "WifiScanRequestProxy";
+    @VisibleForTesting
+    public static final int SCAN_REQUEST_THROTTLE_INTERVAL_FG_APPS_MS = 30 * 1000;
+    @VisibleForTesting
+    public static final int SCAN_REQUEST_THROTTLE_INTERVAL_BG_APPS_MS = 30 * 60 * 1000;
 
     private final Context mContext;
+    private final AppOpsManager mAppOps;
+    private final ActivityManager mActivityManager;
     private final WifiInjector mWifiInjector;
     private final WifiConfigManager mWifiConfigManager;
     private final WifiPermissionsUtil mWifiPermissionsUtil;
+    private final WifiMetrics mWifiMetrics;
+    private final Clock mClock;
     private WifiScanner mWifiScanner;
 
     // Verbose logging flag.
     private boolean mVerboseLoggingEnabled = false;
     // Flag to decide if we need to scan for hidden networks or not.
     private boolean mScanningForHiddenNetworksEnabled = false;
+    // Flag to indicate that we're waiting for scan results from an existing request.
+    private boolean mIsScanProcessingComplete = true;
+    // Timestamps for the last scan requested by any background app.
+    private long mLastScanTimestampForBgApps = 0;
+    // Timestamps for the last scan requested by each foreground app.
+    private final ArrayMap<String, Long> mLastScanTimestampsForFgApps = new ArrayMap();
     // Scan results cached from the last full single scan request.
     private final List<ScanResult> mLastScanResults = new ArrayList<>();
     // Common scan listener for scan requests.
-    private final WifiScanner.ScanListener mScanListener = new WifiScanner.ScanListener() {
+    private class ScanRequestProxyScanListener implements WifiScanner.ScanListener {
         @Override
         public void onSuccess() {
             // Scan request succeeded, wait for results to report to external clients.
@@ -78,8 +97,8 @@ public class ScanRequestProxy {
 
         @Override
         public void onFailure(int reason, String description) {
-            Log.e(TAG, "Scan failure received");
-            sendScanResultBroadcast(false);
+            Log.e(TAG, "Scan failure received. reason: " + reason + ",description: " + description);
+            sendScanResultBroadcastIfScanProcessingNotComplete(false);
         }
 
         @Override
@@ -89,8 +108,9 @@ public class ScanRequestProxy {
             }
             // For single scans, the array size should always be 1.
             if (scanDatas.length != 1) {
-                Log.e(TAG, "Found more than 1 batch of scan results, Ignoring...");
-                sendScanResultBroadcast(false);
+                Log.wtf(TAG, "Found more than 1 batch of scan results, Failing...");
+                sendScanResultBroadcastIfScanProcessingNotComplete(false);
+                return;
             }
             WifiScanner.ScanData scanData = scanDatas[0];
             ScanResult[] scanResults = scanData.getResults();
@@ -100,7 +120,7 @@ public class ScanRequestProxy {
             // Store the last scan results & send out the scan completion broadcast.
             mLastScanResults.clear();
             mLastScanResults.addAll(Arrays.asList(scanResults));
-            sendScanResultBroadcast(true);
+            sendScanResultBroadcastIfScanProcessingNotComplete(true);
         }
 
         @Override
@@ -114,12 +134,17 @@ public class ScanRequestProxy {
         }
     };
 
-    ScanRequestProxy(Context context, WifiInjector wifiInjector, WifiConfigManager configManager,
-            WifiPermissionsUtil wifiPermissionUtil) {
+    ScanRequestProxy(Context context, AppOpsManager appOpsManager, ActivityManager activityManager,
+                     WifiInjector wifiInjector, WifiConfigManager configManager,
+                     WifiPermissionsUtil wifiPermissionUtil, WifiMetrics wifiMetrics, Clock clock) {
         mContext = context;
+        mAppOps = appOpsManager;
+        mActivityManager = activityManager;
         mWifiInjector = wifiInjector;
         mWifiConfigManager = configManager;
         mWifiPermissionsUtil = wifiPermissionUtil;
+        mWifiMetrics = wifiMetrics;
+        mClock = clock;
     }
 
     /**
@@ -152,6 +177,18 @@ public class ScanRequestProxy {
     }
 
     /**
+     * Helper method to send the scan request status broadcast, if there is a scan ongoing.
+     */
+    private void sendScanResultBroadcastIfScanProcessingNotComplete(boolean scanSucceeded) {
+        if (mIsScanProcessingComplete) {
+            Log.i(TAG, "No ongoing scan request. Don't send scan broadcast.");
+            return;
+        }
+        sendScanResultBroadcast(scanSucceeded);
+        mIsScanProcessingComplete = true;
+    }
+
+    /**
      * Helper method to send the scan request status broadcast.
      */
     private void sendScanResultBroadcast(boolean scanSucceeded) {
@@ -169,15 +206,123 @@ public class ScanRequestProxy {
     }
 
     /**
+     * Helper method to send the scan request failure broadcast to specified package.
+     */
+    private void sendScanResultFailureBroadcastToPackage(String packageName) {
+        // clear calling identity to send broadcast
+        long callingIdentity = Binder.clearCallingIdentity();
+        try {
+            Intent intent = new Intent(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION);
+            intent.addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT);
+            intent.putExtra(WifiManager.EXTRA_RESULTS_UPDATED, false);
+            intent.setPackage(packageName);
+            mContext.sendBroadcastAsUser(intent, UserHandle.ALL);
+        } finally {
+            // restore calling identity
+            Binder.restoreCallingIdentity(callingIdentity);
+        }
+    }
+
+    /**
+     * Checks if the scan request from the app (specified by packageName) needs
+     * to be throttled.
+     */
+    private boolean shouldScanRequestBeThrottledForForegroundApp(String packageName) {
+        long lastScanMs = mLastScanTimestampsForFgApps.getOrDefault(packageName, 0L);
+        long elapsedRealtime = mClock.getElapsedSinceBootMillis();
+        if (lastScanMs != 0
+                && (elapsedRealtime - lastScanMs) < SCAN_REQUEST_THROTTLE_INTERVAL_FG_APPS_MS) {
+            return true;
+        }
+        // Proceed with the scan request and record the time.
+        mLastScanTimestampsForFgApps.put(packageName, elapsedRealtime);
+        return false;
+    }
+
+    /**
+     * Checks if the scan request from a background app needs to be throttled.
+     */
+    private boolean shouldScanRequestBeThrottledForBackgroundApp() {
+        long lastScanMs = mLastScanTimestampForBgApps;
+        long elapsedRealtime = mClock.getElapsedSinceBootMillis();
+        if (lastScanMs != 0
+                && (elapsedRealtime - lastScanMs) < SCAN_REQUEST_THROTTLE_INTERVAL_BG_APPS_MS) {
+            return true;
+        }
+        // Proceed with the scan request and record the time.
+        mLastScanTimestampForBgApps = elapsedRealtime;
+        return false;
+    }
+
+    /**
+     * Check if the request comes from background app.
+     */
+    private boolean isRequestFromBackground(int callingUid, String packageName) {
+        mAppOps.checkPackage(callingUid, packageName);
+        // getPackageImportance requires PACKAGE_USAGE_STATS permission, so clearing the incoming
+        // identity so the permission check can be done on system process where wifi runs in.
+        long callingIdentity = Binder.clearCallingIdentity();
+        // TODO(b/74970282): This try/catch block may not be necessary (here & above) because all
+        // of these calls are already in WSM thread context (offloaded from app's binder thread).
+        try {
+            return mActivityManager.getPackageImportance(packageName)
+                    > ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND_SERVICE;
+        } finally {
+            Binder.restoreCallingIdentity(callingIdentity);
+        }
+    }
+
+    /**
+     * Checks if the scan request from the app (specified by callingUid & packageName) needs
+     * to be throttled.
+     *
+     * a) Each foreground app can request 1 scan every
+     * {@link #SCAN_REQUEST_THROTTLE_INTERVAL_FG_APPS_MS}.
+     * b) Background apps combined can request 1 scan every
+     * {@link #SCAN_REQUEST_THROTTLE_INTERVAL_BG_APPS_MS}.
+     */
+    private boolean shouldScanRequestBeThrottledForApp(int callingUid, String packageName) {
+        boolean isThrottled;
+        if (isRequestFromBackground(callingUid, packageName)) {
+            isThrottled = shouldScanRequestBeThrottledForBackgroundApp();
+            if (isThrottled) {
+                if (mVerboseLoggingEnabled) {
+                    Log.v(TAG, "Background scan app request [" + callingUid + ", "
+                            + packageName + "]");
+                }
+                mWifiMetrics.incrementExternalBackgroundAppOneshotScanRequestsThrottledCount();
+            }
+        } else {
+            isThrottled = shouldScanRequestBeThrottledForForegroundApp(packageName);
+            if (isThrottled) {
+                if (mVerboseLoggingEnabled) {
+                    Log.v(TAG, "Foreground scan app request [" + callingUid + ", "
+                            + packageName + "]");
+                }
+                mWifiMetrics.incrementExternalForegroundAppOneshotScanRequestsThrottledCount();
+            }
+        }
+        mWifiMetrics.incrementExternalAppOneshotScanRequestsCount();
+        return isThrottled;
+    }
+
+    /**
      * Initiate a wifi scan.
      *
      * @param callingUid The uid initiating the wifi scan. Blame will be given to this uid.
-     * @return true if the scan request was placed, false otherwise.
+     * @return true if the scan request was placed or a scan is already ongoing, false otherwise.
      */
-    public boolean startScan(int callingUid) {
+    public boolean startScan(int callingUid, String packageName) {
         if (!retrieveWifiScannerIfNecessary()) {
             Log.e(TAG, "Failed to retrieve wifiscanner");
-            sendScanResultBroadcast(false);
+            sendScanResultFailureBroadcastToPackage(packageName);
+            return false;
+        }
+        boolean fromSettings = mWifiPermissionsUtil.checkNetworkSettingsPermission(callingUid);
+        // Check and throttle scan request from apps without NETWORK_SETTINGS permission.
+        if (!fromSettings && shouldScanRequestBeThrottledForApp(callingUid, packageName)) {
+            Log.i(TAG, "Scan request from " + packageName + " throttled");
+            sendScanResultFailureBroadcastToPackage(packageName);
             return false;
         }
         // Create a worksource using the caller's UID.
@@ -186,7 +331,7 @@ public class ScanRequestProxy {
         // Create the scan settings.
         WifiScanner.ScanSettings settings = new WifiScanner.ScanSettings();
         // Scan requests from apps with network settings will be of high accuracy type.
-        if (mWifiPermissionsUtil.checkNetworkSettingsPermission(callingUid)) {
+        if (fromSettings) {
             settings.type = WifiScanner.TYPE_HIGH_ACCURACY;
         }
         // always do full scans
@@ -200,7 +345,8 @@ public class ScanRequestProxy {
             settings.hiddenNetworks = hiddenNetworkList.toArray(
                     new WifiScanner.ScanSettings.HiddenNetwork[hiddenNetworkList.size()]);
         }
-        mWifiScanner.startScan(settings, mScanListener, workSource);
+        mWifiScanner.startScan(settings, new ScanRequestProxyScanListener(), workSource);
+        mIsScanProcessingComplete = false;
         return true;
     }
 
@@ -218,5 +364,7 @@ public class ScanRequestProxy {
      */
     public void clearScanResults() {
         mLastScanResults.clear();
+        mLastScanTimestampForBgApps = 0;
+        mLastScanTimestampsForFgApps.clear();
     }
 }

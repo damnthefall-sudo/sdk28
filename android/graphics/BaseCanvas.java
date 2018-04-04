@@ -22,8 +22,7 @@ import android.annotation.Nullable;
 import android.annotation.Size;
 import android.graphics.Canvas.VertexMode;
 import android.text.GraphicsOperations;
-import android.text.MeasuredParagraph;
-import android.text.MeasuredText;
+import android.text.PrecomputedText;
 import android.text.SpannableString;
 import android.text.SpannedString;
 import android.text.TextUtils;
@@ -42,13 +41,19 @@ public abstract class BaseCanvas {
     /**
      * Should only be assigned in constructors (or setBitmap if software canvas),
      * freed by NativeAllocation.
+     * @hide
      */
     protected long mNativeCanvasWrapper;
 
     /**
      * Used to determine when compatibility scaling is in effect.
+     * @hide
      */
     protected int mScreenDensity = Bitmap.DENSITY_NONE;
+
+    /**
+     * @hide
+     */
     protected int mDensity = Bitmap.DENSITY_NONE;
     private boolean mAllowHwBitmapsInSwMode = false;
 
@@ -455,8 +460,7 @@ public abstract class BaseCanvas {
 
         throwIfHasHwBitmapInSwMode(paint);
         nDrawTextRun(mNativeCanvasWrapper, text, index, count, contextIndex, contextCount,
-                x, y, isRtl, paint.getNativeInstance(), 0 /* measured text */,
-                0 /* measured text offset */);
+                x, y, isRtl, paint.getNativeInstance(), 0 /* measured text */);
     }
 
     public void drawTextRun(@NonNull CharSequence text, int start, int end, int contextStart,
@@ -487,19 +491,16 @@ public abstract class BaseCanvas {
             char[] buf = TemporaryBuffer.obtain(contextLen);
             TextUtils.getChars(text, contextStart, contextEnd, buf, 0);
             long measuredTextPtr = 0;
-            int measuredTextOffset = 0;
-            if (text instanceof MeasuredText) {
-                MeasuredText mt = (MeasuredText) text;
+            if (text instanceof PrecomputedText) {
+                PrecomputedText mt = (PrecomputedText) text;
                 int paraIndex = mt.findParaIndex(start);
                 if (end <= mt.getParagraphEnd(paraIndex)) {
-                    // Only suppor the same paragraph.
+                    // Only suppor the text in the same paragraph.
                     measuredTextPtr = mt.getMeasuredParagraph(paraIndex).getNativePtr();
-                    measuredTextOffset = start - mt.getParagraphStart(paraIndex);
                 }
             }
             nDrawTextRun(mNativeCanvasWrapper, buf, start - contextStart, len,
-                    0, contextLen, x, y, isRtl, paint.getNativeInstance(),
-                    measuredTextPtr, measuredTextOffset);
+                    0, contextLen, x, y, isRtl, paint.getNativeInstance(), measuredTextPtr);
             TemporaryBuffer.recycle(buf);
         }
     }
@@ -541,10 +542,19 @@ public abstract class BaseCanvas {
         return mAllowHwBitmapsInSwMode;
     }
 
+    /**
+     * @hide
+     */
+    protected void onHwBitmapInSwMode() {
+        if (!mAllowHwBitmapsInSwMode) {
+            throw new IllegalArgumentException(
+                    "Software rendering doesn't support hardware bitmaps");
+        }
+    }
+
     private void throwIfHwBitmapInSwMode(Bitmap bitmap) {
-        if (!mAllowHwBitmapsInSwMode && !isHardwareAccelerated()
-                && bitmap.getConfig() == Bitmap.Config.HARDWARE) {
-            throw new IllegalStateException("Software rendering doesn't support hardware bitmaps");
+        if (!isHardwareAccelerated() && bitmap.getConfig() == Bitmap.Config.HARDWARE) {
+            onHwBitmapInSwMode();
         }
     }
 
@@ -639,7 +649,7 @@ public abstract class BaseCanvas {
 
     private static native void nDrawTextRun(long nativeCanvas, char[] text, int start, int count,
             int contextStart, int contextCount, float x, float y, boolean isRtl, long nativePaint,
-            long nativeMeasuredText, int measuredTextOffset);
+            long nativePrecomputedText);
 
     private static native void nDrawTextOnPath(long nativeCanvas, char[] text, int index, int count,
             long nativePath, float hOffset, float vOffset, int bidiFlags, long nativePaint);

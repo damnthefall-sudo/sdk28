@@ -60,6 +60,7 @@ class TunerAdapter extends RadioTuner {
                 mLegacyListProxy.close();
                 mLegacyListProxy = null;
             }
+            mCallback.close();
         }
         try {
             mTuner.close();
@@ -202,15 +203,17 @@ class TunerAdapter extends RadioTuner {
     @Override
     public int getProgramInformation(RadioManager.ProgramInfo[] info) {
         if (info == null || info.length != 1) {
-            throw new IllegalArgumentException("The argument must be an array of length 1");
+            Log.e(TAG, "The argument must be an array of length 1");
+            return RadioManager.STATUS_BAD_VALUE;
         }
-        try {
-            info[0] = mTuner.getProgramInformation();
-            return RadioManager.STATUS_OK;
-        } catch (RemoteException e) {
-            Log.e(TAG, "service died", e);
-            return RadioManager.STATUS_DEAD_OBJECT;
+
+        RadioManager.ProgramInfo current = mCallback.getCurrentProgramInformation();
+        if (current == null) {
+            Log.w(TAG, "Didn't get program info yet");
+            return RadioManager.STATUS_INVALID_OPERATION;
         }
+        info[0] = current;
+        return RadioManager.STATUS_OK;
     }
 
     @Override
@@ -276,6 +279,7 @@ class TunerAdapter extends RadioTuner {
             try {
                 mTuner.startProgramListUpdates(filter);
             } catch (UnsupportedOperationException ex) {
+                Log.i(TAG, "Program list is not supported with this hardware");
                 return null;
             } catch (RemoteException ex) {
                 mCallback.setProgramListObserver(null, () -> { });
@@ -288,12 +292,20 @@ class TunerAdapter extends RadioTuner {
 
     @Override
     public boolean isAnalogForced() {
-        return isConfigFlagSet(RadioManager.CONFIG_FORCE_ANALOG);
+        try {
+            return isConfigFlagSet(RadioManager.CONFIG_FORCE_ANALOG);
+        } catch (UnsupportedOperationException ex) {
+            throw new IllegalStateException(ex);
+        }
     }
 
     @Override
     public void setAnalogForced(boolean isForced) {
-        setConfigFlag(RadioManager.CONFIG_FORCE_ANALOG, isForced);
+        try {
+            setConfigFlag(RadioManager.CONFIG_FORCE_ANALOG, isForced);
+        } catch (UnsupportedOperationException ex) {
+            throw new IllegalStateException(ex);
+        }
     }
 
     @Override
@@ -343,11 +355,7 @@ class TunerAdapter extends RadioTuner {
 
     @Override
     public boolean isAntennaConnected() {
-        try {
-            return mTuner.isAntennaConnected();
-        } catch (RemoteException e) {
-            throw new RuntimeException("service died", e);
-        }
+        return mCallback.isAntennaConnected();
     }
 
     @Override

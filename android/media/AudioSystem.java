@@ -401,6 +401,7 @@ public class AudioSystem
     public static final int DEVICE_OUT_BUS = 0x1000000;
     public static final int DEVICE_OUT_PROXY = 0x2000000;
     public static final int DEVICE_OUT_USB_HEADSET = 0x4000000;
+    public static final int DEVICE_OUT_HEARING_AID = 0x8000000;
 
     public static final int DEVICE_OUT_DEFAULT = DEVICE_BIT_DEFAULT;
 
@@ -431,6 +432,7 @@ public class AudioSystem
                                               DEVICE_OUT_BUS |
                                               DEVICE_OUT_PROXY |
                                               DEVICE_OUT_USB_HEADSET |
+                                              DEVICE_OUT_HEARING_AID |
                                               DEVICE_OUT_DEFAULT);
     public static final int DEVICE_OUT_ALL_A2DP = (DEVICE_OUT_BLUETOOTH_A2DP |
                                                    DEVICE_OUT_BLUETOOTH_A2DP_HEADPHONES |
@@ -546,6 +548,7 @@ public class AudioSystem
     public static final String DEVICE_OUT_BUS_NAME = "bus";
     public static final String DEVICE_OUT_PROXY_NAME = "proxy";
     public static final String DEVICE_OUT_USB_HEADSET_NAME = "usb_headset";
+    public static final String DEVICE_OUT_HEARING_AID_NAME = "hearing_aid_out";
 
     public static final String DEVICE_IN_COMMUNICATION_NAME = "communication";
     public static final String DEVICE_IN_AMBIENT_NAME = "ambient";
@@ -628,6 +631,8 @@ public class AudioSystem
             return DEVICE_OUT_PROXY_NAME;
         case DEVICE_OUT_USB_HEADSET:
             return DEVICE_OUT_USB_HEADSET_NAME;
+        case DEVICE_OUT_HEARING_AID:
+            return DEVICE_OUT_HEARING_AID_NAME;
         case DEVICE_OUT_DEFAULT:
         default:
             return Integer.toString(device);
@@ -742,7 +747,8 @@ public class AudioSystem
     public static final int FOR_SYSTEM = 4;
     public static final int FOR_HDMI_SYSTEM_AUDIO = 5;
     public static final int FOR_ENCODED_SURROUND = 6;
-    private static final int NUM_FORCE_USE = 7;
+    public static final int FOR_VIBRATE_RINGING = 7;
+    private static final int NUM_FORCE_USE = 8;
 
     public static String forceUseUsageToString(int usage) {
         switch (usage) {
@@ -753,6 +759,7 @@ public class AudioSystem
             case FOR_SYSTEM: return "FOR_SYSTEM";
             case FOR_HDMI_SYSTEM_AUDIO: return "FOR_HDMI_SYSTEM_AUDIO";
             case FOR_ENCODED_SURROUND: return "FOR_ENCODED_SURROUND";
+            case FOR_VIBRATE_RINGING: return "FOR_VIBRATE_RINGING";
             default: return "unknown usage (" + usage + ")" ;
         }
     }
@@ -826,6 +833,8 @@ public class AudioSystem
 
     private static native boolean native_is_offload_supported(int encoding, int sampleRate,
             int channelMask, int channelIndexMask);
+
+    public static native int getMicrophones(ArrayList<MicrophoneInfo> microphonesInfo);
 
     // Items shared with audio service
 

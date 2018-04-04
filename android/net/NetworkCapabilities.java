@@ -17,6 +17,7 @@
 package android.net;
 
 import android.annotation.IntDef;
+import android.annotation.SystemApi;
 import android.net.ConnectivityManager.NetworkCallback;
 import android.os.Parcel;
 import android.os.Parcelable;
@@ -69,6 +70,7 @@ public final class NetworkCapabilities implements Parcelable {
             mSignalStrength = nc.mSignalStrength;
             mUids = nc.mUids;
             mEstablishingVpnAppUid = nc.mEstablishingVpnAppUid;
+            mUnwantedNetworkCapabilities = nc.mUnwantedNetworkCapabilities;
         }
     }
 
@@ -78,7 +80,7 @@ public final class NetworkCapabilities implements Parcelable {
      * @hide
      */
     public void clearAll() {
-        mNetworkCapabilities = mTransportTypes = 0;
+        mNetworkCapabilities = mTransportTypes = mUnwantedNetworkCapabilities = 0;
         mLinkUpBandwidthKbps = mLinkDownBandwidthKbps = LINK_BANDWIDTH_UNSPECIFIED;
         mNetworkSpecifier = null;
         mSignalStrength = SIGNAL_STRENGTH_UNSPECIFIED;
@@ -91,6 +93,11 @@ public final class NetworkCapabilities implements Parcelable {
      * by any Network that matches all of them.
      */
     private long mNetworkCapabilities;
+
+    /**
+     * If any capabilities specified here they must not exist in the matching Network.
+     */
+    private long mUnwantedNetworkCapabilities;
 
     /** @hide */
     @Retention(RetentionPolicy.SOURCE)
@@ -116,6 +123,8 @@ public final class NetworkCapabilities implements Parcelable {
             NET_CAPABILITY_NOT_ROAMING,
             NET_CAPABILITY_FOREGROUND,
             NET_CAPABILITY_NOT_CONGESTED,
+            NET_CAPABILITY_NOT_SUSPENDED,
+            NET_CAPABILITY_OEM_PAID,
     })
     public @interface NetCapability { }
 
@@ -239,7 +248,6 @@ public final class NetworkCapabilities implements Parcelable {
     /**
      * Indicates that this network is available for use by apps, and not a network that is being
      * kept up in the background to facilitate fast network switching.
-     * @hide
      */
     public static final int NET_CAPABILITY_FOREGROUND = 19;
 
@@ -252,8 +260,28 @@ public final class NetworkCapabilities implements Parcelable {
      */
     public static final int NET_CAPABILITY_NOT_CONGESTED = 20;
 
+    /**
+     * Indicates that this network is not currently suspended.
+     * <p>
+     * When a network is suspended, the network's IP addresses and any connections
+     * established on the network remain valid, but the network is temporarily unable
+     * to transfer data. This can happen, for example, if a cellular network experiences
+     * a temporary loss of signal, such as when driving through a tunnel, etc.
+     * A network with this capability is not suspended, so is expected to be able to
+     * transfer data.
+     */
+    public static final int NET_CAPABILITY_NOT_SUSPENDED = 21;
+
+    /**
+     * Indicates that traffic that goes through this network is paid by oem. For example,
+     * this network can be used by system apps to upload telemetry data.
+     * @hide
+     */
+    @SystemApi
+    public static final int NET_CAPABILITY_OEM_PAID = 22;
+
     private static final int MIN_NET_CAPABILITY = NET_CAPABILITY_MMS;
-    private static final int MAX_NET_CAPABILITY = NET_CAPABILITY_NOT_CONGESTED;
+    private static final int MAX_NET_CAPABILITY = NET_CAPABILITY_OEM_PAID;
 
     /**
      * Network capabilities that are expected to be mutable, i.e., can change while a particular
@@ -262,12 +290,13 @@ public final class NetworkCapabilities implements Parcelable {
     private static final long MUTABLE_CAPABILITIES =
             // TRUSTED can change when user explicitly connects to an untrusted network in Settings.
             // http://b/18206275
-            (1 << NET_CAPABILITY_TRUSTED) |
-            (1 << NET_CAPABILITY_VALIDATED) |
-            (1 << NET_CAPABILITY_CAPTIVE_PORTAL) |
-            (1 << NET_CAPABILITY_NOT_ROAMING) |
-            (1 << NET_CAPABILITY_FOREGROUND) |
-            (1 << NET_CAPABILITY_NOT_CONGESTED);
+            (1 << NET_CAPABILITY_TRUSTED)
+            | (1 << NET_CAPABILITY_VALIDATED)
+            | (1 << NET_CAPABILITY_CAPTIVE_PORTAL)
+            | (1 << NET_CAPABILITY_NOT_ROAMING)
+            | (1 << NET_CAPABILITY_FOREGROUND)
+            | (1 << NET_CAPABILITY_NOT_CONGESTED)
+            | (1 << NET_CAPABILITY_NOT_SUSPENDED);
 
     /**
      * Network capabilities that are not allowed in NetworkRequests. This exists because the
@@ -300,7 +329,8 @@ public final class NetworkCapabilities implements Parcelable {
             (1 << NET_CAPABILITY_IA) |
             (1 << NET_CAPABILITY_IMS) |
             (1 << NET_CAPABILITY_RCS) |
-            (1 << NET_CAPABILITY_XCAP);
+            (1 << NET_CAPABILITY_XCAP) |
+            (1 << NET_CAPABILITY_OEM_PAID);
 
     /**
      * Capabilities that suggest that a network is unrestricted.
@@ -317,31 +347,55 @@ public final class NetworkCapabilities implements Parcelable {
      * Adds the given capability to this {@code NetworkCapability} instance.
      * Multiple capabilities may be applied sequentially.  Note that when searching
      * for a network to satisfy a request, all capabilities requested must be satisfied.
+     * <p>
+     * If the given capability was previously added to the list of unwanted capabilities
+     * then the capability will also be removed from the list of unwanted capabilities.
      *
      * @param capability the capability to be added.
      * @return This NetworkCapabilities instance, to facilitate chaining.
      * @hide
      */
     public NetworkCapabilities addCapability(@NetCapability int capability) {
-        if (capability < MIN_NET_CAPABILITY || capability > MAX_NET_CAPABILITY) {
-            throw new IllegalArgumentException("NetworkCapability out of range");
-        }
+        checkValidCapability(capability);
         mNetworkCapabilities |= 1 << capability;
+        mUnwantedNetworkCapabilities &= ~(1 << capability);  // remove from unwanted capability list
         return this;
     }
 
     /**
+     * Adds the given capability to the list of unwanted capabilities of this
+     * {@code NetworkCapability} instance.  Multiple unwanted capabilities may be applied
+     * sequentially.  Note that when searching for a network to satisfy a request, the network
+     * must not contain any capability from unwanted capability list.
+     * <p>
+     * If the capability was previously added to the list of required capabilities (for
+     * example, it was there by default or added using {@link #addCapability(int)} method), then
+     * it will be removed from the list of required capabilities as well.
+     *
+     * @see #addCapability(int)
+     * @hide
+     */
+    public void addUnwantedCapability(@NetCapability int capability) {
+        checkValidCapability(capability);
+        mUnwantedNetworkCapabilities |= 1 << capability;
+        mNetworkCapabilities &= ~(1 << capability);  // remove from requested capabilities
+    }
+
+    /**
      * Removes (if found) the given capability from this {@code NetworkCapability} instance.
+     * <p>
+     * Note that this method removes capabilities that was added via {@link #addCapability(int)},
+     * {@link #addUnwantedCapability(int)} or {@link #setCapabilities(int[], int[])} .
      *
      * @param capability the capability to be removed.
      * @return This NetworkCapabilities instance, to facilitate chaining.
      * @hide
      */
     public NetworkCapabilities removeCapability(@NetCapability int capability) {
-        if (capability < MIN_NET_CAPABILITY || capability > MAX_NET_CAPABILITY) {
-            throw new IllegalArgumentException("NetworkCapability out of range");
-        }
-        mNetworkCapabilities &= ~(1 << capability);
+        checkValidCapability(capability);
+        final long mask = ~(1 << capability);
+        mNetworkCapabilities &= mask;
+        mUnwantedNetworkCapabilities &= mask;
         return this;
     }
 
@@ -371,30 +425,57 @@ public final class NetworkCapabilities implements Parcelable {
     }
 
     /**
+     * Gets all the unwanted capabilities set on this {@code NetworkCapability} instance.
+     *
+     * @return an array of unwanted capability values for this instance.
+     * @hide
+     */
+    public @NetCapability int[] getUnwantedCapabilities() {
+        return BitUtils.unpackBits(mUnwantedNetworkCapabilities);
+    }
+
+
+    /**
      * Sets all the capabilities set on this {@code NetworkCapability} instance.
      * This overwrites any existing capabilities.
      *
      * @hide
      */
-    public void setCapabilities(@NetCapability int[] capabilities) {
+    public void setCapabilities(@NetCapability int[] capabilities,
+            @NetCapability int[] unwantedCapabilities) {
         mNetworkCapabilities = BitUtils.packBits(capabilities);
+        mUnwantedNetworkCapabilities = BitUtils.packBits(unwantedCapabilities);
     }
 
     /**
-     * Tests for the presence of a capabilitity on this instance.
+     * @deprecated use {@link #setCapabilities(int[], int[])}
+     * @hide
+     */
+    @Deprecated
+    public void setCapabilities(@NetCapability int[] capabilities) {
+        setCapabilities(capabilities, new int[] {});
+    }
+
+    /**
+     * Tests for the presence of a capability on this instance.
      *
      * @param capability the capabilities to be tested for.
      * @return {@code true} if set on this instance.
      */
     public boolean hasCapability(@NetCapability int capability) {
-        if (capability < MIN_NET_CAPABILITY || capability > MAX_NET_CAPABILITY) {
-            return false;
-        }
-        return ((mNetworkCapabilities & (1 << capability)) != 0);
+        return isValidCapability(capability)
+                && ((mNetworkCapabilities & (1 << capability)) != 0);
+    }
+
+    /** @hide */
+    public boolean hasUnwantedCapability(@NetCapability int capability) {
+        return isValidCapability(capability)
+                && ((mUnwantedNetworkCapabilities & (1 << capability)) != 0);
     }
 
     private void combineNetCapabilities(NetworkCapabilities nc) {
         this.mNetworkCapabilities |= nc.mNetworkCapabilities;
+        this.mUnwantedNetworkCapabilities |= nc.mUnwantedNetworkCapabilities;
     }
 
     /**
@@ -405,7 +486,9 @@ public final class NetworkCapabilities implements Parcelable {
      * @hide
      */
     public String describeFirstNonRequestableCapability() {
-        final long nonRequestable = (mNetworkCapabilities & NON_REQUESTABLE_CAPABILITIES);
+        final long nonRequestable = (mNetworkCapabilities | mUnwantedNetworkCapabilities)
+                & NON_REQUESTABLE_CAPABILITIES;
+
         if (nonRequestable != 0) {
             return capabilityNameOf(BitUtils.unpackBits(nonRequestable)[0]);
         }
@@ -415,21 +498,29 @@ public final class NetworkCapabilities implements Parcelable {
     }
 
     private boolean satisfiedByNetCapabilities(NetworkCapabilities nc, boolean onlyImmutable) {
-        long networkCapabilities = this.mNetworkCapabilities;
+        long requestedCapabilities = mNetworkCapabilities;
+        long requestedUnwantedCapabilities = mUnwantedNetworkCapabilities;
+        long providedCapabilities = nc.mNetworkCapabilities;
+
         if (onlyImmutable) {
-            networkCapabilities = networkCapabilities & ~MUTABLE_CAPABILITIES;
+            requestedCapabilities &= ~MUTABLE_CAPABILITIES;
+            requestedUnwantedCapabilities &= ~MUTABLE_CAPABILITIES;
         }
-        return ((nc.mNetworkCapabilities & networkCapabilities) == networkCapabilities);
+        return ((providedCapabilities & requestedCapabilities) == requestedCapabilities)
+                && ((requestedUnwantedCapabilities & providedCapabilities) == 0);
     }
 
     /** @hide */
     public boolean equalsNetCapabilities(NetworkCapabilities nc) {
-        return (nc.mNetworkCapabilities == this.mNetworkCapabilities);
+        return (nc.mNetworkCapabilities == this.mNetworkCapabilities)
+                && (nc.mUnwantedNetworkCapabilities == this.mUnwantedNetworkCapabilities);
     }
 
     private boolean equalsNetCapabilitiesRequestable(NetworkCapabilities that) {
         return ((this.mNetworkCapabilities & ~NON_REQUESTABLE_CAPABILITIES) ==
-                (that.mNetworkCapabilities & ~NON_REQUESTABLE_CAPABILITIES));
+                (that.mNetworkCapabilities & ~NON_REQUESTABLE_CAPABILITIES))
+                && ((this.mUnwantedNetworkCapabilities & ~NON_REQUESTABLE_CAPABILITIES) ==
+                (that.mUnwantedNetworkCapabilities & ~NON_REQUESTABLE_CAPABILITIES));
     }
 
     /**
@@ -869,7 +960,16 @@ public final class NetworkCapabilities implements Parcelable {
     /**
      * List of UIDs this network applies to. No restriction if null.
      * <p>
-     * This is typically (and at this time, only) used by VPN. This network is only available to
+     * For networks, mUids represent the list of network this applies to, and null means this
+     * network applies to all UIDs.
+     * For requests, mUids is the list of UIDs this network MUST apply to to match ; ALL UIDs
+     * must be included in a network so that they match. As an exception to the general rule,
+     * a null mUids field for requests mean "no requirements" rather than what the general rule
+     * would suggest ("must apply to all UIDs") : this is because this has shown to be what users
+     * of this API expect in practice. A network that must match all UIDs can still be
+     * expressed with a set ranging the entire set of possible UIDs.
+     * <p>
+     * mUids is typically (and at this time, only) used by VPN. This network is only available to
      * the UIDs in this list, and it is their default network. Apps in this list that wish to
      * bypass the VPN can do so iff the VPN app allows them to or if they are privileged. If this
      * member is null, then the network is not restricted by app UID. If it's an empty list, then
@@ -991,8 +1091,7 @@ public final class NetworkCapabilities implements Parcelable {
      * @hide
      */
     public boolean satisfiedByUids(NetworkCapabilities nc) {
-        if (null == nc.mUids) return true; // The network satisfies everything.
-        if (null == mUids) return false; // Not everything allowed but requires everything
+        if (null == nc.mUids || null == mUids) return true; // The network satisfies everything.
         for (UidRange requiredRange : mUids) {
             if (requiredRange.contains(nc.mEstablishingVpnAppUid)) return true;
             if (!nc.appliesToUidRange(requiredRange)) {
@@ -1155,15 +1254,17 @@ public final class NetworkCapabilities implements Parcelable {
 
     @Override
     public int hashCode() {
-        return ((int) (mNetworkCapabilities & 0xFFFFFFFF)
+        return (int) (mNetworkCapabilities & 0xFFFFFFFF)
                 + ((int) (mNetworkCapabilities >> 32) * 3)
-                + ((int) (mTransportTypes & 0xFFFFFFFF) * 5)
-                + ((int) (mTransportTypes >> 32) * 7)
-                + (mLinkUpBandwidthKbps * 11)
-                + (mLinkDownBandwidthKbps * 13)
-                + Objects.hashCode(mNetworkSpecifier) * 17
-                + (mSignalStrength * 19)
-                + Objects.hashCode(mUids) * 23);
+                + ((int) (mUnwantedNetworkCapabilities & 0xFFFFFFFF) * 5)
+                + ((int) (mUnwantedNetworkCapabilities >> 32) * 7)
+                + ((int) (mTransportTypes & 0xFFFFFFFF) * 11)
+                + ((int) (mTransportTypes >> 32) * 13)
+                + (mLinkUpBandwidthKbps * 17)
+                + (mLinkDownBandwidthKbps * 19)
+                + Objects.hashCode(mNetworkSpecifier) * 23
+                + (mSignalStrength * 29)
+                + Objects.hashCode(mUids) * 31;
     }
 
     @Override
@@ -1173,6 +1274,7 @@ public final class NetworkCapabilities implements Parcelable {
     @Override
     public void writeToParcel(Parcel dest, int flags) {
         dest.writeLong(mNetworkCapabilities);
+        dest.writeLong(mUnwantedNetworkCapabilities);
         dest.writeLong(mTransportTypes);
         dest.writeInt(mLinkUpBandwidthKbps);
         dest.writeInt(mLinkDownBandwidthKbps);
@@ -1188,6 +1290,7 @@ public final class NetworkCapabilities implements Parcelable {
                 NetworkCapabilities netCap = new NetworkCapabilities();
 
                 netCap.mNetworkCapabilities = in.readLong();
+                netCap.mUnwantedNetworkCapabilities = in.readLong();
                 netCap.mTransportTypes = in.readLong();
                 netCap.mLinkUpBandwidthKbps = in.readInt();
                 netCap.mLinkDownBandwidthKbps = in.readInt();
@@ -1205,34 +1308,73 @@ public final class NetworkCapabilities implements Parcelable {
 
     @Override
     public String toString() {
-        // TODO: enumerate bits for transports and capabilities instead of creating arrays.
-        // TODO: use a StringBuilder instead of string concatenation.
-        int[] types = getTransportTypes();
-        String transports = (types.length > 0) ? " Transports: " + transportNamesOf(types) : "";
-
-        types = getCapabilities();
-        String capabilities = (types.length > 0 ? " Capabilities: " : "");
-        for (int i = 0; i < types.length; ) {
-            capabilities += capabilityNameOf(types[i]);
-            if (++i < types.length) capabilities += "&";
+        final StringBuilder sb = new StringBuilder("[");
+        if (0 != mTransportTypes) {
+            sb.append(" Transports: ");
+            appendStringRepresentationOfBitMaskToStringBuilder(sb, mTransportTypes,
+                    NetworkCapabilities::transportNameOf, "|");
+        }
+        if (0 != mNetworkCapabilities) {
+            sb.append(" Capabilities: ");
+            appendStringRepresentationOfBitMaskToStringBuilder(sb, mNetworkCapabilities,
+                    NetworkCapabilities::capabilityNameOf, "&");
+        }
+        if (0 != mNetworkCapabilities) {
+            sb.append(" Unwanted: ");
+            appendStringRepresentationOfBitMaskToStringBuilder(sb, mUnwantedNetworkCapabilities,
+                    NetworkCapabilities::capabilityNameOf, "&");
+        }
+        if (mLinkUpBandwidthKbps > 0) {
+            sb.append(" LinkUpBandwidth>=").append(mLinkUpBandwidthKbps).append("Kbps");
+        }
+        if (mLinkDownBandwidthKbps > 0) {
+            sb.append(" LinkDnBandwidth>=").append(mLinkDownBandwidthKbps).append("Kbps");
+        }
+        if (mNetworkSpecifier != null) {
+            sb.append(" Specifier: <").append(mNetworkSpecifier).append(">");
+        }
+        if (hasSignalStrength()) {
+            sb.append(" SignalStrength: ").append(mSignalStrength);
         }
 
-        String upBand = ((mLinkUpBandwidthKbps > 0) ? " LinkUpBandwidth>=" +
-                mLinkUpBandwidthKbps + "Kbps" : "");
-        String dnBand = ((mLinkDownBandwidthKbps > 0) ? " LinkDnBandwidth>=" +
-                mLinkDownBandwidthKbps + "Kbps" : "");
+        if (null != mUids) {
+            if ((1 == mUids.size()) && (mUids.valueAt(0).count() == 1)) {
+                sb.append(" Uid: ").append(mUids.valueAt(0).start);
+            } else {
+                sb.append(" Uids: <").append(mUids).append(">");
+            }
+        }
+        if (mEstablishingVpnAppUid != INVALID_UID) {
+            sb.append(" EstablishingAppUid: ").append(mEstablishingVpnAppUid);
+        }
 
-        String specifier = (mNetworkSpecifier == null ?
-                "" : " Specifier: <" + mNetworkSpecifier + ">");
+        sb.append("]");
+        return sb.toString();
+    }
 
-        String signalStrength = (hasSignalStrength() ? " SignalStrength: " + mSignalStrength : "");
 
-        String uids = (null != mUids ? " Uids: <" + mUids + ">" : "");
-
-        String establishingAppUid = " EstablishingAppUid: " + mEstablishingVpnAppUid;
-
-        return "[" + transports + capabilities + upBand + dnBand + specifier + signalStrength
-            + uids + establishingAppUid + "]";
+    private interface NameOf {
+        String nameOf(int value);
+    }
+    /**
+     * @hide
+     */
+    public static void appendStringRepresentationOfBitMaskToStringBuilder(StringBuilder sb,
+            long bitMask, NameOf nameFetcher, String separator) {
+        int bitPos = 0;
+        boolean firstElementAdded = false;
+        while (bitMask != 0) {
+            if ((bitMask & 1) != 0) {
+                if (firstElementAdded) {
+                    sb.append(separator);
+                } else {
+                    firstElementAdded = true;
+                }
+                sb.append(nameFetcher.nameOf(bitPos));
+            }
+            bitMask >>= 1;
+            ++bitPos;
+        }
     }
 
     /** @hide */
@@ -1299,6 +1441,8 @@ public final class NetworkCapabilities implements Parcelable {
             case NET_CAPABILITY_NOT_ROAMING:    return "NOT_ROAMING";
             case NET_CAPABILITY_FOREGROUND:     return "FOREGROUND";
             case NET_CAPABILITY_NOT_CONGESTED:  return "NOT_CONGESTED";
+            case NET_CAPABILITY_NOT_SUSPENDED:  return "NOT_SUSPENDED";
+            case NET_CAPABILITY_OEM_PAID:       return "OEM_PAID";
             default:                            return Integer.toString(capability);
         }
     }
@@ -1329,5 +1473,14 @@ public final class NetworkCapabilities implements Parcelable {
     private static void checkValidTransportType(@Transport int transport) {
         Preconditions.checkArgument(
                 isValidTransport(transport), "Invalid TransportType " + transport);
+    }
+
+    private static boolean isValidCapability(@NetworkCapabilities.NetCapability int capability) {
+        return capability >= MIN_NET_CAPABILITY && capability <= MAX_NET_CAPABILITY;
+    }
+
+    private static void checkValidCapability(@NetworkCapabilities.NetCapability int capability) {
+        Preconditions.checkArgument(isValidCapability(capability),
+                "NetworkCapability " + capability + "out of range");
     }
 }

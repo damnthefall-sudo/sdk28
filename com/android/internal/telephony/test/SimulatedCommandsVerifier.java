@@ -17,6 +17,7 @@
 package com.android.internal.telephony.test;
 
 import android.net.KeepalivePacketData;
+import android.net.LinkProperties;
 import android.os.Handler;
 import android.os.Message;
 import android.service.carrier.CarrierIdentifier;
@@ -1142,8 +1143,9 @@ public class SimulatedCommandsVerifier implements CommandsInterface {
     }
 
     @Override
-    public void setupDataCall(int radioTechnology, DataProfile dataProfile, boolean isRoaming,
-                              boolean allowRoaming, Message result) {
+    public void setupDataCall(int accessNetworkType, DataProfile dataProfile, boolean isRoaming,
+                              boolean allowRoaming, int reason, LinkProperties linkProperties,
+                              Message result) {
     }
 
     @Override
@@ -1190,11 +1192,6 @@ public class SimulatedCommandsVerifier implements CommandsInterface {
     }
 
     @Override
-    public void requestIsimAuthentication(String nonce, Message response) {
-
-    }
-
-    @Override
     public void requestIccSimAuthentication(int authContext, String data, String aid,
                                             Message response) {
 
@@ -1213,6 +1210,14 @@ public class SimulatedCommandsVerifier implements CommandsInterface {
     @Override
     public void unregisterForCellInfoList(Handler h) {
 
+    }
+
+    @Override
+    public void registerForPhysicalChannelConfiguration(Handler h, int what, Object obj) {
+    }
+
+    @Override
+    public void unregisterForPhysicalChannelConfiguration(Handler h) {
     }
 
     @Override
@@ -1386,6 +1391,17 @@ public class SimulatedCommandsVerifier implements CommandsInterface {
 
     @Override
     public void setUnsolResponseFilter(int filter, Message result){
+    }
+
+    @Override
+    public void setSignalStrengthReportingCriteria(int hysteresisMs, int hysteresisDb,
+            int[] thresholdsDbm, int ran, Message result) {
+    }
+
+    @Override
+    public void setLinkCapacityReportingCriteria(int hysteresisMs, int hysteresisDlKbps,
+            int hysteresisUlKbps, int[] thresholdsDlKbps, int[] thresholdsUlKbps, int ran,
+            Message result) {
     }
 
     @Override

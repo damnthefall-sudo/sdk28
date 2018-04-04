@@ -21,6 +21,7 @@ import static android.app.ActivityManager.SPLIT_SCREEN_CREATE_MODE_TOP_OR_LEFT;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_ASSISTANT;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_HOME;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_RECENTS;
+import static android.app.WindowConfiguration.PINNED_WINDOWING_MODE_ELEVATION_IN_DIP;
 import static android.app.WindowConfiguration.WINDOWING_MODE_FULLSCREEN;
 import static android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSET;
 import static android.content.res.Configuration.DENSITY_DPI_UNDEFINED;
@@ -34,18 +35,18 @@ import static android.view.WindowManager.DOCKED_TOP;
 import static com.android.server.wm.DragResizeMode.DRAG_RESIZE_MODE_DOCKED_DIVIDER;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_TASK_MOVEMENT;
 import static com.android.server.wm.WindowManagerDebugConfig.TAG_WM;
-import static com.android.server.wm.proto.StackProto.ADJUSTED_BOUNDS;
-import static com.android.server.wm.proto.StackProto.ADJUSTED_FOR_IME;
-import static com.android.server.wm.proto.StackProto.ADJUST_DIVIDER_AMOUNT;
-import static com.android.server.wm.proto.StackProto.ADJUST_IME_AMOUNT;
-import static com.android.server.wm.proto.StackProto.ANIMATION_BACKGROUND_SURFACE_IS_DIMMING;
-import static com.android.server.wm.proto.StackProto.BOUNDS;
-import static com.android.server.wm.proto.StackProto.DEFER_REMOVAL;
-import static com.android.server.wm.proto.StackProto.FILLS_PARENT;
-import static com.android.server.wm.proto.StackProto.ID;
-import static com.android.server.wm.proto.StackProto.MINIMIZE_AMOUNT;
-import static com.android.server.wm.proto.StackProto.TASKS;
-import static com.android.server.wm.proto.StackProto.WINDOW_CONTAINER;
+import static com.android.server.wm.StackProto.ADJUSTED_BOUNDS;
+import static com.android.server.wm.StackProto.ADJUSTED_FOR_IME;
+import static com.android.server.wm.StackProto.ADJUST_DIVIDER_AMOUNT;
+import static com.android.server.wm.StackProto.ADJUST_IME_AMOUNT;
+import static com.android.server.wm.StackProto.ANIMATION_BACKGROUND_SURFACE_IS_DIMMING;
+import static com.android.server.wm.StackProto.BOUNDS;
+import static com.android.server.wm.StackProto.DEFER_REMOVAL;
+import static com.android.server.wm.StackProto.FILLS_PARENT;
+import static com.android.server.wm.StackProto.ID;
+import static com.android.server.wm.StackProto.MINIMIZE_AMOUNT;
+import static com.android.server.wm.StackProto.TASKS;
+import static com.android.server.wm.StackProto.WINDOW_CONTAINER;
 
 import android.annotation.CallSuper;
 import android.content.res.Configuration;
@@ -53,6 +54,7 @@ import android.graphics.Point;
 import android.graphics.Rect;
 import android.graphics.Region;
 import android.os.RemoteException;
+import android.util.DisplayMetrics;
 import android.util.EventLog;
 import android.util.Slog;
 import android.util.SparseArray;
@@ -152,6 +154,9 @@ public class TaskStack extends WindowContainer<Task> implements
      */
     final Rect mTmpDimBoundsRect = new Rect();
     private final Point mLastSurfaceSize = new Point();
+
+    private final AnimatingAppWindowTokenRegistry mAnimatingAppWindowTokenRegistry =
+            new AnimatingAppWindowTokenRegistry();
 
     TaskStack(WindowManagerService service, int stackId, StackWindowController controller) {
         super(service);
@@ -550,13 +555,14 @@ public class TaskStack extends WindowContainer<Task> implements
         final int dockSide = getDockSide(outBounds);
         final int dividerPosition = DockedDividerUtils.calculatePositionForBounds(outBounds,
                 dockSide, dividerSize);
-        final int displayWidth = mDisplayContent.getDisplayInfo().logicalWidth;
-        final int displayHeight = mDisplayContent.getDisplayInfo().logicalHeight;
+        final int displayWidth = displayInfo.logicalWidth;
+        final int displayHeight = displayInfo.logicalHeight;
 
         // Snap the position to a target.
         final int rotation = displayInfo.rotation;
         final int orientation = mDisplayContent.getConfiguration().orientation;
-        mService.mPolicy.getStableInsetsLw(rotation, displayWidth, displayHeight, outBounds);
+        mService.mPolicy.getStableInsetsLw(rotation, displayWidth, displayHeight,
+                displayInfo.displayCutout, outBounds);
         final DividerSnapAlgorithm algorithm = new DividerSnapAlgorithm(
                 mService.mContext.getResources(), displayWidth, displayHeight,
                 dividerSize, orientation == Configuration.ORIENTATION_PORTRAIT, outBounds,
@@ -736,13 +742,25 @@ public class TaskStack extends WindowContainer<Task> implements
     }
 
     private void updateSurfaceBounds() {
-        updateSurfaceBounds(getPendingTransaction());
+        updateSurfaceSize(getPendingTransaction());
+        updateSurfacePosition();
         scheduleAnimation();
     }
 
-    void updateSurfaceBounds(SurfaceControl.Transaction transaction) {
-        updateSurfaceSize(transaction);
-        updateSurfacePosition(transaction);
+    /**
+     * Calculate an amount by which to expand the stack bounds in each direction.
+     * Used to make room for shadows in the pinned windowing mode.
+     */
+    int getStackOutset() {
+        if (inPinnedWindowingMode()) {
+            final DisplayMetrics displayMetrics = getDisplayContent().getDisplayMetrics();
+
+            // We multiply by two to match the client logic for converting view elevation
+            // to insets, as in {@link WindowManager.LayoutParams#setSurfaceInsets}
+            return (int)Math.ceil(mService.dipToPixel(PINNED_WINDOWING_MODE_ELEVATION_IN_DIP,
+                    displayMetrics) * 2);
+        }
+        return 0;
     }
 
     private void updateSurfaceSize(SurfaceControl.Transaction transaction) {
@@ -751,8 +769,13 @@ public class TaskStack extends WindowContainer<Task> implements
         }
 
         final Rect stackBounds = getBounds();
-        final int width = stackBounds.width();
-        final int height = stackBounds.height();
+        int width = stackBounds.width();
+        int height = stackBounds.height();
+
+        final int outset = getStackOutset();
+        width += 2*outset;
+        height += 2*outset;
+
         if (width == mLastSurfaceSize.x && height == mLastSurfaceSize.y) {
             return;
         }
@@ -807,6 +830,7 @@ public class TaskStack extends WindowContainer<Task> implements
         }
 
         updateDisplayInfo(bounds);
+        updateSurfaceBounds();
     }
 
     /**
@@ -913,7 +937,7 @@ public class TaskStack extends WindowContainer<Task> implements
             // adjusted to occupy whatever screen space the docked stack isn't occupying.
             final DisplayInfo di = mDisplayContent.getDisplayInfo();
             mService.mPolicy.getStableInsetsLw(di.rotation, di.logicalWidth, di.logicalHeight,
-                    mTmpRect2);
+                    di.displayCutout, mTmpRect2);
             final int position = new DividerSnapAlgorithm(mService.mContext.getResources(),
                     di.logicalWidth,
                     di.logicalHeight,
@@ -1363,6 +1387,7 @@ public class TaskStack extends WindowContainer<Task> implements
                 token.dump(pw, "    ", dumpAll);
             }
         }
+        mAnimatingAppWindowTokenRegistry.dump(pw, "AnimatingApps:", prefix);
     }
 
     @Override
@@ -1722,6 +1747,7 @@ public class TaskStack extends WindowContainer<Task> implements
                 || activityType == ACTIVITY_TYPE_ASSISTANT;
     }
 
+    @Override
     Dimmer getDimmer() {
         return mDimmer;
     }
@@ -1751,5 +1777,17 @@ public class TaskStack extends WindowContainer<Task> implements
     void stopDimming() {
         mDimmer.stopDim(getPendingTransaction());
         scheduleAnimation();
+    }
+
+    @Override
+    void getRelativePosition(Point outPos) {
+        super.getRelativePosition(outPos);
+        final int outset = getStackOutset();
+        outPos.x -= outset;
+        outPos.y -= outset;
+    }
+
+    AnimatingAppWindowTokenRegistry getAnimatingAppWindowTokenRegistry() {
+        return mAnimatingAppWindowTokenRegistry;
     }
 }

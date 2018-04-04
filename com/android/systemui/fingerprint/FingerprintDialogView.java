@@ -16,17 +16,20 @@
 
 package com.android.systemui.fingerprint;
 
-import android.app.ActivityManager;
-import android.content.ComponentName;
 import android.content.Context;
-import android.content.pm.ActivityInfo;
+import android.content.res.Configuration;
+import android.graphics.Color;
 import android.graphics.PixelFormat;
+import android.graphics.PorterDuff;
+import android.graphics.drawable.AnimatedVectorDrawable;
 import android.graphics.drawable.Drawable;
-import android.hardware.fingerprint.FingerprintDialog;
+import android.hardware.biometrics.BiometricDialog;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
+import android.util.DisplayMetrics;
+import android.util.Log;
 import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
@@ -41,8 +44,7 @@ import android.widget.TextView;
 
 import com.android.systemui.Interpolators;
 import com.android.systemui.R;
-import com.android.systemui.shared.system.ActivityManagerWrapper;
-import com.android.systemui.shared.system.PackageManagerWrapper;
+import com.android.systemui.util.leak.RotationUtils;
 
 /**
  * This class loads the view for the system-provided dialog. The view consists of:
@@ -53,30 +55,48 @@ public class FingerprintDialogView extends LinearLayout {
 
     private static final String TAG = "FingerprintDialogView";
 
-    private static final int ANIMATION_DURATION = 250; // ms
+    private static final int ANIMATION_DURATION_SHOW = 250; // ms
+    private static final int ANIMATION_DURATION_AWAY = 350; // ms
+
+    private static final int STATE_NONE = 0;
+    private static final int STATE_FINGERPRINT = 1;
+    private static final int STATE_FINGERPRINT_ERROR = 2;
+    private static final int STATE_FINGERPRINT_AUTHENTICATED = 3;
 
     private final IBinder mWindowToken = new Binder();
-    private final ActivityManagerWrapper mActivityManagerWrapper;
-    private final PackageManagerWrapper mPackageManageWrapper;
     private final Interpolator mLinearOutSlowIn;
-    private final Interpolator mFastOutLinearIn;
+    private final WindowManager mWindowManager;
     private final float mAnimationTranslationOffset;
+    private final int mErrorTextColor;
+    private final int mTextColor;
+    private final int mFingerprintColor;
 
     private ViewGroup mLayout;
     private final TextView mErrorText;
     private Handler mHandler;
     private Bundle mBundle;
     private final LinearLayout mDialog;
+    private int mLastState;
+
+    private final float mDisplayWidth;
 
     public FingerprintDialogView(Context context, Handler handler) {
         super(context);
         mHandler = handler;
-        mActivityManagerWrapper = ActivityManagerWrapper.getInstance();
-        mPackageManageWrapper = PackageManagerWrapper.getInstance();
         mLinearOutSlowIn = Interpolators.LINEAR_OUT_SLOW_IN;
-        mFastOutLinearIn = Interpolators.FAST_OUT_LINEAR_IN;
+        mWindowManager = (WindowManager) mContext.getSystemService(Context.WINDOW_SERVICE);
         mAnimationTranslationOffset = getResources()
                 .getDimension(R.dimen.fingerprint_dialog_animation_translation_offset);
+        mErrorTextColor = Color.parseColor(
+                getResources().getString(R.color.fingerprint_dialog_error_message_color));
+        mTextColor = Color.parseColor(
+                getResources().getString(R.color.fingerprint_dialog_text_light_color));
+        mFingerprintColor = Color.parseColor(
+                getResources().getString(R.color.fingerprint_dialog_fingerprint_color));
+
+        DisplayMetrics metrics = new DisplayMetrics();
+        mWindowManager.getDefaultDisplay().getMetrics(metrics);
+        mDisplayWidth = metrics.widthPixels;
 
         // Create the dialog
         LayoutInflater factory = LayoutInflater.from(getContext());
@@ -107,15 +127,14 @@ public class FingerprintDialogView extends LinearLayout {
         });
 
         final View space = mLayout.findViewById(R.id.space);
+        final View leftSpace = mLayout.findViewById(R.id.left_space);
+        final View rightSpace = mLayout.findViewById(R.id.right_space);
         final Button negative = mLayout.findViewById(R.id.button2);
         final Button positive = mLayout.findViewById(R.id.button1);
 
-        space.setClickable(true);
-        space.setOnTouchListener((View view, MotionEvent event) -> {
-            mHandler.obtainMessage(FingerprintDialogImpl.MSG_HIDE_DIALOG, true /* userCanceled*/)
-                    .sendToTarget();
-            return true;
-        });
+        setDismissesDialog(space);
+        setDismissesDialog(leftSpace);
+        setDismissesDialog(rightSpace);
 
         negative.setOnClickListener((View v) -> {
             mHandler.obtainMessage(FingerprintDialogImpl.MSG_BUTTON_NEGATIVE).sendToTarget();
@@ -137,19 +156,36 @@ public class FingerprintDialogView extends LinearLayout {
         final TextView subtitle = mLayout.findViewById(R.id.subtitle);
         final TextView description = mLayout.findViewById(R.id.description);
         final Button negative = mLayout.findViewById(R.id.button2);
-        final ImageView image = mLayout.findViewById(R.id.icon);
         final Button positive = mLayout.findViewById(R.id.button1);
-        final ImageView fingerprint_icon = mLayout.findViewById(R.id.fingerprint_icon);
 
-        title.setText(mBundle.getCharSequence(FingerprintDialog.KEY_TITLE));
+        mDialog.getLayoutParams().width = (int) mDisplayWidth;
+
+        mLastState = STATE_NONE;
+        updateFingerprintIcon(STATE_FINGERPRINT);
+
+        title.setText(mBundle.getCharSequence(BiometricDialog.KEY_TITLE));
         title.setSelected(true);
-        subtitle.setText(mBundle.getCharSequence(FingerprintDialog.KEY_SUBTITLE));
-        description.setText(mBundle.getCharSequence(FingerprintDialog.KEY_DESCRIPTION));
-        negative.setText(mBundle.getCharSequence(FingerprintDialog.KEY_NEGATIVE_TEXT));
-        setAppIcon(image);
+
+        final CharSequence subtitleText = mBundle.getCharSequence(BiometricDialog.KEY_SUBTITLE);
+        if (subtitleText == null) {
+            subtitle.setVisibility(View.GONE);
+        } else {
+            subtitle.setVisibility(View.VISIBLE);
+            subtitle.setText(subtitleText);
+        }
+
+        final CharSequence descriptionText = mBundle.getCharSequence(BiometricDialog.KEY_DESCRIPTION);
+        if (descriptionText == null) {
+            subtitle.setVisibility(View.VISIBLE);
+            description.setVisibility(View.GONE);
+        } else {
+            description.setText(mBundle.getCharSequence(BiometricDialog.KEY_DESCRIPTION));
+        }
+
+        negative.setText(mBundle.getCharSequence(BiometricDialog.KEY_NEGATIVE_TEXT));
 
         final CharSequence positiveText =
-                mBundle.getCharSequence(FingerprintDialog.KEY_POSITIVE_TEXT);
+                mBundle.getCharSequence(BiometricDialog.KEY_POSITIVE_TEXT);
         positive.setText(positiveText); // needs to be set for marquee to work
         if (positiveText != null) {
             positive.setVisibility(View.VISIBLE);
@@ -165,15 +201,52 @@ public class FingerprintDialogView extends LinearLayout {
             public void run() {
                 mLayout.animate()
                         .alpha(1f)
-                        .setDuration(ANIMATION_DURATION)
+                        .setDuration(ANIMATION_DURATION_SHOW)
                         .setInterpolator(mLinearOutSlowIn)
                         .withLayer()
                         .start();
                 mDialog.animate()
                         .translationY(0)
-                        .setDuration(ANIMATION_DURATION)
+                        .setDuration(ANIMATION_DURATION_SHOW)
                         .setInterpolator(mLinearOutSlowIn)
                         .withLayer()
+                        .start();
+            }
+        });
+    }
+
+    private void setDismissesDialog(View v) {
+        v.setClickable(true);
+        v.setOnTouchListener((View view, MotionEvent event) -> {
+            mHandler.obtainMessage(FingerprintDialogImpl.MSG_HIDE_DIALOG, true /* userCanceled */)
+                    .sendToTarget();
+            return true;
+        });
+    }
+
+    public void startDismiss() {
+        final Runnable endActionRunnable = new Runnable() {
+            @Override
+            public void run() {
+                mWindowManager.removeView(FingerprintDialogView.this);
+            }
+        };
+
+        postOnAnimation(new Runnable() {
+            @Override
+            public void run() {
+                mLayout.animate()
+                        .alpha(0f)
+                        .setDuration(ANIMATION_DURATION_AWAY)
+                        .setInterpolator(mLinearOutSlowIn)
+                        .withLayer()
+                        .start();
+                mDialog.animate()
+                        .translationY(mAnimationTranslationOffset)
+                        .setDuration(ANIMATION_DURATION_AWAY)
+                        .setInterpolator(mLinearOutSlowIn)
+                        .withLayer()
+                        .withEndAction(endActionRunnable)
                         .start();
             }
         });
@@ -183,39 +256,75 @@ public class FingerprintDialogView extends LinearLayout {
         mBundle = bundle;
     }
 
-    protected void clearMessage() {
-        mErrorText.setVisibility(View.INVISIBLE);
+    // Clears the temporary message and shows the help message.
+    protected void resetMessage() {
+        updateFingerprintIcon(STATE_FINGERPRINT);
+        mErrorText.setText(R.string.fingerprint_dialog_touch_sensor);
+        mErrorText.setTextColor(mTextColor);
     }
 
-    private void showMessage(String message) {
+    // Shows an error/help message
+    private void showTemporaryMessage(String message) {
         mHandler.removeMessages(FingerprintDialogImpl.MSG_CLEAR_MESSAGE);
+        updateFingerprintIcon(STATE_FINGERPRINT_ERROR);
         mErrorText.setText(message);
+        mErrorText.setTextColor(mErrorTextColor);
         mErrorText.setContentDescription(message);
-        mErrorText.setVisibility(View.VISIBLE);
         mHandler.sendMessageDelayed(mHandler.obtainMessage(FingerprintDialogImpl.MSG_CLEAR_MESSAGE),
-                FingerprintDialog.HIDE_DIALOG_DELAY);
+                BiometricDialog.HIDE_DIALOG_DELAY);
     }
 
     public void showHelpMessage(String message) {
-        showMessage(message);
+        showTemporaryMessage(message);
     }
 
     public void showErrorMessage(String error) {
-        showMessage(error);
+        showTemporaryMessage(error);
         mHandler.sendMessageDelayed(mHandler.obtainMessage(FingerprintDialogImpl.MSG_HIDE_DIALOG,
-                false /* userCanceled */), FingerprintDialog.HIDE_DIALOG_DELAY);
+                false /* userCanceled */), BiometricDialog.HIDE_DIALOG_DELAY);
     }
 
-    private void setAppIcon(ImageView image) {
-        final ActivityManager.RunningTaskInfo taskInfo = mActivityManagerWrapper.getRunningTask();
-        final ComponentName cn = taskInfo.topActivity;
-        final int userId = mActivityManagerWrapper.getCurrentUserId();
-        final ActivityInfo activityInfo = mPackageManageWrapper.getActivityInfo(cn, userId);
-        image.setImageDrawable(mActivityManagerWrapper.getBadgedActivityIcon(activityInfo, userId));
-        image.setContentDescription(
-                getResources().getString(R.string.accessibility_fingerprint_dialog_app_icon)
-                        + " "
-                        + mActivityManagerWrapper.getBadgedActivityLabel(activityInfo, userId));
+    private void updateFingerprintIcon(int newState) {
+        Drawable icon  = getAnimationResForTransition(mLastState, newState);
+
+        if (icon == null) {
+            Log.e(TAG, "Animation not found");
+            return;
+        }
+
+        if (newState == STATE_FINGERPRINT) {
+            icon.setColorFilter(mFingerprintColor, PorterDuff.Mode.SRC_IN);
+        }
+
+        final AnimatedVectorDrawable animation = icon instanceof AnimatedVectorDrawable
+                ? (AnimatedVectorDrawable) icon
+                : null;
+
+        final ImageView fingerprint_icon = mLayout.findViewById(R.id.fingerprint_icon);
+        fingerprint_icon.setImageDrawable(icon);
+
+        if (animation != null) {
+            animation.forceAnimationOnUI();
+            animation.start();
+        }
+
+        mLastState = newState;
+    }
+
+    private Drawable getAnimationResForTransition(int oldState, int newState) {
+        int iconRes;
+        if (oldState == STATE_NONE && newState == STATE_FINGERPRINT) {
+            iconRes = R.drawable.lockscreen_fingerprint_draw_on_animation;
+        } else if (oldState == STATE_FINGERPRINT && newState == STATE_FINGERPRINT_ERROR) {
+            iconRes = R.drawable.lockscreen_fingerprint_fp_to_error_state_animation;
+        } else if (oldState == STATE_FINGERPRINT_ERROR && newState == STATE_FINGERPRINT) {
+            iconRes = R.drawable.lockscreen_fingerprint_error_state_to_fp_animation;
+        } else if (oldState == STATE_FINGERPRINT && newState == STATE_FINGERPRINT_AUTHENTICATED) {
+            iconRes = R.drawable.lockscreen_fingerprint_draw_off_animation;
+        } else {
+            return null;
+        }
+        return mContext.getDrawable(iconRes);
     }
 
     public WindowManager.LayoutParams getLayoutParams() {

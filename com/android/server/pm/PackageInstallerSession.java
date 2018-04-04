@@ -77,6 +77,7 @@ import android.os.RevocableFileDescriptor;
 import android.os.UserHandle;
 import android.os.storage.StorageManager;
 import android.system.ErrnoException;
+import android.system.Int64Ref;
 import android.system.Os;
 import android.system.OsConstants;
 import android.system.StructStat;
@@ -317,6 +318,7 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
     /**
      * @return {@code true} iff the installing is app an device owner or affiliated profile owner.
      */
+    @GuardedBy("mLock")
     private boolean isInstallerDeviceOwnerOrAffiliatedProfileOwnerLocked() {
         DevicePolicyManagerInternal dpmi =
                 LocalServices.getService(DevicePolicyManagerInternal.class);
@@ -333,6 +335,7 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
      *
      * @return {@code true} iff we need to ask to confirm the permissions?
      */
+    @GuardedBy("mLock")
     private boolean needToAskForPermissionsLocked() {
         if (mPermissionsManuallyAccepted) {
             return false;
@@ -455,6 +458,7 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
         }
     }
 
+    @GuardedBy("mLock")
     private void assertPreparedAndNotSealedLocked(String cookie) {
         assertPreparedAndNotCommittedOrDestroyedLocked(cookie);
         if (mSealed) {
@@ -462,6 +466,7 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
         }
     }
 
+    @GuardedBy("mLock")
     private void assertPreparedAndNotCommittedOrDestroyedLocked(String cookie) {
         assertPreparedAndNotDestroyedLocked(cookie);
         if (mCommitted) {
@@ -469,6 +474,7 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
         }
     }
 
+    @GuardedBy("mLock")
     private void assertPreparedAndNotDestroyedLocked(String cookie) {
         if (!mPrepared) {
             throw new IllegalStateException(cookie + " before prepared");
@@ -483,6 +489,7 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
      * might point at an ASEC mount point, which is why we delay path resolution
      * until someone actively works with the session.
      */
+    @GuardedBy("mLock")
     private File resolveStageDirLocked() throws IOException {
         if (mResolvedStageDir == null) {
             if (stageDir != null) {
@@ -515,6 +522,7 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
         }
     }
 
+    @GuardedBy("mLock")
     private void computeProgressLocked(boolean forcePublish) {
         mProgress = MathUtils.constrain(mClientProgress * 0.8f, 0f, 0.8f)
                 + MathUtils.constrain(mInternalProgress * 0.2f, 0f, 0.2f);
@@ -575,14 +583,24 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
     @Override
     public ParcelFileDescriptor openWrite(String name, long offsetBytes, long lengthBytes) {
         try {
-            return openWriteInternal(name, offsetBytes, lengthBytes);
+            return doWriteInternal(name, offsetBytes, lengthBytes, null);
         } catch (IOException e) {
             throw ExceptionUtils.wrap(e);
         }
     }
 
-    private ParcelFileDescriptor openWriteInternal(String name, long offsetBytes, long lengthBytes)
-            throws IOException {
+    @Override
+    public void write(String name, long offsetBytes, long lengthBytes,
+            ParcelFileDescriptor fd) {
+        try {
+            doWriteInternal(name, offsetBytes, lengthBytes, fd);
+        } catch (IOException e) {
+            throw ExceptionUtils.wrap(e);
+        }
+    }
+
+    private ParcelFileDescriptor doWriteInternal(String name, long offsetBytes, long lengthBytes,
+            ParcelFileDescriptor incomingFd) throws IOException {
         // Quick sanity check of state, and allocate a pipe for ourselves. We
         // then do heavy disk allocation outside the lock, but this open pipe
         // will block any attempted install transitions.
@@ -636,7 +654,44 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
                 Os.lseek(targetFd, offsetBytes, OsConstants.SEEK_SET);
             }
 
-            if (PackageInstaller.ENABLE_REVOCABLE_FD) {
+            if (incomingFd != null) {
+                switch (Binder.getCallingUid()) {
+                    case android.os.Process.SHELL_UID:
+                    case android.os.Process.ROOT_UID:
+                        break;
+                    default:
+                        throw new SecurityException("Reverse mode only supported from shell");
+                }
+
+                // In "reverse" mode, we're streaming data ourselves from the
+                // incoming FD, which means we never have to hand out our
+                // sensitive internal FD. We still rely on a "bridge" being
+                // inserted above to hold the session active.
+                try {
+                    final Int64Ref last = new Int64Ref(0);
+                    FileUtils.copy(incomingFd.getFileDescriptor(), targetFd, (long progress) -> {
+                        if (params.sizeBytes > 0) {
+                            final long delta = progress - last.value;
+                            last.value = progress;
+                            addClientProgress((float) delta / (float) params.sizeBytes);
+                        }
+                    }, null, lengthBytes);
+                } finally {
+                    IoUtils.closeQuietly(targetFd);
+                    IoUtils.closeQuietly(incomingFd);
+
+                    // We're done here, so remove the "bridge" that was holding
+                    // the session active.
+                    synchronized (mLock) {
+                        if (PackageInstaller.ENABLE_REVOCABLE_FD) {
+                            mFds.remove(fd);
+                        } else {
+                            mBridges.remove(bridge);
+                        }
+                    }
+                }
+                return null;
+            } else if (PackageInstaller.ENABLE_REVOCABLE_FD) {
                 fd.init(mContext, targetFd);
                 return fd.getRevocableFileDescriptor();
             } else {
@@ -680,6 +735,7 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
      * Check if the caller is the owner of this session. Otherwise throw a
      * {@link SecurityException}.
      */
+    @GuardedBy("mLock")
     private void assertCallerIsOwnerOrRootLocked() {
         final int callingUid = Binder.getCallingUid();
         if (callingUid != Process.ROOT_UID && callingUid != mInstallerUid) {
@@ -690,6 +746,7 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
     /**
      * If anybody is reading or writing data of the session, throw an {@link SecurityException}.
      */
+    @GuardedBy("mLock")
     private void assertNoWriteFileTransfersOpenLocked() {
         // Verify that all writers are hands-off
         for (RevocableFileDescriptor fd : mFds) {
@@ -772,6 +829,7 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
      * @throws PackageManagerException if the session was sealed but something went wrong. If the
      *                                 session was sealed this is the only possible exception.
      */
+    @GuardedBy("mLock")
     private void sealAndValidateLocked() throws PackageManagerException, IOException {
         assertNoWriteFileTransfersOpenLocked();
         assertPreparedAndNotDestroyedLocked("sealing of session");
@@ -853,6 +911,7 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
         mCallback.onSessionSealedBlocking(this);
     }
 
+    @GuardedBy("mLock")
     private void commitLocked()
             throws PackageManagerException {
         if (mDestroyed) {
@@ -968,6 +1027,7 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
      * Note that upgrade compatibility is still performed by
      * {@link PackageManagerService}.
      */
+    @GuardedBy("mLock")
     private void validateInstallLocked(@Nullable PackageInfo pkgInfo)
             throws PackageManagerException {
         mPackageName = null;
@@ -1180,6 +1240,7 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
         }
     }
 
+    @GuardedBy("mLock")
     private void assertApkConsistentLocked(String tag, ApkLite apk)
             throws PackageManagerException {
         if (!mPackageName.equals(apk.packageName)) {
@@ -1463,6 +1524,7 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
         }
     }
 
+    @GuardedBy("mLock")
     private void dumpLocked(IndentingPrintWriter pw) {
         pw.println("Session " + sessionId + ":");
         pw.increaseIndent();
@@ -1551,6 +1613,8 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
             writeStringAttribute(out, ATTR_VOLUME_UUID, params.volumeUuid);
             writeIntAttribute(out, ATTR_INSTALL_REASON, params.installReason);
 
+            writeGrantedRuntimePermissionsLocked(out, params.grantedRuntimePermissions);
+
             // Persist app icon if changed since last written
             File appIconFile = buildAppIconFile(sessionId, sessionsDir);
             if (params.appIcon == null && appIconFile.exists()) {
@@ -1570,8 +1634,6 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
 
                 params.appIconLastModified = appIconFile.lastModified();
             }
-
-            writeGrantedRuntimePermissionsLocked(out, params.grantedRuntimePermissions);
         }
 
         out.endTag(null, TAG_SESSION);
@@ -1649,8 +1711,9 @@ public class PackageInstallerSession extends IPackageInstallerSession.Stub {
         params.referrerUri = readUriAttribute(in, ATTR_REFERRER_URI);
         params.abiOverride = readStringAttribute(in, ATTR_ABI_OVERRIDE);
         params.volumeUuid = readStringAttribute(in, ATTR_VOLUME_UUID);
-        params.grantedRuntimePermissions = readGrantedRuntimePermissions(in);
         params.installReason = readIntAttribute(in, ATTR_INSTALL_REASON);
+
+        params.grantedRuntimePermissions = readGrantedRuntimePermissions(in);
 
         final File appIconFile = buildAppIconFile(sessionId, sessionsDir);
         if (appIconFile.exists()) {

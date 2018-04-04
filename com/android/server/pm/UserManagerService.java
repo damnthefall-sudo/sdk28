@@ -31,6 +31,7 @@ import android.app.IActivityManager;
 import android.app.IStopUserCallback;
 import android.app.KeyguardManager;
 import android.app.PendingIntent;
+import android.app.admin.DevicePolicyManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -71,6 +72,7 @@ import android.os.UserManager.EnforcingUser;
 import android.os.UserManagerInternal;
 import android.os.UserManagerInternal.UserRestrictionsListener;
 import android.os.storage.StorageManager;
+import android.provider.Settings;
 import android.security.GateKeeper;
 import android.service.gatekeeper.IGateKeeperService;
 import android.util.AtomicFile;
@@ -88,6 +90,7 @@ import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.app.IAppOpsService;
 import com.android.internal.logging.MetricsLogger;
+import com.android.internal.os.BackgroundThread;
 import com.android.internal.util.DumpUtils;
 import com.android.internal.util.FastXmlSerializer;
 import com.android.internal.util.Preconditions;
@@ -100,7 +103,6 @@ import com.android.server.am.UserState;
 import com.android.server.storage.DeviceStorageMonitorInternal;
 
 import libcore.io.IoUtils;
-import libcore.util.Objects;
 
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
@@ -121,6 +123,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Service for {@link UserManager}.
@@ -387,7 +390,9 @@ public class UserManagerService extends IUserManager.Stub {
             }
             final IntentSender target = intent.getParcelableExtra(Intent.EXTRA_INTENT);
             final int userHandle = intent.getIntExtra(Intent.EXTRA_USER_ID, UserHandle.USER_NULL);
-            setQuietModeEnabled(userHandle, false, target);
+            // Call setQuietModeEnabled on bg thread to avoid ANR
+            BackgroundThread.getHandler()
+                    .post(() -> setQuietModeEnabled(userHandle, false, target));
         }
     };
 
@@ -601,7 +606,7 @@ public class UserManagerService extends IUserManager.Stub {
                     return;
                 }
                 String currentAccount = userData.account;
-                if (!Objects.equal(currentAccount, accountName)) {
+                if (!Objects.equals(currentAccount, accountName)) {
                     userData.account = accountName;
                     userToUpdate = userData;
                 }
@@ -778,14 +783,7 @@ public class UserManagerService extends IUserManager.Stub {
     @Override
     public int getProfileParentId(int userHandle) {
         checkManageUsersPermission("get the profile parent");
-        synchronized (mUsersLock) {
-            UserInfo profileParent = getProfileParentLU(userHandle);
-            if (profileParent == null) {
-                return userHandle;
-            }
-
-            return profileParent.id;
-        }
+        return mLocalService.getProfileParentId(userHandle);
     }
 
     private UserInfo getProfileParentLU(int userHandle) {
@@ -1483,6 +1481,23 @@ public class UserManagerService extends IUserManager.Stub {
         return restrictions != null && restrictions.getBoolean(restrictionKey);
     }
 
+    /** @return if any user has the given restriction. */
+    @Override
+    public boolean hasUserRestrictionOnAnyUser(String restrictionKey) {
+        if (!UserRestrictionsUtils.isValidRestriction(restrictionKey)) {
+            return false;
+        }
+        final List<UserInfo> users = getUsers(/* excludeDying= */ true);
+        for (int i = 0; i < users.size(); i++) {
+            final int userId = users.get(i).id;
+            Bundle restrictions = getEffectiveUserRestrictions(userId);
+            if (restrictions != null && restrictions.getBoolean(restrictionKey)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /**
      * @hide
      *
@@ -1544,6 +1559,7 @@ public class UserManagerService extends IUserManager.Stub {
         return result;
     }
 
+    @GuardedBy("mRestrictionsLock")
     private EnforcingUser getEnforcingUserLocked(@UserIdInt int userId) {
         int source = mDeviceOwnerUserId == userId ? UserManager.RESTRICTION_SOURCE_DEVICE_OWNER
                 : UserManager.RESTRICTION_SOURCE_PROFILE_OWNER;
@@ -2563,9 +2579,6 @@ public class UserManagerService extends IUserManager.Stub {
             Log.w(LOG_TAG, "Cannot add user. Not enough space on disk.");
             return null;
         }
-        if (ActivityManager.isLowRamDeviceStatic()) {
-            return null;
-        }
         final boolean isGuest = (flags & UserInfo.FLAG_GUEST) != 0;
         final boolean isManagedProfile = (flags & UserInfo.FLAG_MANAGED_PROFILE) != 0;
         final boolean isRestricted = (flags & UserInfo.FLAG_RESTRICTED) != 0;
@@ -2893,6 +2906,7 @@ public class UserManagerService extends IUserManager.Stub {
         }
     }
 
+    @GuardedBy("mUsersLock")
     @VisibleForTesting
     void addRemovingUserIdLocked(int userId) {
         // We remember deleted user IDs to prevent them from being
@@ -3402,6 +3416,7 @@ public class UserManagerService extends IUserManager.Stub {
         return nextId;
     }
 
+    @GuardedBy("mUsersLock")
     private int scanNextAvailableIdLocked() {
         for (int i = MIN_USER_ID; i < MAX_USER_ID; i++) {
             if (mUsers.indexOfKey(i) < 0 && !mRemovingUserIds.get(i)) {
@@ -3907,6 +3922,63 @@ public class UserManagerService extends IUserManager.Stub {
         @Override
         public boolean exists(int userId) {
             return getUserInfoNoChecks(userId) != null;
+        }
+
+        @Override
+        public boolean isProfileAccessible(int callingUserId, int targetUserId, String debugMsg,
+                boolean throwSecurityException) {
+            if (targetUserId == callingUserId) {
+                return true;
+            }
+            synchronized (mUsersLock) {
+                UserInfo callingUserInfo = getUserInfoLU(callingUserId);
+                if (callingUserInfo == null || callingUserInfo.isManagedProfile()) {
+                    if (throwSecurityException) {
+                        throw new SecurityException(
+                                debugMsg + " for another profile "
+                                        + targetUserId + " from " + callingUserId);
+                    }
+                }
+
+                UserInfo targetUserInfo = getUserInfoLU(targetUserId);
+                if (targetUserInfo == null || !targetUserInfo.isEnabled()) {
+                    // Do not throw any exception here as this could happen due to race conditions
+                    // between the system updating its state and the client getting notified.
+                    if (throwSecurityException) {
+                        Slog.w(LOG_TAG, debugMsg + " for disabled profile "
+                                + targetUserId + " from " + callingUserId);
+                    }
+                    return false;
+                }
+
+                if (targetUserInfo.profileGroupId == UserInfo.NO_PROFILE_GROUP_ID ||
+                        targetUserInfo.profileGroupId != callingUserInfo.profileGroupId) {
+                    if (throwSecurityException) {
+                        throw new SecurityException(
+                                debugMsg + " for unrelated profile " + targetUserId);
+                    }
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        @Override
+        public int getProfileParentId(int userId) {
+            synchronized (mUsersLock) {
+                UserInfo profileParent = getProfileParentLU(userId);
+                if (profileParent == null) {
+                    return userId;
+                }
+                return profileParent.id;
+            }
+        }
+
+        @Override
+        public boolean isSettingRestrictedForUser(String setting, @UserIdInt int userId,
+                String value, int callingUid) {
+            return UserRestrictionsUtils.isSettingRestrictedForUser(mContext, setting, userId,
+                    value, callingUid);
         }
     }
 

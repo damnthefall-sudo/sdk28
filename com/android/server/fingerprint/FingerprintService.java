@@ -19,6 +19,7 @@ package com.android.server.fingerprint;
 import static android.Manifest.permission.INTERACT_ACROSS_USERS;
 import static android.Manifest.permission.MANAGE_FINGERPRINT;
 import static android.Manifest.permission.RESET_FINGERPRINT_LOCKOUT;
+import static android.Manifest.permission.USE_BIOMETRIC;
 import static android.Manifest.permission.USE_FINGERPRINT;
 import static android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND;
 
@@ -26,8 +27,10 @@ import android.app.ActivityManager;
 import android.app.ActivityManager.RunningAppProcessInfo;
 import android.app.AlarmManager;
 import android.app.AppOpsManager;
+import android.app.IActivityManager;
 import android.app.PendingIntent;
 import android.app.SynchronousUserSwitchObserver;
+import android.app.TaskStackListener;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
@@ -35,12 +38,12 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.content.pm.UserInfo;
+import android.hardware.biometrics.IBiometricDialogReceiver;
 import android.hardware.biometrics.fingerprint.V2_1.IBiometricsFingerprint;
 import android.hardware.biometrics.fingerprint.V2_1.IBiometricsFingerprintClientCallback;
 import android.hardware.fingerprint.Fingerprint;
 import android.hardware.fingerprint.FingerprintManager;
 import android.hardware.fingerprint.IFingerprintClientActiveCallback;
-import android.hardware.fingerprint.IFingerprintDialogReceiver;
 import android.hardware.fingerprint.IFingerprintService;
 import android.hardware.fingerprint.IFingerprintServiceLockoutResetCallback;
 import android.hardware.fingerprint.IFingerprintServiceReceiver;
@@ -59,7 +62,6 @@ import android.os.RemoteException;
 import android.os.SELinux;
 import android.os.ServiceManager;
 import android.os.SystemClock;
-import android.os.SystemProperties;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.security.KeyStore;
@@ -137,6 +139,7 @@ public class FingerprintService extends SystemService implements IHwBinder.Death
     @GuardedBy("this")
     private IBiometricsFingerprint mDaemon;
     private IStatusBarService mStatusBarService;
+    private final IActivityManager mActivityManager;
     private final PowerManager mPowerManager;
     private final AlarmManager mAlarmManager;
     private final UserManager mUserManager;
@@ -215,6 +218,30 @@ public class FingerprintService extends SystemService implements IHwBinder.Death
         }
     };
 
+    private final TaskStackListener mTaskStackListener = new TaskStackListener() {
+        @Override
+        public void onTaskStackChanged() {
+            try {
+                if (!(mCurrentClient instanceof AuthenticationClient)) {
+                    return;
+                }
+                if (isKeyguard(mCurrentClient.getOwnerString())) {
+                    return; // Keyguard is always allowed
+                }
+                List<ActivityManager.RunningTaskInfo> runningTasks = mActivityManager.getTasks(1);
+                if (!runningTasks.isEmpty()) {
+                    if (runningTasks.get(0).topActivity.getPackageName()
+                            != mCurrentClient.getOwnerString()) {
+                        mCurrentClient.stop(false /* initiatedByClient */);
+                        Slog.e(TAG, "Stopping background authentication");
+                    }
+                }
+            } catch (RemoteException e) {
+                Slog.e(TAG, "Unable to get running tasks", e);
+            }
+        }
+    };
+
     public FingerprintService(Context context) {
         super(context);
         mContext = context;
@@ -230,6 +257,8 @@ public class FingerprintService extends SystemService implements IHwBinder.Death
         mFailedAttempts = new SparseIntArray();
         mStatusBarService = IStatusBarService.Stub.asInterface(
                 ServiceManager.getService(Context.STATUS_BAR_SERVICE));
+        mActivityManager = ((ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE))
+                .getService();
     }
 
     @Override
@@ -749,7 +778,11 @@ public class FingerprintService extends SystemService implements IHwBinder.Death
      */
     private boolean canUseFingerprint(String opPackageName, boolean requireForeground, int uid,
             int pid, int userId) {
-        checkPermission(USE_FINGERPRINT);
+        if (getContext().checkCallingPermission(USE_FINGERPRINT)
+                != PackageManager.PERMISSION_GRANTED) {
+            checkPermission(USE_BIOMETRIC);
+        }
+
         if (isKeyguard(opPackageName)) {
             return true; // Keyguard is always allowed
         }
@@ -816,7 +849,7 @@ public class FingerprintService extends SystemService implements IHwBinder.Death
 
     private void startAuthentication(IBinder token, long opId, int callingUserId, int groupId,
                 IFingerprintServiceReceiver receiver, int flags, boolean restricted,
-                String opPackageName, Bundle bundle, IFingerprintDialogReceiver dialogReceiver) {
+                String opPackageName, Bundle bundle, IBiometricDialogReceiver dialogReceiver) {
         updateActiveGroup(groupId, opPackageName);
 
         if (DEBUG) Slog.v(TAG, "startAuthentication(" + opPackageName + ")");
@@ -824,6 +857,24 @@ public class FingerprintService extends SystemService implements IHwBinder.Death
         AuthenticationClient client = new AuthenticationClient(getContext(), mHalDeviceId, token,
                 receiver, mCurrentUserId, groupId, opId, restricted, opPackageName, bundle,
                 dialogReceiver, mStatusBarService) {
+            @Override
+            public void onStart() {
+                try {
+                    mActivityManager.registerTaskStackListener(mTaskStackListener);
+                } catch (RemoteException e) {
+                    Slog.e(TAG, "Could not register task stack listener", e);
+                }
+            }
+
+            @Override
+            public void onStop() {
+                try {
+                    mActivityManager.unregisterTaskStackListener(mTaskStackListener);
+                } catch (RemoteException e) {
+                    Slog.e(TAG, "Could not unregister task stack listener", e);
+                }
+            }
+
             @Override
             public int handleFailedAttempt() {
                 final int currentUser = ActivityManager.getCurrentUser();
@@ -915,7 +966,7 @@ public class FingerprintService extends SystemService implements IHwBinder.Death
         notifyLockoutResetMonitors();
     }
 
-    private class FingerprintServiceLockoutResetMonitor {
+    private class FingerprintServiceLockoutResetMonitor implements IBinder.DeathRecipient {
 
         private static final long WAKELOCK_TIMEOUT_MS = 2000;
         private final IFingerprintServiceLockoutResetCallback mCallback;
@@ -926,6 +977,11 @@ public class FingerprintService extends SystemService implements IHwBinder.Death
             mCallback = callback;
             mWakeLock = mPowerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,
                     "lockout reset callback");
+            try {
+                mCallback.asBinder().linkToDeath(FingerprintServiceLockoutResetMonitor.this, 0);
+            } catch (RemoteException e) {
+                Slog.w(TAG, "caught remote exception in linkToDeath", e);
+            }
         }
 
         public void sendLockoutReset() {
@@ -936,9 +992,7 @@ public class FingerprintService extends SystemService implements IHwBinder.Death
 
                         @Override
                         public void sendResult(Bundle data) throws RemoteException {
-                            if (mWakeLock.isHeld()) {
-                                mWakeLock.release();
-                            }
+                            releaseWakelock();
                         }
                     });
                 } catch (DeadObjectException e) {
@@ -946,6 +1000,7 @@ public class FingerprintService extends SystemService implements IHwBinder.Death
                     mHandler.post(mRemoveCallbackRunnable);
                 } catch (RemoteException e) {
                     Slog.w(TAG, "Failed to invoke onLockoutReset: ", e);
+                    releaseWakelock();
                 }
             }
         }
@@ -953,12 +1008,22 @@ public class FingerprintService extends SystemService implements IHwBinder.Death
         private final Runnable mRemoveCallbackRunnable = new Runnable() {
             @Override
             public void run() {
-                if (mWakeLock.isHeld()) {
-                    mWakeLock.release();
-                }
+                releaseWakelock();
                 removeLockoutResetCallback(FingerprintServiceLockoutResetMonitor.this);
             }
         };
+
+        @Override
+        public void binderDied() {
+            Slog.e(TAG, "Lockout reset callback binder died");
+            mHandler.post(mRemoveCallbackRunnable);
+        }
+
+        private void releaseWakelock() {
+            if (mWakeLock.isHeld()) {
+                mWakeLock.release();
+            }
+        }
     }
 
     private IBiometricsFingerprintClientCallback mDaemonCallback =
@@ -1095,7 +1160,7 @@ public class FingerprintService extends SystemService implements IHwBinder.Death
         public void authenticate(final IBinder token, final long opId, final int groupId,
                 final IFingerprintServiceReceiver receiver, final int flags,
                 final String opPackageName, final Bundle bundle,
-                final IFingerprintDialogReceiver dialogReceiver) {
+                final IBiometricDialogReceiver dialogReceiver) {
             final int callingUid = Binder.getCallingUid();
             final int callingPid = Binder.getCallingPid();
             final int callingUserId = UserHandle.getCallingUserId();
@@ -1405,6 +1470,8 @@ public class FingerprintService extends SystemService implements IHwBinder.Death
             proto.end(userToken);
         }
         proto.flush();
+        mPerformanceMap.clear();
+        mCryptoPerformanceMap.clear();
     }
 
     @Override
@@ -1422,10 +1489,7 @@ public class FingerprintService extends SystemService implements IHwBinder.Death
                 userId = getUserOrWorkProfileId(clientPackage, userId);
                 if (userId != mCurrentUserId) {
                     File baseDir;
-                    if (Build.VERSION.FIRST_SDK_INT <= Build.VERSION_CODES.O_MR1
-                            && !SystemProperties.getBoolean(
-                                "ro.treble.supports_vendor_data", false)) {
-                        // TODO(b/72405644) remove the override when possible.
+                    if (Build.VERSION.FIRST_SDK_INT <= Build.VERSION_CODES.O_MR1) {
                         baseDir = Environment.getUserSystemDirectory(userId);
                     } else {
                         baseDir = Environment.getDataVendorDeDirectory(userId);

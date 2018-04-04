@@ -26,6 +26,7 @@ import android.content.pm.PackageManager.ComponentInfoFlags;
 import android.content.pm.PackageManager.PackageInfoFlags;
 import android.content.pm.PackageManager.ResolveInfoFlags;
 import android.os.Bundle;
+import android.os.PersistableBundle;
 import android.util.SparseArray;
 
 import java.lang.annotation.Retention;
@@ -43,12 +44,14 @@ public abstract class PackageManagerInternal {
     public static final int PACKAGE_INSTALLER = 2;
     public static final int PACKAGE_VERIFIER = 3;
     public static final int PACKAGE_BROWSER = 4;
+    public static final int PACKAGE_SYSTEM_TEXT_CLASSIFIER = 5;
     @IntDef(value = {
         PACKAGE_SYSTEM,
         PACKAGE_SETUP_WIZARD,
         PACKAGE_INSTALLER,
         PACKAGE_VERIFIER,
         PACKAGE_BROWSER,
+        PACKAGE_SYSTEM_TEXT_CLASSIFIER,
     })
     @Retention(RetentionPolicy.SOURCE)
     public @interface KnownPackage {}
@@ -186,6 +189,22 @@ public abstract class PackageManagerInternal {
             @PackageInfoFlags int flags, int filterCallingUid, int userId);
 
     /**
+     * Retrieve launcher extras for a suspended package provided to the system in
+     * {@link PackageManager#setPackagesSuspended(String[], boolean, PersistableBundle,
+     * PersistableBundle, String)}
+     *
+     * @param packageName The package for which to return launcher extras.
+     * @param userId The user for which to check,
+     * @return The launcher extras.
+     *
+     * @see PackageManager#setPackagesSuspended(String[], boolean, PersistableBundle,
+     * PersistableBundle, String)
+     * @see PackageManager#isPackageSuspended()
+     */
+    public abstract Bundle getSuspendedPackageLauncherExtras(String packageName,
+            int userId);
+
+    /**
      * Do a straight uid lookup for the given package/application in the given user.
      * @see PackageManager#getPackageUidAsUser(String, int, int)
      * @return The app's uid, or < 0 if the package was not found in that user
@@ -232,6 +251,11 @@ public abstract class PackageManagerInternal {
      */
     public abstract ComponentName getHomeActivitiesAsUser(List<ResolveInfo> allHomeCandidates,
             int userId);
+
+    /**
+     * @return The default home activity component name.
+     */
+    public abstract ComponentName getDefaultHomeActivity(int userId);
 
     /**
      * Called by DeviceOwnerManagerService to set the package names of device owner and profile
@@ -444,6 +468,9 @@ public abstract class PackageManagerInternal {
     /** Whether the binder caller can access instant apps. */
     public abstract boolean canAccessInstantApps(int callingUid, int userId);
 
+    /** Whether the binder caller can access the given component. */
+    public abstract boolean canAccessComponent(int callingUid, ComponentName component, int userId);
+
     /**
      * Returns {@code true} if a given package has instant application meta-data.
      * Otherwise, returns {@code false}. Meta-data is state (eg. cookie, app icon, etc)
@@ -537,4 +564,18 @@ public abstract class PackageManagerInternal {
     /** Updates the flags for the given permission. */
     public abstract void updatePermissionFlagsTEMP(@NonNull String permName,
             @NonNull String packageName, int flagMask, int flagValues, int userId);
+
+    /**
+     * Returns true if it's still safe to restore data backed up from this app's version
+     * that was signed with restoringFromSigHash.
+     */
+    public abstract boolean isDataRestoreSafe(@NonNull byte[] restoringFromSigHash,
+            @NonNull String packageName);
+
+    /**
+     * Returns true if it's still safe to restore data backed up from this app's version
+     * that was signed with restoringFromSig.
+     */
+    public abstract boolean isDataRestoreSafe(@NonNull Signature restoringFromSig,
+            @NonNull String packageName);
 }

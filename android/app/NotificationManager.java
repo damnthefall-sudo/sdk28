@@ -24,6 +24,7 @@ import android.annotation.TestApi;
 import android.app.Notification.Builder;
 import android.content.ComponentName;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.ParceledListSlice;
 import android.graphics.drawable.Icon;
 import android.net.Uri;
@@ -98,7 +99,7 @@ public class NotificationManager {
      * This broadcast is only sent to the app whose block state has changed.
      *
      * Input: nothing
-     * Output: nothing
+     * Output: {@link #EXTRA_BLOCKED_STATE}
      */
     @SdkConstant(SdkConstant.SdkConstantType.BROADCAST_INTENT_ACTION)
     public static final String ACTION_APP_BLOCK_STATE_CHANGED =
@@ -113,24 +114,31 @@ public class NotificationManager {
      * This broadcast is only sent to the app that owns the channel that has changed.
      *
      * Input: nothing
-     * Output: {@link #EXTRA_BLOCK_STATE_CHANGED_ID}
+     * Output: {@link #EXTRA_NOTIFICATION_CHANNEL_ID}
+     * Output: {@link #EXTRA_BLOCKED_STATE}
      */
     @SdkConstant(SdkConstant.SdkConstantType.BROADCAST_INTENT_ACTION)
     public static final String ACTION_NOTIFICATION_CHANNEL_BLOCK_STATE_CHANGED =
             "android.app.action.NOTIFICATION_CHANNEL_BLOCK_STATE_CHANGED";
 
     /**
-     * Extra for {@link #ACTION_NOTIFICATION_CHANNEL_BLOCK_STATE_CHANGED} or
-     * {@link #ACTION_NOTIFICATION_CHANNEL_GROUP_BLOCK_STATE_CHANGED} containing the id of the
-     * object which has a new blocked state.
+     * Extra for {@link #ACTION_NOTIFICATION_CHANNEL_BLOCK_STATE_CHANGED} containing the id of the
+     * {@link NotificationChannel} which has a new blocked state.
      *
-     * The value will be the {@link NotificationChannel#getId()} of the channel for
-     * {@link #ACTION_NOTIFICATION_CHANNEL_BLOCK_STATE_CHANGED} and
-     * the {@link NotificationChannelGroup#getId()} of the group for
-     * {@link #ACTION_NOTIFICATION_CHANNEL_GROUP_BLOCK_STATE_CHANGED}.
+     * The value will be the {@link NotificationChannel#getId()} of the channel.
      */
-    public static final String EXTRA_BLOCK_STATE_CHANGED_ID =
-            "android.app.extra.BLOCK_STATE_CHANGED_ID";
+    public static final String EXTRA_NOTIFICATION_CHANNEL_ID =
+            "android.app.extra.NOTIFICATION_CHANNEL_ID";
+
+    /**
+     * Extra for {@link #ACTION_NOTIFICATION_CHANNEL_GROUP_BLOCK_STATE_CHANGED} containing the id
+     * of the {@link NotificationChannelGroup} which has a new blocked state.
+     *
+     * The value will be the {@link NotificationChannelGroup#getId()} of the group.
+     */
+    public static final String EXTRA_NOTIFICATION_CHANNEL_GROUP_ID =
+            "android.app.extra.NOTIFICATION_CHANNEL_GROUP_ID";
+
 
     /**
      * Extra for {@link #ACTION_NOTIFICATION_CHANNEL_BLOCK_STATE_CHANGED} or
@@ -142,7 +150,6 @@ public class NotificationManager {
      */
     public static final String EXTRA_BLOCKED_STATE = "android.app.extra.BLOCKED_STATE";
 
-
     /**
      * Intent that is broadcast when a {@link NotificationChannelGroup} is
      * {@link NotificationChannelGroup#isBlocked() blocked} or unblocked.
@@ -150,7 +157,8 @@ public class NotificationManager {
      * This broadcast is only sent to the app that owns the channel group that has changed.
      *
      * Input: nothing
-     * Output: {@link #EXTRA_BLOCK_STATE_CHANGED_ID}
+     * Output: {@link #EXTRA_NOTIFICATION_CHANNEL_GROUP_ID}
+     * Output: {@link #EXTRA_BLOCKED_STATE}
      */
     @SdkConstant(SdkConstant.SdkConstantType.BROADCAST_INTENT_ACTION)
     public static final String ACTION_NOTIFICATION_CHANNEL_GROUP_BLOCK_STATE_CHANGED =
@@ -343,6 +351,14 @@ public class NotificationManager {
      * the same tag and id has already been posted by your application and has not yet been
      * canceled, it will be replaced by the updated information.
      *
+     * All {@link android.service.notification.NotificationListenerService listener services} will
+     * be granted {@link Intent#FLAG_GRANT_READ_URI_PERMISSION} access to any {@link Uri uris}
+     * provided on this notification or the
+     * {@link NotificationChannel} this notification is posted to using
+     * {@link Context#grantUriPermission(String, Uri, int)}. Permission will be revoked when the
+     * notification is canceled, or you can revoke permissions with
+     * {@link Context#revokeUriPermission(Uri, int)}.
+     *
      * @param tag A string identifier for this notification.  May be {@code null}.
      * @param id An identifier for this notification.  The pair (tag, id) must be unique
      *        within your application.
@@ -351,7 +367,7 @@ public class NotificationManager {
      */
     public void notify(String tag, int id, Notification notification)
     {
-        notifyAsUser(tag, id, notification, new UserHandle(UserHandle.myUserId()));
+        notifyAsUser(tag, id, notification, mContext.getUser());
     }
 
     /**
@@ -363,11 +379,13 @@ public class NotificationManager {
         String pkg = mContext.getPackageName();
         // Fix the notification as best we can.
         Notification.addFieldsFromContext(mContext, notification);
+
         if (notification.sound != null) {
             notification.sound = notification.sound.getCanonicalUri();
             if (StrictMode.vmFileUriExposureEnabled()) {
                 notification.sound.checkFileUriExposed("Notification.sound");
             }
+
         }
         fixLegacySmallIcon(notification, pkg);
         if (mContext.getApplicationInfo().targetSdkVersion > Build.VERSION_CODES.LOLLIPOP_MR1) {
@@ -378,6 +396,7 @@ public class NotificationManager {
         }
         if (localLOGV) Log.v(TAG, pkg + ": notify(" + id + ", " + notification + ")");
         notification.reduceImageSizes(mContext);
+
         ActivityManager am = (ActivityManager) mContext.getSystemService(Context.ACTIVITY_SERVICE);
         boolean isLowRam = am.isLowRamDevice();
         final Notification copy = Builder.maybeCloneStrippedForDelivery(notification, isLowRam);
@@ -412,7 +431,7 @@ public class NotificationManager {
      */
     public void cancel(String tag, int id)
     {
-        cancelAsUser(tag, id, new UserHandle(UserHandle.myUserId()));
+        cancelAsUser(tag, id, mContext.getUser());
     }
 
     /**
@@ -440,7 +459,7 @@ public class NotificationManager {
         String pkg = mContext.getPackageName();
         if (localLOGV) Log.v(TAG, pkg + ": cancelAll()");
         try {
-            service.cancelAllNotifications(pkg, UserHandle.myUserId());
+            service.cancelAllNotifications(pkg, mContext.getUserId());
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
@@ -1012,12 +1031,18 @@ public class NotificationManager {
         public static final int PRIORITY_CATEGORY_REPEAT_CALLERS = 1 << 4;
         /** Alarms are prioritized */
         public static final int PRIORITY_CATEGORY_ALARMS = 1 << 5;
-        /** Media, system, game (catch-all for non-never suppressible sounds) are prioritized */
-        public static final int PRIORITY_CATEGORY_MEDIA_SYSTEM_OTHER = 1 << 6;
+        /** Media, game, voice navigation are prioritized */
+        public static final int PRIORITY_CATEGORY_MEDIA = 1 << 6;
+        /**System (catch-all for non-never suppressible sounds) are prioritized */
+        public static final int PRIORITY_CATEGORY_SYSTEM = 1 << 7;
 
-        private static final int[] ALL_PRIORITY_CATEGORIES = {
+        /**
+         * @hide
+         */
+        public static final int[] ALL_PRIORITY_CATEGORIES = {
             PRIORITY_CATEGORY_ALARMS,
-            PRIORITY_CATEGORY_MEDIA_SYSTEM_OTHER,
+            PRIORITY_CATEGORY_MEDIA,
+            PRIORITY_CATEGORY_SYSTEM,
             PRIORITY_CATEGORY_REMINDERS,
             PRIORITY_CATEGORY_EVENTS,
             PRIORITY_CATEGORY_MESSAGES,
@@ -1047,20 +1072,77 @@ public class NotificationManager {
          * @hide
          */
         public static final int SUPPRESSED_EFFECTS_UNSET = -1;
+
         /**
          * Whether notifications suppressed by DND should not interrupt visually (e.g. with
          * notification lights or by turning the screen on) when the screen is off.
+         *
+         * @deprecated use {@link #SUPPRESSED_EFFECT_FULL_SCREEN_INTENT} and
+         * {@link #SUPPRESSED_EFFECT_AMBIENT} and {@link #SUPPRESSED_EFFECT_LIGHTS} individually.
          */
+        @Deprecated
         public static final int SUPPRESSED_EFFECT_SCREEN_OFF = 1 << 0;
         /**
          * Whether notifications suppressed by DND should not interrupt visually when the screen
          * is on (e.g. by peeking onto the screen).
+         *
+         * @deprecated use {@link #SUPPRESSED_EFFECT_PEEK}.
          */
+        @Deprecated
         public static final int SUPPRESSED_EFFECT_SCREEN_ON = 1 << 1;
+
+        /**
+         * Whether {@link Notification#fullScreenIntent full screen intents} from
+         * notifications intercepted by DND are blocked.
+         */
+        public static final int SUPPRESSED_EFFECT_FULL_SCREEN_INTENT = 1 << 2;
+
+        /**
+         * Whether {@link NotificationChannel#shouldShowLights() notification lights} from
+         * notifications intercepted by DND are blocked.
+         */
+        public static final int SUPPRESSED_EFFECT_LIGHTS = 1 << 3;
+
+        /**
+         * Whether notifications intercepted by DND are prevented from peeking.
+         */
+        public static final int SUPPRESSED_EFFECT_PEEK = 1 << 4;
+
+        /**
+         * Whether notifications intercepted by DND are prevented from appearing in the status bar,
+         * on devices that support status bars.
+         */
+        public static final int SUPPRESSED_EFFECT_STATUS_BAR = 1 << 5;
+
+        /**
+         * Whether {@link NotificationChannel#canShowBadge() badges} from
+         * notifications intercepted by DND are blocked on devices that support badging.
+         */
+        public static final int SUPPRESSED_EFFECT_BADGE = 1 << 6;
+
+        /**
+         * Whether notification intercepted by DND are prevented from appearing on ambient displays
+         * on devices that support ambient display.
+         */
+        public static final int SUPPRESSED_EFFECT_AMBIENT = 1 << 7;
+
+        /**
+         * Whether notification intercepted by DND are prevented from appearing in notification
+         * list views like the notification shade or lockscreen on devices that support those
+         * views.
+         */
+        public static final int SUPPRESSED_EFFECT_NOTIFICATION_LIST = 1 << 8;
 
         private static final int[] ALL_SUPPRESSED_EFFECTS = {
                 SUPPRESSED_EFFECT_SCREEN_OFF,
                 SUPPRESSED_EFFECT_SCREEN_ON,
+                SUPPRESSED_EFFECT_FULL_SCREEN_INTENT,
+                SUPPRESSED_EFFECT_LIGHTS,
+                SUPPRESSED_EFFECT_PEEK,
+                SUPPRESSED_EFFECT_STATUS_BAR,
+                SUPPRESSED_EFFECT_BADGE,
+                SUPPRESSED_EFFECT_AMBIENT,
+                SUPPRESSED_EFFECT_NOTIFICATION_LIST
         };
 
         /**
@@ -1071,6 +1153,12 @@ public class NotificationManager {
 
         /**
          * Constructs a policy for Do Not Disturb priority mode behavior.
+         *
+         * <p>
+         *     Apps that target API levels below {@link Build.VERSION_CODES#P} cannot
+         *     change user-designated values to allow or disallow
+         *     {@link Policy#PRIORITY_CATEGORY_ALARMS}, {@link Policy#PRIORITY_CATEGORY_SYSTEM}, and
+         *     {@link Policy#PRIORITY_CATEGORY_MEDIA} from bypassing dnd.
          *
          * @param priorityCategories bitmask of categories of notifications that can bypass DND.
          * @param priorityCallSenders which callers can bypass DND.
@@ -1083,6 +1171,26 @@ public class NotificationManager {
 
         /**
          * Constructs a policy for Do Not Disturb priority mode behavior.
+         *
+         * <p>
+         *     Apps that target API levels below {@link Build.VERSION_CODES#P} cannot
+         *     change user-designated values to allow or disallow
+         *     {@link Policy#PRIORITY_CATEGORY_ALARMS}, {@link Policy#PRIORITY_CATEGORY_SYSTEM}, and
+         *     {@link Policy#PRIORITY_CATEGORY_MEDIA} from bypassing dnd.
+         * <p>
+         *     Additionally, apps that target API levels below {@link Build.VERSION_CODES#P} can
+         *     only modify the {@link #SUPPRESSED_EFFECT_SCREEN_ON} and
+         *     {@link #SUPPRESSED_EFFECT_SCREEN_OFF} bits of the suppressed visual effects field.
+         *     All other suppressed effects will be ignored and reconstituted from the screen on
+         *     and screen off values.
+         * <p>
+         *     Apps that target {@link Build.VERSION_CODES#P} or above can set any
+         *     suppressed visual effects. However, if any suppressed effects >
+         *     {@link #SUPPRESSED_EFFECT_SCREEN_ON} are set, {@link #SUPPRESSED_EFFECT_SCREEN_ON}
+         *     and {@link #SUPPRESSED_EFFECT_SCREEN_OFF} will be ignored and reconstituted from
+         *     the more specific suppressed visual effect bits. Apps should migrate to targeting
+         *     specific effects instead of the deprecated {@link #SUPPRESSED_EFFECT_SCREEN_ON} and
+         *     {@link #SUPPRESSED_EFFECT_SCREEN_OFF} effects.
          *
          * @param priorityCategories bitmask of categories of notifications that can bypass DND.
          * @param priorityCallSenders which callers can bypass DND.
@@ -1165,6 +1273,30 @@ public class NotificationManager {
             }
         }
 
+        /**
+         * @hide
+         */
+        public static int getAllSuppressedVisualEffects() {
+            int effects = 0;
+            for (int i = 0; i < ALL_SUPPRESSED_EFFECTS.length; i++) {
+                effects |= ALL_SUPPRESSED_EFFECTS[i];
+            }
+            return effects;
+        }
+
+        /**
+         * @hide
+         */
+        public static boolean areAllVisualEffectsSuppressed(int effects) {
+            for (int i = 0; i < ALL_SUPPRESSED_EFFECTS.length; i++) {
+                final int effect = ALL_SUPPRESSED_EFFECTS[i];
+                if ((effects & effect) == 0) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         public static String suppressedEffectsToString(int effects) {
             if (effects <= 0) return "";
             final StringBuilder sb = new StringBuilder();
@@ -1203,9 +1335,26 @@ public class NotificationManager {
 
         private static String effectToString(int effect) {
             switch (effect) {
-                case SUPPRESSED_EFFECT_SCREEN_OFF: return "SUPPRESSED_EFFECT_SCREEN_OFF";
-                case SUPPRESSED_EFFECT_SCREEN_ON: return "SUPPRESSED_EFFECT_SCREEN_ON";
-                case SUPPRESSED_EFFECTS_UNSET: return "SUPPRESSED_EFFECTS_UNSET";
+                case SUPPRESSED_EFFECT_FULL_SCREEN_INTENT:
+                    return "SUPPRESSED_EFFECT_FULL_SCREEN_INTENT";
+                case SUPPRESSED_EFFECT_LIGHTS:
+                    return "SUPPRESSED_EFFECT_LIGHTS";
+                case SUPPRESSED_EFFECT_PEEK:
+                    return "SUPPRESSED_EFFECT_PEEK";
+                case SUPPRESSED_EFFECT_STATUS_BAR:
+                    return "SUPPRESSED_EFFECT_STATUS_BAR";
+                case SUPPRESSED_EFFECT_BADGE:
+                    return "SUPPRESSED_EFFECT_BADGE";
+                case SUPPRESSED_EFFECT_AMBIENT:
+                    return "SUPPRESSED_EFFECT_AMBIENT";
+                case SUPPRESSED_EFFECT_NOTIFICATION_LIST:
+                    return "SUPPRESSED_EFFECT_NOTIFICATION_LIST";
+                case SUPPRESSED_EFFECT_SCREEN_OFF:
+                    return "SUPPRESSED_EFFECT_SCREEN_OFF";
+                case SUPPRESSED_EFFECT_SCREEN_ON:
+                    return "SUPPRESSED_EFFECT_SCREEN_ON";
+                case SUPPRESSED_EFFECTS_UNSET:
+                    return "SUPPRESSED_EFFECTS_UNSET";
                 default: return "UNKNOWN_" + effect;
             }
         }
@@ -1218,8 +1367,8 @@ public class NotificationManager {
                 case PRIORITY_CATEGORY_CALLS: return "PRIORITY_CATEGORY_CALLS";
                 case PRIORITY_CATEGORY_REPEAT_CALLERS: return "PRIORITY_CATEGORY_REPEAT_CALLERS";
                 case PRIORITY_CATEGORY_ALARMS: return "PRIORITY_CATEGORY_ALARMS";
-                case PRIORITY_CATEGORY_MEDIA_SYSTEM_OTHER:
-                    return "PRIORITY_CATEGORY_MEDIA_SYSTEM_OTHER";
+                case PRIORITY_CATEGORY_MEDIA: return "PRIORITY_CATEGORY_MEDIA";
+                case PRIORITY_CATEGORY_SYSTEM: return "PRIORITY_CATEGORY_SYSTEM";
                 default: return "PRIORITY_CATEGORY_UNKNOWN_" + priorityCategory;
             }
         }
@@ -1264,7 +1413,7 @@ public class NotificationManager {
         final String pkg = mContext.getPackageName();
         try {
             final ParceledListSlice<StatusBarNotification> parceledList
-                    = service.getAppActiveNotifications(pkg, UserHandle.myUserId());
+                    = service.getAppActiveNotifications(pkg, mContext.getUserId());
             final List<StatusBarNotification> list = parceledList.getList();
             return list.toArray(new StatusBarNotification[list.size()]);
         } catch (RemoteException e) {

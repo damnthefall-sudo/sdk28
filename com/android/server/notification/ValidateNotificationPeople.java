@@ -16,6 +16,7 @@
 
 package com.android.server.notification;
 
+import android.annotation.Nullable;
 import android.app.Notification;
 import android.content.Context;
 import android.content.pm.PackageManager;
@@ -44,8 +45,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
-
-import android.os.SystemClock;
 
 /**
  * This {@link NotificationSignalExtractor} attempts to validate
@@ -144,6 +143,11 @@ public class ValidateNotificationPeople implements NotificationSignalExtractor {
         // ignore: config has no relevant information yet.
     }
 
+    @Override
+    public void setZenHelper(ZenModeHelper helper) {
+
+    }
+
     /**
      * @param extras extras of the notification with EXTRA_PEOPLE populated
      * @param timeoutMs timeout in milliseconds to wait for contacts response
@@ -226,7 +230,6 @@ public class ValidateNotificationPeople implements NotificationSignalExtractor {
 
     private PeopleRankingReconsideration validatePeople(Context context, String key, Bundle extras,
             List<String> peopleOverride, float[] affinityOut) {
-        long start = SystemClock.elapsedRealtime();
         float affinity = NONE;
         if (extras == null) {
             return null;
@@ -234,7 +237,7 @@ public class ValidateNotificationPeople implements NotificationSignalExtractor {
         final Set<String> people = new ArraySet<>(peopleOverride);
         final String[] notificationPeople = getExtraPeople(extras);
         if (notificationPeople != null ) {
-            people.addAll(Arrays.asList(getExtraPeople(extras)));
+            people.addAll(Arrays.asList(notificationPeople));
         }
 
         if (VERBOSE) Slog.i(TAG, "Validating: " + key + " for " + context.getUserId());
@@ -278,7 +281,31 @@ public class ValidateNotificationPeople implements NotificationSignalExtractor {
 
     // VisibleForTesting
     public static String[] getExtraPeople(Bundle extras) {
-        Object people = extras.get(Notification.EXTRA_PEOPLE_LIST);
+        String[] peopleList = getExtraPeopleForKey(extras, Notification.EXTRA_PEOPLE_LIST);
+        String[] legacyPeople = getExtraPeopleForKey(extras, Notification.EXTRA_PEOPLE);
+        return combineLists(legacyPeople, peopleList);
+    }
+
+    private static String[] combineLists(String[] first, String[] second) {
+        if (first == null) {
+            return second;
+        }
+        if (second == null) {
+            return first;
+        }
+        ArraySet<String> people = new ArraySet<>(first.length + second.length);
+        for (String person: first) {
+            people.add(person);
+        }
+        for (String person: second) {
+            people.add(person);
+        }
+        return (String[]) people.toArray();
+    }
+
+    @Nullable
+    private static String[] getExtraPeopleForKey(Bundle extras, String key) {
+        Object people = extras.get(key);
         if (people instanceof String[]) {
             return (String[]) people;
         }
@@ -441,18 +468,20 @@ public class ValidateNotificationPeople implements NotificationSignalExtractor {
         private final LinkedList<String> mPendingLookups;
         private final Context mContext;
 
+        // Amount of time to wait for a result from the contacts db before rechecking affinity.
+        private static final long LOOKUP_TIME = 1000;
         private float mContactAffinity = NONE;
         private NotificationRecord mRecord;
 
-        private PeopleRankingReconsideration(Context context, String key, LinkedList<String> pendingLookups) {
-            super(key);
+        private PeopleRankingReconsideration(Context context, String key,
+                LinkedList<String> pendingLookups) {
+            super(key, LOOKUP_TIME);
             mContext = context;
             mPendingLookups = pendingLookups;
         }
 
         @Override
         public void work() {
-            long start = SystemClock.elapsedRealtime();
             if (VERBOSE) Slog.i(TAG, "Executing: validation for: " + mKey);
             long timeStartMs = System.currentTimeMillis();
             for (final String handle: mPendingLookups) {
@@ -478,7 +507,9 @@ public class ValidateNotificationPeople implements NotificationSignalExtractor {
                         final String cacheKey = getCacheKey(mContext.getUserId(), handle);
                         mPeopleCache.put(cacheKey, lookupResult);
                     }
-                    if (DEBUG) Slog.d(TAG, "lookup contactAffinity is " + lookupResult.getAffinity());
+                    if (DEBUG) {
+                        Slog.d(TAG, "lookup contactAffinity is " + lookupResult.getAffinity());
+                    }
                     mContactAffinity = Math.max(mContactAffinity, lookupResult.getAffinity());
                 } else {
                     if (DEBUG) Slog.d(TAG, "lookupResult is null");

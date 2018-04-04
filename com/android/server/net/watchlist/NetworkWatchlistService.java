@@ -23,8 +23,10 @@ import android.net.INetdEventCallback;
 import android.net.metrics.IpConnectivityLog;
 import android.os.Binder;
 import android.os.Process;
+import android.os.ResultReceiver;
 import android.os.RemoteException;
 import android.os.ServiceManager;
+import android.os.ShellCallback;
 import android.os.SystemProperties;
 import android.provider.Settings;
 import android.text.TextUtils;
@@ -37,6 +39,7 @@ import com.android.internal.util.DumpUtils;
 import com.android.internal.net.INetworkWatchlistManager;
 import com.android.server.ServiceThread;
 import com.android.server.SystemService;
+import com.android.server.net.BaseNetdEventCallback;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
@@ -61,7 +64,7 @@ public class NetworkWatchlistService extends INetworkWatchlistManager.Stub {
         @Override
         public void onStart() {
             if (Settings.Global.getInt(getContext().getContentResolver(),
-                    Settings.Global.NETWORK_WATCHLIST_ENABLED, 0) == 0) {
+                    Settings.Global.NETWORK_WATCHLIST_ENABLED, 1) == 0) {
                 // Watchlist service is disabled
                 Slog.i(TAG, "Network Watchlist service is disabled");
                 return;
@@ -74,12 +77,13 @@ public class NetworkWatchlistService extends INetworkWatchlistManager.Stub {
         public void onBootPhase(int phase) {
             if (phase == SystemService.PHASE_ACTIVITY_MANAGER_READY) {
                 if (Settings.Global.getInt(getContext().getContentResolver(),
-                        Settings.Global.NETWORK_WATCHLIST_ENABLED, 0) == 0) {
+                        Settings.Global.NETWORK_WATCHLIST_ENABLED, 1) == 0) {
                     // Watchlist service is disabled
                     Slog.i(TAG, "Network Watchlist service is disabled");
                     return;
                 }
                 try {
+                    mService.init();
                     mService.initIpConnectivityMetrics();
                     mService.startWatchlistLogging();
                 } catch (RemoteException e) {
@@ -127,12 +131,16 @@ public class NetworkWatchlistService extends INetworkWatchlistManager.Stub {
         mIpConnectivityMetrics = ipConnectivityMetrics;
     }
 
+    private void init() {
+        mConfig.removeTestModeConfig();
+    }
+
     private void initIpConnectivityMetrics() {
         mIpConnectivityMetrics = (IIpConnectivityMetrics) IIpConnectivityMetrics.Stub.asInterface(
                 ServiceManager.getService(IpConnectivityLog.SERVICE_NAME));
     }
 
-    private final INetdEventCallback mNetdEventCallback = new INetdEventCallback.Stub() {
+    private final INetdEventCallback mNetdEventCallback = new BaseNetdEventCallback() {
         @Override
         public void onDnsEvent(String hostname, String[] ipAddresses, int ipAddressesCount,
                 long timestamp, int uid) {
@@ -150,6 +158,22 @@ public class NetworkWatchlistService extends INetworkWatchlistManager.Stub {
             mNetworkWatchlistHandler.asyncNetworkEvent(null, new String[]{ipAddr}, uid);
         }
     };
+
+    private boolean isCallerShell() {
+        final int callingUid = Binder.getCallingUid();
+        return callingUid == Process.SHELL_UID || callingUid == Process.ROOT_UID;
+    }
+
+    @Override
+    public void onShellCommand(FileDescriptor in, FileDescriptor out, FileDescriptor err,
+            String[] args, ShellCallback callback, ResultReceiver resultReceiver) {
+        if (!isCallerShell()) {
+            Slog.w(TAG, "Only shell is allowed to call network watchlist shell commands");
+            return;
+        }
+        (new NetworkWatchlistShellCommand(this, mContext)).exec(this, in, out, err, args, callback,
+                resultReceiver);
+    }
 
     @VisibleForTesting
     protected boolean startWatchlistLoggingImpl() throws RemoteException {
@@ -236,6 +260,21 @@ public class NetworkWatchlistService extends INetworkWatchlistManager.Stub {
     public void reportWatchlistIfNecessary() {
         // Allow any apps to trigger report event, as we won't run it if it's too early.
         mNetworkWatchlistHandler.reportWatchlistIfNecessary();
+    }
+
+    /**
+     * Force generate watchlist report for testing.
+     *
+     * @param lastReportTime Watchlist report will cotain all records before this time.
+     * @return True if operation success.
+     */
+    public boolean forceReportWatchlistForTest(long lastReportTime) {
+        if (mConfig.isConfigSecure()) {
+            // Should not force generate report under production config.
+            return false;
+        }
+        mNetworkWatchlistHandler.forceReportWatchlistForTest(lastReportTime);
+        return true;
     }
 
     @Override

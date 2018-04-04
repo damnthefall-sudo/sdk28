@@ -177,6 +177,9 @@ public class AndroidKeyStoreSecretKeyFactorySpi extends SecretKeyFactorySpi {
                 && (keymasterSwEnforcedUserAuthenticators == 0);
         boolean userAuthenticationValidWhileOnBody =
                 keyCharacteristics.hwEnforced.getBoolean(KeymasterDefs.KM_TAG_ALLOW_WHILE_ON_BODY);
+        boolean trustedUserPresenceRequred =
+                keyCharacteristics.hwEnforced.getBoolean(
+                    KeymasterDefs.KM_TAG_TRUSTED_USER_PRESENCE_REQUIRED);
 
         boolean invalidatedByBiometricEnrollment = false;
         if (keymasterSwEnforcedUserAuthenticators == KeymasterDefs.HW_AUTH_FINGERPRINT
@@ -186,6 +189,8 @@ public class AndroidKeyStoreSecretKeyFactorySpi extends SecretKeyFactorySpi {
                     && !keymasterSecureUserIds.isEmpty()
                     && !keymasterSecureUserIds.contains(getGateKeeperSecureUserId());
         }
+
+        boolean userConfirmationRequired = keyCharacteristics.hwEnforced.getBoolean(KeymasterDefs.KM_TAG_TRUSTED_CONFIRMATION_REQUIRED);
 
         return new KeyInfo(entryAlias,
                 insideSecureHardware,
@@ -203,7 +208,9 @@ public class AndroidKeyStoreSecretKeyFactorySpi extends SecretKeyFactorySpi {
                 (int) userAuthenticationValidityDurationSeconds,
                 userAuthenticationRequirementEnforcedBySecureHardware,
                 userAuthenticationValidWhileOnBody,
-                invalidatedByBiometricEnrollment);
+                trustedUserPresenceRequred,
+                invalidatedByBiometricEnrollment,
+                userConfirmationRequired);
     }
 
     private static BigInteger getGateKeeperSecureUserId() throws ProviderException {

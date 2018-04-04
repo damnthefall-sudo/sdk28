@@ -34,9 +34,13 @@ import android.util.Log;
 import android.view.SurfaceControl;
 
 import com.android.systemui.OverviewProxyService.OverviewProxyListener;
+import com.android.systemui.recents.events.EventBus;
+import com.android.systemui.recents.events.activity.DockedFirstAnimationFrameEvent;
+import com.android.systemui.recents.misc.SystemServicesProxy;
 import com.android.systemui.shared.recents.IOverviewProxy;
 import com.android.systemui.shared.recents.ISystemUiProxy;
 import com.android.systemui.shared.system.GraphicBufferCompat;
+import com.android.systemui.statusbar.phone.StatusBar;
 import com.android.systemui.statusbar.policy.CallbackController;
 import com.android.systemui.statusbar.policy.DeviceProvisionedController;
 import com.android.systemui.statusbar.policy.DeviceProvisionedController.DeviceProvisionedListener;
@@ -46,10 +50,15 @@ import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.List;
 
+import static com.android.systemui.shared.system.NavigationBarCompat.FLAG_DISABLE_SWIPE_UP;
+import static com.android.systemui.shared.system.NavigationBarCompat.InteractionType;
+
 /**
  * Class to send information from overview to launcher with a binder.
  */
 public class OverviewProxyService implements CallbackController<OverviewProxyListener>, Dumpable {
+
+    private static final String ACTION_QUICKSTEP = "android.intent.action.QUICKSTEP_SERVICE";
 
     public static final String TAG_OPS = "OverviewProxyService";
     public static final boolean DEBUG_OVERVIEW_PROXY = false;
@@ -58,15 +67,18 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
     private final Context mContext;
     private final Handler mHandler;
     private final Runnable mConnectionRunnable = this::internalConnectToCurrentUser;
-    private final ComponentName mLauncherComponentName;
+    private final ComponentName mRecentsComponentName;
     private final DeviceProvisionedController mDeviceProvisionedController
             = Dependency.get(DeviceProvisionedController.class);
     private final List<OverviewProxyListener> mConnectionCallbacks = new ArrayList<>();
 
     private IOverviewProxy mOverviewProxy;
     private int mConnectionBackoffAttempts;
+    private CharSequence mOnboardingText;
+    private @InteractionType int mInteractionFlags;
 
     private ISystemUiProxy mSysUiProxy = new ISystemUiProxy.Stub() {
+
         public GraphicBufferCompat screenshot(Rect sourceCrop, int width, int height, int minLayer,
                 int maxLayer, boolean useIdentityTransform, int rotation) {
             long token = Binder.clearCallingIdentity();
@@ -78,10 +90,45 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
             }
         }
 
-        public void onRecentsAnimationStarted() {
+        public void startScreenPinning(int taskId) {
             long token = Binder.clearCallingIdentity();
             try {
-                notifyRecentsAnimationStarted();
+                mHandler.post(() -> {
+                    StatusBar statusBar = ((SystemUIApplication) mContext).getComponent(
+                            StatusBar.class);
+                    if (statusBar != null) {
+                        statusBar.showScreenPinningRequest(taskId, false /* allowCancel */);
+                    }
+                });
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        public void onSplitScreenInvoked() {
+            long token = Binder.clearCallingIdentity();
+            try {
+                EventBus.getDefault().post(new DockedFirstAnimationFrameEvent());
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        public void setRecentsOnboardingText(CharSequence text) {
+            mOnboardingText = text;
+        }
+
+        public void setInteractionState(@InteractionType int flags) {
+            long token = Binder.clearCallingIdentity();
+            try {
+                if (mInteractionFlags != flags) {
+                    mInteractionFlags = flags;
+                    mHandler.post(() -> {
+                        for (int i = mConnectionCallbacks.size() - 1; i >= 0; --i) {
+                            mConnectionCallbacks.get(i).onInteractionFlagsChanged(flags);
+                        }
+                    });
+                }
             } finally {
                 Binder.restoreCallingIdentity(token);
             }
@@ -147,17 +194,20 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
         mContext = context;
         mHandler = new Handler();
         mConnectionBackoffAttempts = 0;
-        mLauncherComponentName = ComponentName
-                .unflattenFromString(context.getString(R.string.config_overviewServiceComponent));
-        mDeviceProvisionedController.addCallback(mDeviceProvisionedCallback);
+        mRecentsComponentName = ComponentName.unflattenFromString(context.getString(
+                com.android.internal.R.string.config_recentsComponentName));
 
         // Listen for the package update changes.
-        IntentFilter filter = new IntentFilter(Intent.ACTION_PACKAGE_ADDED);
-        filter.addDataScheme("package");
-        filter.addDataSchemeSpecificPart(mLauncherComponentName.getPackageName(),
-                PatternMatcher.PATTERN_LITERAL);
-        filter.addAction(Intent.ACTION_PACKAGE_CHANGED);
-        mContext.registerReceiver(mLauncherAddedReceiver, filter);
+        if (SystemServicesProxy.getInstance(context)
+                .isSystemUser(mDeviceProvisionedController.getCurrentUser())) {
+            mDeviceProvisionedController.addCallback(mDeviceProvisionedCallback);
+            IntentFilter filter = new IntentFilter(Intent.ACTION_PACKAGE_ADDED);
+            filter.addDataScheme("package");
+            filter.addDataSchemeSpecificPart(mRecentsComponentName.getPackageName(),
+                    PatternMatcher.PATTERN_LITERAL);
+            filter.addAction(Intent.ACTION_PACKAGE_CHANGED);
+            mContext.registerReceiver(mLauncherAddedReceiver, filter);
+        }
     }
 
     public void startConnectionToCurrentUser() {
@@ -176,11 +226,16 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
             return;
         }
         mHandler.removeCallbacks(mConnectionRunnable);
-        Intent launcherServiceIntent = new Intent();
-        launcherServiceIntent.setComponent(mLauncherComponentName);
-        boolean bound = mContext.bindServiceAsUser(launcherServiceIntent,
-                mOverviewServiceConnection, Context.BIND_AUTO_CREATE,
-                UserHandle.getUserHandleForUid(mDeviceProvisionedController.getCurrentUser()));
+        Intent launcherServiceIntent = new Intent(ACTION_QUICKSTEP)
+                .setPackage(mRecentsComponentName.getPackageName());
+        boolean bound = false;
+        try {
+            bound = mContext.bindServiceAsUser(launcherServiceIntent,
+                    mOverviewServiceConnection, Context.BIND_AUTO_CREATE,
+                    UserHandle.of(mDeviceProvisionedController.getCurrentUser()));
+        } catch (SecurityException e) {
+            Log.e(TAG_OPS, "Unable to bind because of security error", e);
+        }
         if (!bound) {
             // Retry after exponential backoff timeout
             final long timeoutMs = (long) Math.scalb(BACKOFF_MILLIS, mConnectionBackoffAttempts);
@@ -200,12 +255,20 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
         mConnectionCallbacks.remove(listener);
     }
 
+    public boolean shouldShowSwipeUpUI() {
+        return getProxy() != null && ((mInteractionFlags & FLAG_DISABLE_SWIPE_UP) == 0);
+    }
+
     public IOverviewProxy getProxy() {
         return mOverviewProxy;
     }
 
-    public ComponentName getLauncherComponent() {
-        return mLauncherComponentName;
+    public CharSequence getOnboardingText() {
+        return mOnboardingText;
+    }
+
+    public int getInteractionFlags() {
+        return mInteractionFlags;
     }
 
     private void disconnectFromLauncherService() {
@@ -223,9 +286,9 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
         }
     }
 
-    private void notifyRecentsAnimationStarted() {
+    public void notifyQuickStepStarted() {
         for (int i = mConnectionCallbacks.size() - 1; i >= 0; --i) {
-            mConnectionCallbacks.get(i).onRecentsAnimationStarted();
+            mConnectionCallbacks.get(i).onQuickStepStarted();
         }
     }
 
@@ -240,6 +303,7 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
 
     public interface OverviewProxyListener {
         default void onConnectionChanged(boolean isConnected) {}
-        default void onRecentsAnimationStarted() {}
+        default void onQuickStepStarted() {}
+        default void onInteractionFlagsChanged(@InteractionType int flags) {}
     }
 }

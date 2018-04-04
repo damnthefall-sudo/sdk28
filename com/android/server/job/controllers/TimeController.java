@@ -18,24 +18,27 @@ package com.android.server.job.controllers;
 
 import static com.android.server.job.JobSchedulerService.sElapsedRealtimeClock;
 
+import android.annotation.Nullable;
 import android.app.AlarmManager;
 import android.app.AlarmManager.OnAlarmListener;
 import android.content.Context;
+import android.os.Process;
 import android.os.UserHandle;
 import android.os.WorkSource;
+import android.util.Log;
 import android.util.Slog;
 import android.util.TimeUtils;
 import android.util.proto.ProtoOutputStream;
 
+import com.android.internal.util.IndentingPrintWriter;
 import com.android.server.job.JobSchedulerService;
-import com.android.server.job.StateChangedListener;
 import com.android.server.job.StateControllerProto;
 
-import java.io.PrintWriter;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.ListIterator;
+import java.util.function.Predicate;
 
 /**
  * This class sets an alarm for the next expiring job, and determines whether a job's minimum
@@ -43,6 +46,8 @@ import java.util.ListIterator;
  */
 public final class TimeController extends StateController {
     private static final String TAG = "JobScheduler.Time";
+    private static final boolean DEBUG = JobSchedulerService.DEBUG
+            || Log.isLoggable(TAG, Log.DEBUG);
 
     /** Deadline alarm tag for logging purposes */
     private final String DEADLINE_TAG = "*job.deadline*";
@@ -52,25 +57,18 @@ public final class TimeController extends StateController {
     private long mNextJobExpiredElapsedMillis;
     private long mNextDelayExpiredElapsedMillis;
 
+    private final boolean mChainedAttributionEnabled;
+
     private AlarmManager mAlarmService = null;
     /** List of tracked jobs, sorted asc. by deadline */
     private final List<JobStatus> mTrackedJobs = new LinkedList<>();
-    /** Singleton. */
-    private static TimeController mSingleton;
 
-    public static synchronized TimeController get(JobSchedulerService jms) {
-        if (mSingleton == null) {
-            mSingleton = new TimeController(jms, jms.getContext(), jms.getLock());
-        }
-        return mSingleton;
-    }
-
-    private TimeController(StateChangedListener stateChangedListener, Context context,
-                Object lock) {
-        super(stateChangedListener, context, lock);
+    public TimeController(JobSchedulerService service) {
+        super(service);
 
         mNextJobExpiredElapsedMillis = Long.MAX_VALUE;
         mNextDelayExpiredElapsedMillis = Long.MAX_VALUE;
+        mChainedAttributionEnabled = WorkSource.isChainedBatteryAttributionEnabled(mContext);
     }
 
     /**
@@ -113,7 +111,7 @@ public final class TimeController extends StateController {
             maybeUpdateAlarmsLocked(
                     job.hasTimingDelayConstraint() ? job.getEarliestRunTime() : Long.MAX_VALUE,
                     job.hasDeadlineConstraint() ? job.getLatestRunTimeElapsed() : Long.MAX_VALUE,
-                    new WorkSource(job.getSourceUid(), job.getSourcePackageName()));
+                    deriveWorkSource(job.getSourceUid(), job.getSourcePackageName()));
         }
     }
 
@@ -179,9 +177,8 @@ public final class TimeController extends StateController {
                     break;
                 }
             }
-            setDeadlineExpiredAlarmLocked(nextExpiryTime, nextExpiryPackageName != null
-                    ? new WorkSource(nextExpiryUid, nextExpiryPackageName)
-                    : new WorkSource(nextExpiryUid));
+            setDeadlineExpiredAlarmLocked(nextExpiryTime,
+                    deriveWorkSource(nextExpiryUid, nextExpiryPackageName));
         }
     }
 
@@ -236,9 +233,20 @@ public final class TimeController extends StateController {
             if (ready) {
                 mStateChangedListener.onControllerStateChanged();
             }
-            setDelayExpiredAlarmLocked(nextDelayTime, nextDelayPackageName != null
-                    ? new WorkSource(nextDelayUid, nextDelayPackageName)
-                    : new WorkSource(nextDelayUid));
+            setDelayExpiredAlarmLocked(nextDelayTime,
+                    deriveWorkSource(nextDelayUid, nextDelayPackageName));
+        }
+    }
+
+    private WorkSource deriveWorkSource(int uid, @Nullable String packageName) {
+        if (mChainedAttributionEnabled) {
+            WorkSource ws = new WorkSource();
+            ws.createWorkChain()
+                    .addNode(uid, packageName)
+                    .addNode(Process.SYSTEM_UID, "JobScheduler");
+            return ws;
+        } else {
+            return packageName == null ? new WorkSource(uid) : new WorkSource(uid, packageName);
         }
     }
 
@@ -330,25 +338,24 @@ public final class TimeController extends StateController {
     };
 
     @Override
-    public void dumpControllerStateLocked(PrintWriter pw, int filterUid) {
+    public void dumpControllerStateLocked(IndentingPrintWriter pw,
+            Predicate<JobStatus> predicate) {
         final long nowElapsed = sElapsedRealtimeClock.millis();
-        pw.print("Alarms: now=");
-        pw.print(nowElapsed);
-        pw.println();
+        pw.println("Elapsed clock: " + nowElapsed);
+
         pw.print("Next delay alarm in ");
         TimeUtils.formatDuration(mNextDelayExpiredElapsedMillis, nowElapsed, pw);
         pw.println();
         pw.print("Next deadline alarm in ");
         TimeUtils.formatDuration(mNextJobExpiredElapsedMillis, nowElapsed, pw);
         pw.println();
-        pw.print("Tracking ");
-        pw.print(mTrackedJobs.size());
-        pw.println(":");
+        pw.println();
+
         for (JobStatus ts : mTrackedJobs) {
-            if (!ts.shouldDump(filterUid)) {
+            if (!predicate.test(ts)) {
                 continue;
             }
-            pw.print("  #");
+            pw.print("#");
             ts.printUniqueId(pw);
             pw.print(" from ");
             UserHandle.formatUid(pw, ts.getSourceUid());
@@ -369,7 +376,8 @@ public final class TimeController extends StateController {
     }
 
     @Override
-    public void dumpControllerStateLocked(ProtoOutputStream proto, long fieldId, int filterUid) {
+    public void dumpControllerStateLocked(ProtoOutputStream proto, long fieldId,
+            Predicate<JobStatus> predicate) {
         final long token = proto.start(fieldId);
         final long mToken = proto.start(StateControllerProto.TIME);
 
@@ -381,7 +389,7 @@ public final class TimeController extends StateController {
                 mNextJobExpiredElapsedMillis - nowElapsed);
 
         for (JobStatus ts : mTrackedJobs) {
-            if (!ts.shouldDump(filterUid)) {
+            if (!predicate.test(ts)) {
                 continue;
             }
             final long tsToken = proto.start(StateControllerProto.TimeController.TRACKED_JOBS);

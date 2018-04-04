@@ -16,6 +16,9 @@
 
 package com.android.internal.telephony;
 
+import static com.android.internal.telephony.IccSmsInterfaceManager.SMS_MESSAGE_PERIOD_NOT_SPECIFIED;
+import static com.android.internal.telephony.IccSmsInterfaceManager.SMS_MESSAGE_PRIORITY_NOT_SPECIFIED;
+
 import android.app.Activity;
 import android.app.PendingIntent;
 import android.app.PendingIntent.CanceledException;
@@ -29,9 +32,9 @@ import android.provider.Telephony.Sms;
 import android.provider.Telephony.Sms.Intents;
 import android.telephony.Rlog;
 import android.telephony.SmsManager;
+import android.telephony.SmsMessage;
 import android.util.Pair;
 
-import com.android.ims.ImsManager;
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.telephony.cdma.CdmaInboundSmsHandler;
 import com.android.internal.telephony.cdma.CdmaSMSDispatcher;
@@ -174,7 +177,7 @@ public class SmsDispatchersController extends Handler {
     }
 
     /**
-     * Inject an SMS PDU into the android platform.
+     * Inject an SMS PDU into the android platform only if it is class 1.
      *
      * @param pdu is the byte array of pdu to be injected into android telephony layer
      * @param format is the format of SMS pdu (3gpp or 3gpp2)
@@ -184,19 +187,37 @@ public class SmsDispatchersController extends Handler {
      */
     @VisibleForTesting
     public void injectSmsPdu(byte[] pdu, String format, SmsInjectionCallback callback) {
+        // TODO We need to decide whether we should allow injecting GSM(3gpp)
+        // SMS pdus when the phone is camping on CDMA(3gpp2) network and vice versa.
+        android.telephony.SmsMessage msg =
+                android.telephony.SmsMessage.createFromPdu(pdu, format);
+        injectSmsPdu(msg, format, callback, false /* ignoreClass */);
+    }
+
+    /**
+     * Inject an SMS PDU into the android platform.
+     *
+     * @param msg is the {@link SmsMessage} to be injected into android telephony layer
+     * @param format is the format of SMS pdu (3gpp or 3gpp2)
+     * @param callback if not NULL this callback is triggered when the message is successfully
+     *                 received by the android telephony layer. This callback is triggered at
+     *                 the same time an SMS received from radio is responded back.
+     * @param ignoreClass if set to false, this method will inject class 1 sms only.
+     */
+    @VisibleForTesting
+    public void injectSmsPdu(SmsMessage msg, String format, SmsInjectionCallback callback,
+            boolean ignoreClass) {
         Rlog.d(TAG, "SmsDispatchersController:injectSmsPdu");
         try {
-            // TODO We need to decide whether we should allow injecting GSM(3gpp)
-            // SMS pdus when the phone is camping on CDMA(3gpp2) network and vice versa.
-            android.telephony.SmsMessage msg =
-                    android.telephony.SmsMessage.createFromPdu(pdu, format);
+            if (msg == null) {
+                Rlog.e(TAG, "injectSmsPdu: createFromPdu returned null");
+                callback.onSmsInjectedResult(Intents.RESULT_SMS_GENERIC_ERROR);
+                return;
+            }
 
-            // Only class 1 SMS are allowed to be injected.
-            if (msg == null
-                    || msg.getMessageClass() != android.telephony.SmsMessage.MessageClass.CLASS_1) {
-                if (msg == null) {
-                    Rlog.e(TAG, "injectSmsPdu: createFromPdu returned null");
-                }
+            if (!ignoreClass
+                    && msg.getMessageClass() != android.telephony.SmsMessage.MessageClass.CLASS_1) {
+                Rlog.e(TAG, "injectSmsPdu: not class 1");
                 callback.onSmsInjectedResult(Intents.RESULT_SMS_GENERIC_ERROR);
                 return;
             }
@@ -406,19 +427,42 @@ public class SmsDispatchersController extends Handler {
      * @param callingPkg the calling package name
      * @param persistMessage whether to save the sent message into SMS DB for a
      *   non-default SMS app.
+     * @param priority Priority level of the message
+     *  Refer specification See 3GPP2 C.S0015-B, v2.0, table 4.5.9-1
+     *  ---------------------------------
+     *  PRIORITY      | Level of Priority
+     *  ---------------------------------
+     *      '00'      |     Normal
+     *      '01'      |     Interactive
+     *      '10'      |     Urgent
+     *      '11'      |     Emergency
+     *  ----------------------------------
+     *  Any Other values included Negative considered as Invalid Priority Indicator of the message.
+     * @param expectMore is a boolean to indicate the sending messages through same link or not.
+     * @param validityPeriod Validity Period of the message in mins.
+     *  Refer specification 3GPP TS 23.040 V6.8.1 section 9.2.3.12.1.
+     *  Validity Period(Minimum) -> 5 mins
+     *  Validity Period(Maximum) -> 635040 mins(i.e.63 weeks).
+     *  Any Other values included Negative considered as Invalid Validity Period of the message.
      */
     public void sendText(String destAddr, String scAddr, String text,
                             PendingIntent sentIntent, PendingIntent deliveryIntent, Uri messageUri,
-                            String callingPkg, boolean persistMessage) {
+                            String callingPkg, boolean persistMessage, int priority,
+                            boolean expectMore, int validityPeriod) {
         if (mImsSmsDispatcher.isAvailable()) {
             mImsSmsDispatcher.sendText(destAddr, scAddr, text, sentIntent, deliveryIntent,
-                    messageUri, callingPkg, persistMessage);
-        } else if (isCdmaMo()) {
-            mCdmaDispatcher.sendText(destAddr, scAddr, text, sentIntent, deliveryIntent, messageUri,
-                    callingPkg, persistMessage);
+                    messageUri, callingPkg, persistMessage, SMS_MESSAGE_PRIORITY_NOT_SPECIFIED,
+                    false /*expectMore*/, SMS_MESSAGE_PERIOD_NOT_SPECIFIED);
         } else {
-            mGsmDispatcher.sendText(destAddr, scAddr, text, sentIntent, deliveryIntent, messageUri,
-                    callingPkg, persistMessage);
+            if (isCdmaMo()) {
+                mCdmaDispatcher.sendText(destAddr, scAddr, text, sentIntent, deliveryIntent,
+                        messageUri, callingPkg, persistMessage, priority, expectMore,
+                        validityPeriod);
+            } else {
+                mGsmDispatcher.sendText(destAddr, scAddr, text, sentIntent, deliveryIntent,
+                        messageUri, callingPkg, persistMessage, priority, expectMore,
+                        validityPeriod);
+            }
         }
     }
 
@@ -449,20 +493,44 @@ public class SmsDispatchersController extends Handler {
      * @param callingPkg the calling package name
      * @param persistMessage whether to save the sent message into SMS DB for a
      *   non-default SMS app.
+     * @param priority Priority level of the message
+     *  Refer specification See 3GPP2 C.S0015-B, v2.0, table 4.5.9-1
+     *  ---------------------------------
+     *  PRIORITY      | Level of Priority
+     *  ---------------------------------
+     *      '00'      |     Normal
+     *      '01'      |     Interactive
+     *      '10'      |     Urgent
+     *      '11'      |     Emergency
+     *  ----------------------------------
+     *  Any Other values included Negative considered as Invalid Priority Indicator of the message.
+     * @param expectMore is a boolean to indicate the sending messages through same link or not.
+     * @param validityPeriod Validity Period of the message in mins.
+     *  Refer specification 3GPP TS 23.040 V6.8.1 section 9.2.3.12.1.
+     *  Validity Period(Minimum) -> 5 mins
+     *  Validity Period(Maximum) -> 635040 mins(i.e.63 weeks).
+     *  Any Other values included Negative considered as Invalid Validity Period of the message.
+
      */
     protected void sendMultipartText(String destAddr, String scAddr,
             ArrayList<String> parts, ArrayList<PendingIntent> sentIntents,
             ArrayList<PendingIntent> deliveryIntents, Uri messageUri, String callingPkg,
-            boolean persistMessage) {
+            boolean persistMessage, int priority, boolean expectMore, int validityPeriod) {
         if (mImsSmsDispatcher.isAvailable()) {
             mImsSmsDispatcher.sendMultipartText(destAddr, scAddr, parts, sentIntents,
-                    deliveryIntents, messageUri, callingPkg, persistMessage);
-        } else if (isCdmaMo()) {
-            mCdmaDispatcher.sendMultipartText(destAddr, scAddr, parts, sentIntents, deliveryIntents,
-                    messageUri, callingPkg, persistMessage);
+                    deliveryIntents, messageUri, callingPkg, persistMessage,
+                    SMS_MESSAGE_PRIORITY_NOT_SPECIFIED,
+                    false /*expectMore*/, SMS_MESSAGE_PERIOD_NOT_SPECIFIED);
         } else {
-            mGsmDispatcher.sendMultipartText(destAddr, scAddr, parts, sentIntents, deliveryIntents,
-                    messageUri, callingPkg, persistMessage);
+            if (isCdmaMo()) {
+                mCdmaDispatcher.sendMultipartText(destAddr, scAddr, parts, sentIntents,
+                        deliveryIntents, messageUri, callingPkg, persistMessage, priority,
+                        expectMore, validityPeriod);
+            } else {
+                mGsmDispatcher.sendMultipartText(destAddr, scAddr, parts, sentIntents,
+                        deliveryIntents, messageUri, callingPkg, persistMessage, priority,
+                        expectMore, validityPeriod);
+            }
         }
     }
 

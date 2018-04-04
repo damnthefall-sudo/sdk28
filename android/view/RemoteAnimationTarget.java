@@ -16,13 +16,26 @@
 
 package android.view;
 
+import static android.app.RemoteAnimationTargetProto.CLIP_RECT;
+import static android.app.RemoteAnimationTargetProto.CONTENT_INSETS;
+import static android.app.RemoteAnimationTargetProto.IS_TRANSLUCENT;
+import static android.app.RemoteAnimationTargetProto.LEASH;
+import static android.app.RemoteAnimationTargetProto.MODE;
+import static android.app.RemoteAnimationTargetProto.POSITION;
+import static android.app.RemoteAnimationTargetProto.PREFIX_ORDER_INDEX;
+import static android.app.RemoteAnimationTargetProto.SOURCE_CONTAINER_BOUNDS;
+import static android.app.RemoteAnimationTargetProto.TASK_ID;
+import static android.app.RemoteAnimationTargetProto.WINDOW_CONFIGURATION;
+
 import android.annotation.IntDef;
 import android.app.WindowConfiguration;
 import android.graphics.Point;
 import android.graphics.Rect;
 import android.os.Parcel;
 import android.os.Parcelable;
+import android.util.proto.ProtoOutputStream;
 
+import java.io.PrintWriter;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 
@@ -79,6 +92,11 @@ public class RemoteAnimationTarget implements Parcelable {
     public final Rect clipRect;
 
     /**
+     * The insets of the main app window.
+     */
+    public final Rect contentInsets;
+
+    /**
      * The index of the element in the tree in prefix order. This should be used for z-layering
      * to preserve original z-layer order in the hierarchy tree assuming no "boosting" needs to
      * happen.
@@ -104,18 +122,25 @@ public class RemoteAnimationTarget implements Parcelable {
      */
     public final WindowConfiguration windowConfiguration;
 
+    /**
+     * Whether the task is not presented in Recents UI.
+     */
+    public boolean isNotInRecents;
+
     public RemoteAnimationTarget(int taskId, int mode, SurfaceControl leash, boolean isTranslucent,
-            Rect clipRect, int prefixOrderIndex, Point position, Rect sourceContainerBounds,
-            WindowConfiguration windowConfig) {
+            Rect clipRect, Rect contentInsets, int prefixOrderIndex, Point position,
+            Rect sourceContainerBounds, WindowConfiguration windowConfig, boolean isNotInRecents) {
         this.mode = mode;
         this.taskId = taskId;
         this.leash = leash;
         this.isTranslucent = isTranslucent;
         this.clipRect = new Rect(clipRect);
+        this.contentInsets = new Rect(contentInsets);
         this.prefixOrderIndex = prefixOrderIndex;
         this.position = new Point(position);
         this.sourceContainerBounds = new Rect(sourceContainerBounds);
         this.windowConfiguration = windowConfig;
+        this.isNotInRecents = isNotInRecents;
     }
 
     public RemoteAnimationTarget(Parcel in) {
@@ -124,10 +149,12 @@ public class RemoteAnimationTarget implements Parcelable {
         leash = in.readParcelable(null);
         isTranslucent = in.readBoolean();
         clipRect = in.readParcelable(null);
+        contentInsets = in.readParcelable(null);
         prefixOrderIndex = in.readInt();
         position = in.readParcelable(null);
         sourceContainerBounds = in.readParcelable(null);
         windowConfiguration = in.readParcelable(null);
+        isNotInRecents = in.readBoolean();
     }
 
     @Override
@@ -142,10 +169,41 @@ public class RemoteAnimationTarget implements Parcelable {
         dest.writeParcelable(leash, 0 /* flags */);
         dest.writeBoolean(isTranslucent);
         dest.writeParcelable(clipRect, 0 /* flags */);
+        dest.writeParcelable(contentInsets, 0 /* flags */);
         dest.writeInt(prefixOrderIndex);
         dest.writeParcelable(position, 0 /* flags */);
         dest.writeParcelable(sourceContainerBounds, 0 /* flags */);
         dest.writeParcelable(windowConfiguration, 0 /* flags */);
+        dest.writeBoolean(isNotInRecents);
+    }
+
+    public void dump(PrintWriter pw, String prefix) {
+        pw.print(prefix); pw.print("mode="); pw.print(mode);
+        pw.print(" taskId="); pw.print(taskId);
+        pw.print(" isTranslucent="); pw.print(isTranslucent);
+        pw.print(" clipRect="); clipRect.printShortString(pw);
+        pw.print(" contentInsets="); contentInsets.printShortString(pw);
+        pw.print(" prefixOrderIndex="); pw.print(prefixOrderIndex);
+        pw.print(" position="); position.printShortString(pw);
+        pw.print(" sourceContainerBounds="); sourceContainerBounds.printShortString(pw);
+        pw.println();
+        pw.print(prefix); pw.print("windowConfiguration="); pw.println(windowConfiguration);
+        pw.print(prefix); pw.print("leash="); pw.println(leash);
+    }
+
+    public void writeToProto(ProtoOutputStream proto, long fieldId) {
+        final long token = proto.start(fieldId);
+        proto.write(TASK_ID, taskId);
+        proto.write(MODE, mode);
+        leash.writeToProto(proto, LEASH);
+        proto.write(IS_TRANSLUCENT, isTranslucent);
+        clipRect.writeToProto(proto, CLIP_RECT);
+        contentInsets.writeToProto(proto, CONTENT_INSETS);
+        proto.write(PREFIX_ORDER_INDEX, prefixOrderIndex);
+        position.writeToProto(proto, POSITION);
+        sourceContainerBounds.writeToProto(proto, SOURCE_CONTAINER_BOUNDS);
+        windowConfiguration.writeToProto(proto, WINDOW_CONFIGURATION);
+        proto.end(token);
     }
 
     public static final Creator<RemoteAnimationTarget> CREATOR

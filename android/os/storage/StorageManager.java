@@ -50,7 +50,6 @@ import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.os.ServiceManager.ServiceNotFoundException;
 import android.os.SystemProperties;
-import android.os.UserHandle;
 import android.provider.Settings;
 import android.system.ErrnoException;
 import android.system.Os;
@@ -757,10 +756,15 @@ public class StorageManager {
         }
         try {
             for (VolumeInfo vol : mStorageManager.getVolumes(0)) {
-                if (vol.path != null && FileUtils.contains(vol.path, pathString)) {
+                if (vol.path != null && FileUtils.contains(vol.path, pathString)
+                        && vol.type != VolumeInfo.TYPE_PUBLIC) {
                     // TODO: verify that emulated adopted devices have UUID of
                     // underlying volume
-                    return convert(vol.fsUuid);
+                    try {
+                        return convert(vol.fsUuid);
+                    } catch (IllegalArgumentException e) {
+                        continue;
+                    }
                 }
             }
         } catch (RemoteException e) {
@@ -1096,7 +1100,7 @@ public class StorageManager {
     public @NonNull List<StorageVolume> getStorageVolumes() {
         final ArrayList<StorageVolume> res = new ArrayList<>();
         Collections.addAll(res,
-                getVolumeList(UserHandle.myUserId(), FLAG_REAL_STATE | FLAG_INCLUDE_INVISIBLE));
+                getVolumeList(mContext.getUserId(), FLAG_REAL_STATE | FLAG_INCLUDE_INVISIBLE));
         return res;
     }
 
@@ -1107,7 +1111,7 @@ public class StorageManager {
      * {@link Context#getExternalFilesDir(String)}.
      */
     public @NonNull StorageVolume getPrimaryStorageVolume() {
-        return getVolumeList(UserHandle.myUserId(), FLAG_REAL_STATE | FLAG_INCLUDE_INVISIBLE)[0];
+        return getVolumeList(mContext.getUserId(), FLAG_REAL_STATE | FLAG_INCLUDE_INVISIBLE)[0];
     }
 
     /** {@hide} */
@@ -1317,15 +1321,6 @@ public class StorageManager {
     public void destroyUserStorage(String volumeUuid, int userId, int flags) {
         try {
             mStorageManager.destroyUserStorage(volumeUuid, userId, flags);
-        } catch (RemoteException e) {
-            throw e.rethrowFromSystemServer();
-        }
-    }
-
-    /** {@hide} */
-    public void secdiscard(String path) {
-        try {
-            mStorageManager.secdiscard(path);
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }

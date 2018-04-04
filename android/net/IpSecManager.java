@@ -19,6 +19,7 @@ import static com.android.internal.util.Preconditions.checkNotNull;
 
 import android.annotation.IntDef;
 import android.annotation.NonNull;
+import android.annotation.RequiresPermission;
 import android.annotation.SystemApi;
 import android.annotation.SystemService;
 import android.annotation.TestApi;
@@ -57,14 +58,18 @@ public final class IpSecManager {
     private static final String TAG = "IpSecManager";
 
     /**
-     * For direction-specific attributes of an {@link IpSecTransform}, indicates that an attribute
-     * applies to traffic towards the host.
+     * Used when applying a transform to direct traffic through an {@link IpSecTransform}
+     * towards the host.
+     *
+     * <p>See {@link #applyTransportModeTransform(Socket, int, IpSecTransform)}.
      */
     public static final int DIRECTION_IN = 0;
 
     /**
-     * For direction-specific attributes of an {@link IpSecTransform}, indicates that an attribute
-     * applies to traffic from the host.
+     * Used when applying a transform to direct traffic through an {@link IpSecTransform}
+     * away from the host.
+     *
+     * <p>See {@link #applyTransportModeTransform(Socket, int, IpSecTransform)}.
      */
     public static final int DIRECTION_OUT = 1;
 
@@ -248,8 +253,9 @@ public final class IpSecManager {
      * @throws {@link #ResourceUnavailableException} indicating that too many SPIs are
      *     currently allocated for this user
      */
-    public SecurityParameterIndex allocateSecurityParameterIndex(InetAddress destinationAddress)
-            throws ResourceUnavailableException {
+    @NonNull
+    public SecurityParameterIndex allocateSecurityParameterIndex(
+                @NonNull InetAddress destinationAddress) throws ResourceUnavailableException {
         try {
             return new SecurityParameterIndex(
                     mService,
@@ -268,15 +274,17 @@ public final class IpSecManager {
      *
      * @param destinationAddress the destination address for traffic bearing the requested SPI.
      *     For inbound traffic, the destination should be an address currently assigned on-device.
-     * @param requestedSpi the requested SPI, or '0' to allocate a random SPI
+     * @param requestedSpi the requested SPI, or '0' to allocate a random SPI. The range 1-255 is
+     *     reserved and may not be used. See RFC 4303 Section 2.1.
      * @return the reserved SecurityParameterIndex
      * @throws {@link #ResourceUnavailableException} indicating that too many SPIs are
      *     currently allocated for this user
      * @throws {@link #SpiUnavailableException} indicating that the requested SPI could not be
      *     reserved
      */
+    @NonNull
     public SecurityParameterIndex allocateSecurityParameterIndex(
-            InetAddress destinationAddress, int requestedSpi)
+            @NonNull InetAddress destinationAddress, int requestedSpi)
             throws SpiUnavailableException, ResourceUnavailableException {
         if (requestedSpi == IpSecManager.INVALID_SECURITY_PARAMETER_INDEX) {
             throw new IllegalArgumentException("Requested SPI must be a valid (non-zero) SPI");
@@ -298,22 +306,36 @@ public final class IpSecManager {
      * will throw IOException if the user deactivates the transform (by calling {@link
      * IpSecTransform#close()}) without calling {@link #removeTransportModeTransforms}.
      *
+     * <p>Note that when applied to TCP sockets, calling {@link IpSecTransform#close()} on an
+     * applied transform before completion of graceful shutdown may result in the shutdown sequence
+     * failing to complete. As such, applications requiring graceful shutdown MUST close the socket
+     * prior to deactivating the applied transform. Socket closure may be performed asynchronously
+     * (in batches), so the returning of a close function does not guarantee shutdown of a socket.
+     * Setting an SO_LINGER timeout results in socket closure being performed synchronously, and is
+     * sufficient to ensure shutdown.
+     *
+     * Specifically, if the transform is deactivated (by calling {@link IpSecTransform#close()}),
+     * prior to the socket being closed, the standard [FIN - FIN/ACK - ACK], or the reset [RST]
+     * packets are dropped due to the lack of a valid Transform. Similarly, if a socket without the
+     * SO_LINGER option set is closed, the delayed/batched FIN packets may be dropped.
+     *
      * <h4>Rekey Procedure</h4>
      *
-     * <p>When applying a new tranform to a socket, the previous transform will be removed. However,
-     * inbound traffic on the old transform will continue to be decrypted until that transform is
-     * deallocated by calling {@link IpSecTransform#close()}. This overlap allows rekey procedures
-     * where both transforms are valid until both endpoints are using the new transform and all
-     * in-flight packets have been received.
+     * <p>When applying a new tranform to a socket in the outbound direction, the previous transform
+     * will be removed and the new transform will take effect immediately, sending all traffic on
+     * the new transform; however, when applying a transform in the inbound direction, traffic
+     * on the old transform will continue to be decrypted and delivered until that transform is
+     * deallocated by calling {@link IpSecTransform#close()}. This overlap allows lossless rekey
+     * procedures where both transforms are valid until both endpoints are using the new transform
+     * and all in-flight packets have been received.
      *
      * @param socket a stream socket
-     * @param direction the policy direction either {@link #DIRECTION_IN} or {@link #DIRECTION_OUT}
+     * @param direction the direction in which the transform should be applied
      * @param transform a transport mode {@code IpSecTransform}
      * @throws IOException indicating that the transform could not be applied
      */
-    public void applyTransportModeTransform(
-            Socket socket, int direction, IpSecTransform transform)
-            throws IOException {
+    public void applyTransportModeTransform(@NonNull Socket socket,
+            @PolicyDirection int direction, @NonNull IpSecTransform transform) throws IOException {
         applyTransportModeTransform(socket.getFileDescriptor$(), direction, transform);
     }
 
@@ -333,19 +355,21 @@ public final class IpSecManager {
      *
      * <h4>Rekey Procedure</h4>
      *
-     * <p>When applying a new tranform to a socket, the previous transform will be removed. However,
-     * inbound traffic on the old transform will continue to be decrypted until that transform is
-     * deallocated by calling {@link IpSecTransform#close()}. This overlap allows rekey procedures
-     * where both transforms are valid until both endpoints are using the new transform and all
-     * in-flight packets have been received.
+     * <p>When applying a new tranform to a socket in the outbound direction, the previous transform
+     * will be removed and the new transform will take effect immediately, sending all traffic on
+     * the new transform; however, when applying a transform in the inbound direction, traffic
+     * on the old transform will continue to be decrypted and delivered until that transform is
+     * deallocated by calling {@link IpSecTransform#close()}. This overlap allows lossless rekey
+     * procedures where both transforms are valid until both endpoints are using the new transform
+     * and all in-flight packets have been received.
      *
      * @param socket a datagram socket
-     * @param direction the policy direction either DIRECTION_IN or DIRECTION_OUT
+     * @param direction the direction in which the transform should be applied
      * @param transform a transport mode {@code IpSecTransform}
      * @throws IOException indicating that the transform could not be applied
      */
-    public void applyTransportModeTransform(
-            DatagramSocket socket, int direction, IpSecTransform transform) throws IOException {
+    public void applyTransportModeTransform(@NonNull DatagramSocket socket,
+            @PolicyDirection int direction, @NonNull IpSecTransform transform) throws IOException {
         applyTransportModeTransform(socket.getFileDescriptor$(), direction, transform);
     }
 
@@ -363,22 +387,36 @@ public final class IpSecManager {
      * will throw IOException if the user deactivates the transform (by calling {@link
      * IpSecTransform#close()}) without calling {@link #removeTransportModeTransforms}.
      *
+     * <p>Note that when applied to TCP sockets, calling {@link IpSecTransform#close()} on an
+     * applied transform before completion of graceful shutdown may result in the shutdown sequence
+     * failing to complete. As such, applications requiring graceful shutdown MUST close the socket
+     * prior to deactivating the applied transform. Socket closure may be performed asynchronously
+     * (in batches), so the returning of a close function does not guarantee shutdown of a socket.
+     * Setting an SO_LINGER timeout results in socket closure being performed synchronously, and is
+     * sufficient to ensure shutdown.
+     *
+     * Specifically, if the transform is deactivated (by calling {@link IpSecTransform#close()}),
+     * prior to the socket being closed, the standard [FIN - FIN/ACK - ACK], or the reset [RST]
+     * packets are dropped due to the lack of a valid Transform. Similarly, if a socket without the
+     * SO_LINGER option set is closed, the delayed/batched FIN packets may be dropped.
+     *
      * <h4>Rekey Procedure</h4>
      *
-     * <p>When applying a new tranform to a socket, the previous transform will be removed. However,
-     * inbound traffic on the old transform will continue to be decrypted until that transform is
-     * deallocated by calling {@link IpSecTransform#close()}. This overlap allows rekey procedures
-     * where both transforms are valid until both endpoints are using the new transform and all
-     * in-flight packets have been received.
+     * <p>When applying a new tranform to a socket in the outbound direction, the previous transform
+     * will be removed and the new transform will take effect immediately, sending all traffic on
+     * the new transform; however, when applying a transform in the inbound direction, traffic
+     * on the old transform will continue to be decrypted and delivered until that transform is
+     * deallocated by calling {@link IpSecTransform#close()}. This overlap allows lossless rekey
+     * procedures where both transforms are valid until both endpoints are using the new transform
+     * and all in-flight packets have been received.
      *
      * @param socket a socket file descriptor
-     * @param direction the policy direction either DIRECTION_IN or DIRECTION_OUT
+     * @param direction the direction in which the transform should be applied
      * @param transform a transport mode {@code IpSecTransform}
      * @throws IOException indicating that the transform could not be applied
      */
-    public void applyTransportModeTransform(
-            FileDescriptor socket, int direction, IpSecTransform transform)
-            throws IOException {
+    public void applyTransportModeTransform(@NonNull FileDescriptor socket,
+            @PolicyDirection int direction, @NonNull IpSecTransform transform) throws IOException {
         // We dup() the FileDescriptor here because if we don't, then the ParcelFileDescriptor()
         // constructor takes control and closes the user's FD when we exit the method.
         try (ParcelFileDescriptor pfd = ParcelFileDescriptor.dup(socket)) {
@@ -387,21 +425,6 @@ public final class IpSecManager {
             throw e.rethrowFromSystemServer();
         }
     }
-
-    /**
-     * Apply an active Tunnel Mode IPsec Transform to a network, which will tunnel all traffic to
-     * and from that network's interface with IPsec (applies an outer IP header and IPsec Header to
-     * all traffic, and expects an additional IP header and IPsec Header on all inbound traffic).
-     * Applications should probably not use this API directly. Instead, they should use {@link
-     * VpnService} to provide VPN capability in a more generic fashion.
-     *
-     * <p>TODO: Update javadoc for tunnel mode APIs at the same time the APIs are re-worked.
-     *
-     * @param net a {@link Network} that will be tunneled via IP Sec.
-     * @param transform an {@link IpSecTransform}, which must be an active Tunnel Mode transform.
-     * @hide
-     */
-    public void applyTunnelModeTransform(Network net, IpSecTransform transform) {}
 
     /**
      * Remove an IPsec transform from a stream socket.
@@ -416,8 +439,7 @@ public final class IpSecManager {
      * @param socket a socket that previously had a transform applied to it
      * @throws IOException indicating that the transform could not be removed from the socket
      */
-    public void removeTransportModeTransforms(Socket socket)
-            throws IOException {
+    public void removeTransportModeTransforms(@NonNull Socket socket) throws IOException {
         removeTransportModeTransforms(socket.getFileDescriptor$());
     }
 
@@ -434,8 +456,7 @@ public final class IpSecManager {
      * @param socket a socket that previously had a transform applied to it
      * @throws IOException indicating that the transform could not be removed from the socket
      */
-    public void removeTransportModeTransforms(DatagramSocket socket)
-            throws IOException {
+    public void removeTransportModeTransforms(@NonNull DatagramSocket socket) throws IOException {
         removeTransportModeTransforms(socket.getFileDescriptor$());
     }
 
@@ -452,8 +473,7 @@ public final class IpSecManager {
      * @param socket a socket that previously had a transform applied to it
      * @throws IOException indicating that the transform could not be removed from the socket
      */
-    public void removeTransportModeTransforms(FileDescriptor socket)
-            throws IOException {
+    public void removeTransportModeTransforms(@NonNull FileDescriptor socket) throws IOException {
         try (ParcelFileDescriptor pfd = ParcelFileDescriptor.dup(socket)) {
             mService.removeTransportModeTransforms(pfd);
         } catch (RemoteException e) {
@@ -483,7 +503,7 @@ public final class IpSecManager {
      * signalling and UDP encapsulated IPsec traffic. Instances can be obtained by calling {@link
      * IpSecManager#openUdpEncapsulationSocket}. The provided socket cannot be re-bound by the
      * caller. The caller should not close the {@code FileDescriptor} returned by {@link
-     * #getSocket}, but should use {@link #close} instead.
+     * #getFileDescriptor}, but should use {@link #close} instead.
      *
      * <p>Allowing the user to close or unbind a UDP encapsulation socket could impact the traffic
      * of the next user who binds to that port. To prevent this scenario, these sockets are held
@@ -522,8 +542,8 @@ public final class IpSecManager {
             mCloseGuard.open("constructor");
         }
 
-        /** Get the wrapped socket. */
-        public FileDescriptor getSocket() {
+        /** Get the encapsulation socket's file descriptor. */
+        public FileDescriptor getFileDescriptor() {
             if (mPfd == null) {
                 return null;
             }
@@ -591,6 +611,7 @@ public final class IpSecManager {
     // safely usable for Encapsulation without allowing a user to possibly unbind from/close
     // the port, which could potentially impact the traffic of the next user who binds to that
     // socket.
+    @NonNull
     public UdpEncapsulationSocket openUdpEncapsulationSocket(int port)
             throws IOException, ResourceUnavailableException {
         /*
@@ -620,6 +641,7 @@ public final class IpSecManager {
     // safely usable for Encapsulation without allowing a user to possibly unbind from/close
     // the port, which could potentially impact the traffic of the next user who binds to that
     // socket.
+    @NonNull
     public UdpEncapsulationSocket openUdpEncapsulationSocket()
             throws IOException, ResourceUnavailableException {
         return new UdpEncapsulationSocket(mService, 0);
@@ -648,6 +670,7 @@ public final class IpSecManager {
         private int mResourceId = INVALID_RESOURCE_ID;
 
         /** Get the underlying SPI held by this object. */
+        @NonNull
         public String getInterfaceName() {
             return mInterfaceName;
         }
@@ -659,10 +682,16 @@ public final class IpSecManager {
          * tunneled traffic.
          *
          * @param address the local address for traffic inside the tunnel
-         * @throws IOException if the address could not be added
          * @hide
          */
-        public void addAddress(LinkAddress address) throws IOException {
+        @SystemApi
+        @RequiresPermission(android.Manifest.permission.MANAGE_IPSEC_TUNNELS)
+        public void addAddress(@NonNull LinkAddress address) throws IOException {
+            try {
+                mService.addAddressToTunnelInterface(mResourceId, address);
+            } catch (RemoteException e) {
+                throw e.rethrowFromSystemServer();
+            }
         }
 
         /**
@@ -671,10 +700,16 @@ public final class IpSecManager {
          * <p>Remove an address which was previously added to the IpSecTunnelInterface
          *
          * @param address to be removed
-         * @throws IOException if the address could not be removed
          * @hide
          */
-        public void removeAddress(LinkAddress address) throws IOException {
+        @SystemApi
+        @RequiresPermission(android.Manifest.permission.MANAGE_IPSEC_TUNNELS)
+        public void removeAddress(@NonNull LinkAddress address) throws IOException {
+            try {
+                mService.removeAddressFromTunnelInterface(mResourceId, address);
+            } catch (RemoteException e) {
+                throw e.rethrowFromSystemServer();
+            }
         }
 
         private IpSecTunnelInterface(@NonNull IIpSecService service,
@@ -761,6 +796,8 @@ public final class IpSecManager {
      * @hide
      */
     @SystemApi
+    @NonNull
+    @RequiresPermission(android.Manifest.permission.MANAGE_IPSEC_TUNNELS)
     public IpSecTunnelInterface createIpSecTunnelInterface(@NonNull InetAddress localAddress,
             @NonNull InetAddress remoteAddress, @NonNull Network underlyingNetwork)
             throws ResourceUnavailableException, IOException {
@@ -768,7 +805,12 @@ public final class IpSecManager {
     }
 
     /**
-     * Apply a transform to the IpSecTunnelInterface
+     * Apply an active Tunnel Mode IPsec Transform to a {@link IpSecTunnelInterface}, which will
+     * tunnel all traffic for the given direction through the underlying network's interface with
+     * IPsec (applies an outer IP header and IPsec Header to all traffic, and expects an additional
+     * IP header and IPsec Header on all inbound traffic).
+     * <p>Applications should probably not use this API directly.
+     *
      *
      * @param tunnel The {@link IpSecManager#IpSecTunnelInterface} that will use the supplied
      *        transform.
@@ -780,8 +822,9 @@ public final class IpSecManager {
      * @hide
      */
     @SystemApi
-    public void applyTunnelModeTransform(IpSecTunnelInterface tunnel, int direction,
-            IpSecTransform transform) throws IOException {
+    @RequiresPermission(android.Manifest.permission.MANAGE_IPSEC_TUNNELS)
+    public void applyTunnelModeTransform(@NonNull IpSecTunnelInterface tunnel,
+            @PolicyDirection int direction, @NonNull IpSecTransform transform) throws IOException {
         try {
             mService.applyTunnelModeTransform(
                     tunnel.getResourceId(), direction, transform.getResourceId());
@@ -789,6 +832,7 @@ public final class IpSecManager {
             throw e.rethrowFromSystemServer();
         }
     }
+
     /**
      * Construct an instance of IpSecManager within an application context.
      *

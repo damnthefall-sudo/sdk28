@@ -261,12 +261,13 @@ public class OtaDexoptService extends IOtaDexopt.Stub {
                     String instructionSet, int dexoptNeeded, @Nullable String outputPath,
                     int dexFlags, String compilerFilter, @Nullable String volumeUuid,
                     @Nullable String sharedLibraries, @Nullable String seInfo, boolean downgrade,
-                    int targetSdkVersion)
+                    int targetSdkVersion, @Nullable String profileName,
+                    @Nullable String dexMetadataPath, @Nullable String dexoptCompilationReason)
                     throws InstallerException {
                 final StringBuilder builder = new StringBuilder();
 
-                // The version. Right now it's 4.
-                builder.append("4 ");
+                // The current version.
+                builder.append("8 ");
 
                 builder.append("dexopt");
 
@@ -283,6 +284,9 @@ public class OtaDexoptService extends IOtaDexopt.Stub {
                 encodeParameter(builder, seInfo);
                 encodeParameter(builder, downgrade);
                 encodeParameter(builder, targetSdkVersion);
+                encodeParameter(builder, profileName);
+                encodeParameter(builder, dexMetadataPath);
+                encodeParameter(builder, dexoptCompilationReason);
 
                 commands.add(builder.toString());
             }
@@ -361,9 +365,10 @@ public class OtaDexoptService extends IOtaDexopt.Stub {
                 continue;
             }
 
-            // If the path is in /system or /vendor, ignore. It will have been ota-dexopted into
-            // /data/ota and moved into the dalvik-cache already.
-            if (pkg.codePath.startsWith("/system") || pkg.codePath.startsWith("/vendor")) {
+            // If the path is in /system, /vendor or /product, ignore. It will have been
+            // ota-dexopted into /data/ota and moved into the dalvik-cache already.
+            if (pkg.codePath.startsWith("/system") || pkg.codePath.startsWith("/vendor")
+                    || pkg.codePath.startsWith("/product")) {
                 continue;
             }
 

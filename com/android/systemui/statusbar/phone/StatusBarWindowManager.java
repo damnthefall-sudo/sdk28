@@ -16,6 +16,8 @@
 
 package com.android.systemui.statusbar.phone;
 
+import static android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+
 import static com.android.systemui.statusbar.NotificationRemoteInputManager.ENABLE_REMOTE_INPUT;
 
 import android.app.ActivityManager;
@@ -71,7 +73,7 @@ public class StatusBarWindowManager implements RemoteInputController.Callback, D
         mWindowManager = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
         mActivityManager = ActivityManager.getService();
         mKeyguardScreenRotation = shouldEnableKeyguardScreenRotation();
-        mDozeParameters = new DozeParameters(mContext);
+        mDozeParameters = DozeParameters.getInstance(mContext);
         mScreenBrightnessDoze = mDozeParameters.getScreenBrightnessDoze();
     }
 
@@ -106,7 +108,9 @@ public class StatusBarWindowManager implements RemoteInputController.Callback, D
         mLp.gravity = Gravity.TOP;
         mLp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE;
         mLp.setTitle("StatusBar");
+        mLp.accessibilityTitle = mContext.getString(R.string.status_bar);
         mLp.packageName = mContext.getPackageName();
+        mLp.layoutInDisplayCutoutMode = LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
         mStatusBarView = statusBarView;
         mBarHeight = barHeight;
         mWindowManager.addView(mStatusBarView, mLp);
@@ -137,11 +141,11 @@ public class StatusBarWindowManager implements RemoteInputController.Callback, D
             mLpChanged.privateFlags &= ~WindowManager.LayoutParams.PRIVATE_FLAG_KEYGUARD;
         }
 
-        final boolean showWallpaperOnAod = mDozeParameters.getAlwaysOn() &&
-                state.wallpaperSupportsAmbientMode &&
-                state.scrimsVisibility != ScrimController.VISIBILITY_FULLY_OPAQUE;
-        if (state.keyguardShowing && !state.backdropShowing &&
-                (!state.dozing || showWallpaperOnAod)) {
+        final boolean scrimsOccludingWallpaper =
+                state.scrimsVisibility == ScrimController.VISIBILITY_FULLY_OPAQUE;
+        final boolean keyguardOrAod = state.keyguardShowing
+                || (state.dozing && mDozeParameters.getAlwaysOn());
+        if (keyguardOrAod && !state.backdropShowing && !scrimsOccludingWallpaper) {
             mLpChanged.flags |= WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER;
         } else {
             mLpChanged.flags &= ~WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER;

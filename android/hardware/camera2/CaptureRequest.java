@@ -24,6 +24,7 @@ import android.hardware.camera2.impl.SyntheticKey;
 import android.hardware.camera2.params.OutputConfiguration;
 import android.hardware.camera2.utils.HashCodeHelpers;
 import android.hardware.camera2.utils.TypeReference;
+import android.hardware.camera2.utils.SurfaceUtils;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.util.ArraySet;
@@ -643,6 +644,30 @@ public final class CaptureRequest extends CameraMetadata<CaptureRequest.Key<?>>
                         break;
                     }
                 }
+
+                if (!streamFound) {
+                    // Check if we can match s by native object ID
+                    long reqSurfaceId = SurfaceUtils.getSurfaceId(s);
+                    for (int j = 0; j < configuredOutputs.size(); ++j) {
+                        int streamId = configuredOutputs.keyAt(j);
+                        OutputConfiguration outConfig = configuredOutputs.valueAt(j);
+                        int surfaceId = 0;
+                        for (Surface outSurface : outConfig.getSurfaces()) {
+                            if (reqSurfaceId == SurfaceUtils.getSurfaceId(outSurface)) {
+                                streamFound = true;
+                                mStreamIdxArray[i] = streamId;
+                                mSurfaceIdxArray[i] = surfaceId;
+                                i++;
+                                break;
+                            }
+                            surfaceId++;
+                        }
+                        if (streamFound) {
+                            break;
+                        }
+                    }
+                }
+
                 if (!streamFound) {
                     mStreamIdxArray = null;
                     mSurfaceIdxArray = null;
@@ -783,7 +808,7 @@ public final class CaptureRequest extends CameraMetadata<CaptureRequest.Key<?>>
          *
          *<p>This method can be called for logical camera devices, which are devices that have
          * REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA capability and calls to
-         * {@link CameraCharacteristics#getPhysicalCameraIds} return a non-empty list of
+         * {@link CameraCharacteristics#getPhysicalCameraIds} return a non-empty set of
          * physical devices that are backing the logical camera. The camera Id included in the
          * 'physicalCameraId' argument selects an individual physical device that will receive
          * the customized capture request field.</p>
@@ -1432,7 +1457,8 @@ public final class CaptureRequest extends CameraMetadata<CaptureRequest.Key<?>>
      * is used, all non-zero weights will have the same effect. A region with 0 weight is
      * ignored.</p>
      * <p>If all regions have 0 weight, then no specific metering area needs to be used by the
-     * camera device.</p>
+     * camera device. The capture result will either be a zero weight region as well, or
+     * the region selected by the camera device as the focus area of interest.</p>
      * <p>If the metering region is outside the used {@link CaptureRequest#SCALER_CROP_REGION android.scaler.cropRegion} returned in
      * capture result metadata, the camera device will ignore the sections outside the crop
      * region and output only the intersection rectangle as the metering region in the result
@@ -2757,21 +2783,18 @@ public final class CaptureRequest extends CameraMetadata<CaptureRequest.Key<?>>
             new Key<Integer>("android.statistics.lensShadingMapMode", int.class);
 
     /**
-     * <p>Whether the camera device outputs the OIS data in output
+     * <p>A control for selecting whether OIS position information is included in output
      * result metadata.</p>
-     * <p>When set to ON,
-     * {@link CaptureResult#STATISTICS_OIS_TIMESTAMPS android.statistics.oisTimestamps}, android.statistics.oisShiftPixelX,
-     * android.statistics.oisShiftPixelY will provide OIS data in the output result metadata.</p>
      * <p><b>Possible values:</b>
      * <ul>
      *   <li>{@link #STATISTICS_OIS_DATA_MODE_OFF OFF}</li>
      *   <li>{@link #STATISTICS_OIS_DATA_MODE_ON ON}</li>
      * </ul></p>
      * <p><b>Available values for this device:</b><br>
-     * android.Statistics.info.availableOisDataModes</p>
+     * {@link CameraCharacteristics#STATISTICS_INFO_AVAILABLE_OIS_DATA_MODES android.statistics.info.availableOisDataModes}</p>
      * <p><b>Optional</b> - This value may be {@code null} on some devices.</p>
      *
-     * @see CaptureResult#STATISTICS_OIS_TIMESTAMPS
+     * @see CameraCharacteristics#STATISTICS_INFO_AVAILABLE_OIS_DATA_MODES
      * @see #STATISTICS_OIS_DATA_MODE_OFF
      * @see #STATISTICS_OIS_DATA_MODE_ON
      */
@@ -2830,6 +2853,8 @@ public final class CaptureRequest extends CameraMetadata<CaptureRequest.Key<?>>
      * of points can be less than max (that is, the request doesn't have to
      * always provide a curve with number of points equivalent to
      * {@link CameraCharacteristics#TONEMAP_MAX_CURVE_POINTS android.tonemap.maxCurvePoints}).</p>
+     * <p>For devices with MONOCHROME capability, only red channel is used. Green and blue channels
+     * are ignored.</p>
      * <p>A few examples, and their corresponding graphical mappings; these
      * only specify the red channel and the precision is limited to 4
      * digits, for conciseness.</p>
@@ -2892,6 +2917,8 @@ public final class CaptureRequest extends CameraMetadata<CaptureRequest.Key<?>>
      * of points can be less than max (that is, the request doesn't have to
      * always provide a curve with number of points equivalent to
      * {@link CameraCharacteristics#TONEMAP_MAX_CURVE_POINTS android.tonemap.maxCurvePoints}).</p>
+     * <p>For devices with MONOCHROME capability, only red channel is used. Green and blue channels
+     * are ignored.</p>
      * <p>A few examples, and their corresponding graphical mappings; these
      * only specify the red channel and the precision is limited to 4
      * digits, for conciseness.</p>
@@ -3143,6 +3170,49 @@ public final class CaptureRequest extends CameraMetadata<CaptureRequest.Key<?>>
     @PublicKey
     public static final Key<Float> REPROCESS_EFFECTIVE_EXPOSURE_FACTOR =
             new Key<Float>("android.reprocess.effectiveExposureFactor", float.class);
+
+    /**
+     * <p>Mode of operation for the lens distortion correction block.</p>
+     * <p>The lens distortion correction block attempts to improve image quality by fixing
+     * radial, tangential, or other geometric aberrations in the camera device's optics.  If
+     * available, the {@link CameraCharacteristics#LENS_DISTORTION android.lens.distortion} field documents the lens's distortion parameters.</p>
+     * <p>OFF means no distortion correction is done.</p>
+     * <p>FAST/HIGH_QUALITY both mean camera device determined distortion correction will be
+     * applied. HIGH_QUALITY mode indicates that the camera device will use the highest-quality
+     * correction algorithms, even if it slows down capture rate. FAST means the camera device
+     * will not slow down capture rate when applying correction. FAST may be the same as OFF if
+     * any correction at all would slow down capture rate.  Every output stream will have a
+     * similar amount of enhancement applied.</p>
+     * <p>The correction only applies to processed outputs such as YUV, JPEG, or DEPTH16; it is not
+     * applied to any RAW output.  Metadata coordinates such as face rectangles or metering
+     * regions are also not affected by correction.</p>
+     * <p>Applications enabling distortion correction need to pay extra attention when converting
+     * image coordinates between corrected output buffers and the sensor array. For example, if
+     * the app supports tap-to-focus and enables correction, it then has to apply the distortion
+     * model described in {@link CameraCharacteristics#LENS_DISTORTION android.lens.distortion} to the image buffer tap coordinates to properly
+     * calculate the tap position on the sensor active array to be used with
+     * {@link CaptureRequest#CONTROL_AF_REGIONS android.control.afRegions}. The same applies in reverse to detected face rectangles if
+     * they need to be drawn on top of the corrected output buffers.</p>
+     * <p><b>Possible values:</b>
+     * <ul>
+     *   <li>{@link #DISTORTION_CORRECTION_MODE_OFF OFF}</li>
+     *   <li>{@link #DISTORTION_CORRECTION_MODE_FAST FAST}</li>
+     *   <li>{@link #DISTORTION_CORRECTION_MODE_HIGH_QUALITY HIGH_QUALITY}</li>
+     * </ul></p>
+     * <p><b>Available values for this device:</b><br>
+     * {@link CameraCharacteristics#DISTORTION_CORRECTION_AVAILABLE_MODES android.distortionCorrection.availableModes}</p>
+     * <p><b>Optional</b> - This value may be {@code null} on some devices.</p>
+     *
+     * @see CaptureRequest#CONTROL_AF_REGIONS
+     * @see CameraCharacteristics#DISTORTION_CORRECTION_AVAILABLE_MODES
+     * @see CameraCharacteristics#LENS_DISTORTION
+     * @see #DISTORTION_CORRECTION_MODE_OFF
+     * @see #DISTORTION_CORRECTION_MODE_FAST
+     * @see #DISTORTION_CORRECTION_MODE_HIGH_QUALITY
+     */
+    @PublicKey
+    public static final Key<Integer> DISTORTION_CORRECTION_MODE =
+            new Key<Integer>("android.distortionCorrection.mode", int.class);
 
     /*~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~
      * End generated code

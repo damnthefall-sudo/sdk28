@@ -27,7 +27,6 @@ import android.util.Slog;
 import com.android.internal.app.procstats.ProcessStats;
 import com.android.internal.app.procstats.ProcessState;
 import com.android.internal.os.BatteryStatsImpl;
-import com.android.server.am.proto.ProcessRecordProto;
 
 import android.app.ActivityManager;
 import android.app.Dialog;
@@ -58,6 +57,7 @@ import java.util.Arrays;
 final class ProcessRecord {
     private static final String TAG = TAG_WITH_CLASS_NAME ? "ProcessRecord" : TAG_AM;
 
+    private final ActivityManagerService mService; // where we came from
     private final BatteryStatsImpl mBatteryStats; // where to collect runtime statistics
     final ApplicationInfo info; // all about the first app in the process
     final boolean isolated;     // true if this is a special isolated process
@@ -66,6 +66,8 @@ final class ProcessRecord {
     final String processName;   // name of the process
     // List of packages running in the process
     final ArrayMap<String, ProcessStats.ProcessStateHolder> pkgList = new ArrayMap<>();
+    final ProcessList.ProcStateMemTracker procStateMemTracker
+            = new ProcessList.ProcStateMemTracker();
     UidRecord uidRecord;        // overall state of process's uid.
     ArraySet<String> pkgDeps;   // additional packages we have a dependency on
     IApplicationThread thread;  // the actual proc...  may be null only if
@@ -102,6 +104,7 @@ final class ProcessRecord {
     int repProcState = PROCESS_STATE_NONEXISTENT; // Last reported process state
     int setProcState = PROCESS_STATE_NONEXISTENT; // Last set process state in process tracker
     int pssProcState = PROCESS_STATE_NONEXISTENT; // Currently requesting pss for
+    int pssStatType;            // The type of stat collection that we are currently requesting
     int savedPriority;          // Previous priority value if we're switching to non-SCHED_OTHER
     int renderThreadTid;        // TID for RenderThread
     boolean serviceb;           // Process currently is on the service B list
@@ -125,6 +128,12 @@ final class ProcessRecord {
                                 // android.view.WindowManager.LayoutParams#TYPE_APPLICATION_OVERLAY
                                 // When true the process will oom adj score will be set to
                                 // ProcessList#PERCEPTIBLE_APP_ADJ at minimum to reduce the chance
+                                // of the process getting killed.
+    boolean runningRemoteAnimation; // Is the process currently running a RemoteAnimation? When true
+                                // the process will be set to use the
+                                // ProcessList#SCHED_GROUP_TOP_APP scheduling group to boost
+                                // performance, as well as oom adj score will be set to
+                                // ProcessList#VISIBLE_APP_ADJ at minimum to reduce the chance
                                 // of the process getting killed.
     boolean pendingUiClean;     // Want to clean up resources from showing UI?
     boolean hasAboveClient;     // Bound using BIND_ABOVE_CLIENT, so want to be lower
@@ -285,6 +294,7 @@ final class ProcessRecord {
                 TimeUtils.formatDuration(lastActivityTime, nowUptime, pw);
                 pw.print(" lastPssTime=");
                 TimeUtils.formatDuration(lastPssTime, nowUptime, pw);
+                pw.print(" pssStatType="); pw.print(pssStatType);
                 pw.print(" nextPssTime=");
                 TimeUtils.formatDuration(nextPssTime, nowUptime, pw);
                 pw.println();
@@ -295,6 +305,8 @@ final class ProcessRecord {
                 pw.print(" lastCachedPss="); DebugUtils.printSizeValue(pw, lastCachedPss*1024);
                 pw.print(" lastCachedSwapPss="); DebugUtils.printSizeValue(pw, lastCachedSwapPss*1024);
                 pw.println();
+        pw.print(prefix); pw.print("procStateMemTracker: ");
+        procStateMemTracker.dumpLine(pw);
         pw.print(prefix); pw.print("cached="); pw.print(cached);
                 pw.print(" empty="); pw.println(empty);
         if (serviceb) {
@@ -330,9 +342,10 @@ final class ProcessRecord {
                     pw.print(" hasAboveClient="); pw.print(hasAboveClient);
                     pw.print(" treatLikeActivity="); pw.println(treatLikeActivity);
         }
-        if (hasTopUi || hasOverlayUi) {
+        if (hasTopUi || hasOverlayUi || runningRemoteAnimation) {
             pw.print(prefix); pw.print("hasTopUi="); pw.print(hasTopUi);
-                    pw.print(" hasOverlayUi="); pw.println(hasOverlayUi);
+                    pw.print(" hasOverlayUi="); pw.print(hasOverlayUi);
+                    pw.print(" runningRemoteAnimation="); pw.println(runningRemoteAnimation);
         }
         if (foregroundServices || forcingToImportant != null) {
             pw.print(prefix); pw.print("foregroundServices="); pw.print(foregroundServices);
@@ -474,8 +487,9 @@ final class ProcessRecord {
         }
     }
 
-    ProcessRecord(BatteryStatsImpl _batteryStats, ApplicationInfo _info,
-            String _processName, int _uid) {
+    ProcessRecord(ActivityManagerService _service, BatteryStatsImpl _batteryStats,
+            ApplicationInfo _info, String _processName, int _uid) {
+        mService = _service;
         mBatteryStats = _batteryStats;
         info = _info;
         isolated = _info.uid != _uid;
@@ -648,8 +662,10 @@ final class ProcessRecord {
     void kill(String reason, boolean noisy) {
         if (!killedByAm) {
             Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "kill");
-            if (noisy) {
-                Slog.i(TAG, "Killing " + toShortString() + " (adj " + setAdj + "): " + reason);
+            if (mService != null && (noisy || info.uid == mService.mCurOomAdjUid)) {
+                mService.reportUidInfoMessageLocked(TAG,
+                        "Killing " + toShortString() + " (adj " + setAdj + "): " + reason,
+                        info.uid);
             }
             if (pid > 0) {
                 EventLog.writeEvent(EventLogTags.AM_KILL, userId, pid, processName, setAdj, reason);

@@ -143,6 +143,7 @@ public class WifiConnectivityManager {
     private final AlarmManager mAlarmManager;
     private final Handler mEventHandler;
     private final Clock mClock;
+    private final ScoringParams mScoringParams;
     private final LocalLog mLocalLog;
     private final LinkedList<Long> mConnectionAttemptTimeStamps;
 
@@ -253,9 +254,9 @@ public class WifiConnectivityManager {
         // Check if any blacklisted BSSIDs can be freed.
         refreshBssidBlacklist();
 
-        if (mStateMachine.isLinkDebouncing() || mStateMachine.isSupplicantTransientState()) {
-            localLog(listenerName + " onResults: No network selection because linkDebouncing is "
-                    + mStateMachine.isLinkDebouncing() + " and supplicantTransient is "
+        if (mStateMachine.isSupplicantTransientState()) {
+            localLog(listenerName
+                    + " onResults: No network selection because supplicantTransientState is "
                     + mStateMachine.isSupplicantTransientState());
             return false;
         }
@@ -277,8 +278,11 @@ public class WifiConnectivityManager {
             if (mWifiState == WIFI_STATE_DISCONNECTED) {
                 mOpenNetworkNotifier.handleScanResults(
                         mNetworkSelector.getFilteredScanDetailsForOpenUnsavedNetworks());
-                mCarrierNetworkNotifier.handleScanResults(mNetworkSelector
-                        .getFilteredScanDetailsForCarrierUnsavedNetworks(mCarrierNetworkConfig));
+                if (mCarrierNetworkConfig.isCarrierEncryptionInfoAvailable()) {
+                    mCarrierNetworkNotifier.handleScanResults(
+                            mNetworkSelector.getFilteredScanDetailsForCarrierUnsavedNetworks(
+                                    mCarrierNetworkConfig));
+                }
             }
             return false;
         }
@@ -559,7 +563,8 @@ public class WifiConnectivityManager {
     /**
      * WifiConnectivityManager constructor
      */
-    WifiConnectivityManager(Context context, WifiStateMachine stateMachine,
+    WifiConnectivityManager(Context context, ScoringParams scoringParams,
+            WifiStateMachine stateMachine,
             WifiScanner scanner, WifiConfigManager configManager, WifiInfo wifiInfo,
             WifiNetworkSelector networkSelector, WifiConnectivityHelper connectivityHelper,
             WifiLastResortWatchdog wifiLastResortWatchdog, OpenNetworkNotifier openNetworkNotifier,
@@ -584,12 +589,12 @@ public class WifiConnectivityManager {
         mAlarmManager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
         mEventHandler = new Handler(looper);
         mClock = clock;
+        mScoringParams = scoringParams;
         mConnectionAttemptTimeStamps = new LinkedList<>();
 
-        mMin5GHzRssi = context.getResources().getInteger(
-                R.integer.config_wifi_framework_wifi_score_entry_rssi_threshold_5GHz);
-        mMin24GHzRssi = context.getResources().getInteger(
-                R.integer.config_wifi_framework_wifi_score_entry_rssi_threshold_24GHz);
+        //TODO(b/74793980) - handle these more dynamically
+        mMin5GHzRssi = mScoringParams.getEntryRssi(ScoringParams.BAND5);
+        mMin24GHzRssi = mScoringParams.getEntryRssi(ScoringParams.BAND2);
         mBand5GHzBonus = context.getResources().getInteger(
                 R.integer.config_wifi_framework_5GHz_preference_boost_factor);
         mCurrentConnectionBonus = context.getResources().getInteger(
@@ -598,14 +603,12 @@ public class WifiConnectivityManager {
                 R.integer.config_wifi_framework_SAME_BSSID_AWARD);
         mSecureBonus = context.getResources().getInteger(
                 R.integer.config_wifi_framework_SECURITY_AWARD);
-        int thresholdSaturatedRssi24 = context.getResources().getInteger(
-                R.integer.config_wifi_framework_wifi_score_good_rssi_threshold_24GHz);
         mEnableAutoJoinWhenAssociated = context.getResources().getBoolean(
                 R.bool.config_wifi_framework_enable_associated_network_selection);
-        mInitialScoreMax = (context.getResources().getInteger(
-                R.integer.config_wifi_framework_wifi_score_good_rssi_threshold_24GHz)
-                    + context.getResources().getInteger(
-                            R.integer.config_wifi_framework_RSSI_SCORE_OFFSET))
+        mInitialScoreMax = (Math.max(mScoringParams.getGoodRssi(ScoringParams.BAND2),
+                                     mScoringParams.getGoodRssi(ScoringParams.BAND5))
+                            + context.getResources().getInteger(
+                                    R.integer.config_wifi_framework_RSSI_SCORE_OFFSET))
                 * context.getResources().getInteger(
                         R.integer.config_wifi_framework_RSSI_SCORE_SLOPE);
         mFullScanMaxTxRate = context.getResources().getInteger(
@@ -914,6 +917,7 @@ public class WifiConnectivityManager {
         SingleScanListener singleScanListener =
                 new SingleScanListener(isFullBandScan);
         mScanner.startScan(settings, singleScanListener, workSource);
+        mWifiMetrics.incrementConnectivityOneshotScanCount();
     }
 
     // Start a periodic scan when screen is on

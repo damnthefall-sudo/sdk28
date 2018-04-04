@@ -17,6 +17,7 @@
 package android.media;
 
 import android.annotation.NonNull;
+import android.annotation.RequiresPermission;
 import android.annotation.SystemApi;
 import android.app.ActivityThread;
 import android.hardware.Camera;
@@ -25,8 +26,10 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
 import android.os.PersistableBundle;
+import android.text.TextUtils;
 import android.util.ArrayMap;
 import android.util.Log;
+import android.util.Pair;
 import android.view.Surface;
 
 import java.io.File;
@@ -34,6 +37,8 @@ import java.io.FileDescriptor;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.lang.ref.WeakReference;
+import java.util.ArrayList;
+import java.util.List;
 
 import com.android.internal.annotations.GuardedBy;
 
@@ -101,6 +106,8 @@ public class MediaRecorder implements AudioRouting
     private OnErrorListener mOnErrorListener;
     private OnInfoListener mOnInfoListener;
 
+    private int mChannelCount;
+
     /**
      * Default constructor.
      */
@@ -115,6 +122,7 @@ public class MediaRecorder implements AudioRouting
             mEventHandler = null;
         }
 
+        mChannelCount = 1;
         String packageName = ActivityThread.currentPackageName();
         /* Native setup requires a weak reference to our object.
          * It's easier to create it here than in C++.
@@ -275,6 +283,7 @@ public class MediaRecorder implements AudioRouting
          * third-party applications.
          * </p>
          */
+        @RequiresPermission(android.Manifest.permission.CAPTURE_AUDIO_OUTPUT)
         public static final int REMOTE_SUBMIX = 8;
 
         /** Microphone audio source tuned for unprocessed (raw) sound if available, behaves like
@@ -300,6 +309,7 @@ public class MediaRecorder implements AudioRouting
          * @hide
          */
         @SystemApi
+        @RequiresPermission(android.Manifest.permission.CAPTURE_AUDIO_HOTWORD)
         public static final int HOTWORD = 1999;
     }
 
@@ -749,6 +759,7 @@ public class MediaRecorder implements AudioRouting
         if (numChannels <= 0) {
             throw new IllegalArgumentException("Number of channels is not positive");
         }
+        mChannelCount = numChannels;
         setParameter("audio-param-number-of-channels=" + numChannels);
     }
 
@@ -1350,6 +1361,7 @@ public class MediaRecorder implements AudioRouting
     /*
      * Call BEFORE adding a routing callback handler or AFTER removing a routing callback handler.
      */
+    @GuardedBy("mRoutingChangeListeners")
     private void enableNativeRoutingCallbacksLocked(boolean enabled) {
         if (mRoutingChangeListeners.size() == 0) {
             native_enableDeviceCallback(enabled);
@@ -1405,6 +1417,45 @@ public class MediaRecorder implements AudioRouting
     private native final boolean native_setInputDevice(int deviceId);
     private native final int native_getRoutedDeviceId();
     private native final void native_enableDeviceCallback(boolean enabled);
+
+    //--------------------------------------------------------------------------
+    // Microphone information
+    //--------------------
+    /**
+     * Return A lists of {@link MicrophoneInfo} representing the active microphones.
+     * By querying channel mapping for each active microphone, developer can know how
+     * the microphone is used by each channels or a capture stream.
+     *
+     * @return a lists of {@link MicrophoneInfo} representing the active microphones
+     * @throws IOException if an error occurs
+     */
+    public List<MicrophoneInfo> getActiveMicrophones() throws IOException {
+        ArrayList<MicrophoneInfo> activeMicrophones = new ArrayList<>();
+        int status = native_getActiveMicrophones(activeMicrophones);
+        if (status != AudioManager.SUCCESS) {
+            Log.e(TAG, "getActiveMicrophones failed:" + status);
+            return new ArrayList<MicrophoneInfo>();
+        }
+        AudioManager.setPortIdForMicrophones(activeMicrophones);
+
+        // Use routed device when there is not information returned by hal.
+        if (activeMicrophones.size() == 0) {
+            AudioDeviceInfo device = getRoutedDevice();
+            if (device != null) {
+                MicrophoneInfo microphone = AudioManager.microphoneInfoFromAudioDeviceInfo(device);
+                ArrayList<Pair<Integer, Integer>> channelMapping = new ArrayList<>();
+                for (int i = 0; i < mChannelCount; i++) {
+                    channelMapping.add(new Pair(i, MicrophoneInfo.CHANNEL_MAPPING_DIRECT));
+                }
+                microphone.setChannelMapping(channelMapping);
+                activeMicrophones.add(microphone);
+            }
+        }
+        return activeMicrophones;
+    }
+
+    private native final int native_getActiveMicrophones(
+            ArrayList<MicrophoneInfo> activeMicrophones);
 
     /**
      * Called from native code when an interesting event happens.  This method

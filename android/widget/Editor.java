@@ -17,11 +17,13 @@
 package android.widget;
 
 import android.R;
+import android.animation.ValueAnimator;
 import android.annotation.IntDef;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.app.PendingIntent;
 import android.app.PendingIntent.CanceledException;
+import android.app.RemoteAction;
 import android.content.ClipData;
 import android.content.ClipData.Item;
 import android.content.Context;
@@ -37,6 +39,7 @@ import android.graphics.Color;
 import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.PointF;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.drawable.ColorDrawable;
@@ -99,6 +102,7 @@ import android.view.ViewGroup.LayoutParams;
 import android.view.ViewTreeObserver;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.animation.LinearInterpolator;
 import android.view.inputmethod.CorrectionInfo;
 import android.view.inputmethod.CursorAnchorInfo;
 import android.view.inputmethod.EditorInfo;
@@ -107,7 +111,7 @@ import android.view.inputmethod.ExtractedTextRequest;
 import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
 import android.view.textclassifier.TextClassification;
-import android.view.textclassifier.TextLinks;
+import android.view.textclassifier.TextClassificationManager;
 import android.widget.AdapterView.OnItemClickListener;
 import android.widget.TextView.Drawables;
 import android.widget.TextView.OnEditorActionListener;
@@ -200,11 +204,11 @@ public class Editor {
 
     private final boolean mHapticTextHandleEnabled;
 
-    private final Magnifier mMagnifier;
+    private final MagnifierMotionAnimator mMagnifierAnimator;
     private final Runnable mUpdateMagnifierRunnable = new Runnable() {
         @Override
         public void run() {
-            mMagnifier.update();
+            mMagnifierAnimator.update();
         }
     };
     // Update the magnifier contents whenever anything in the view hierarchy is updated.
@@ -215,7 +219,7 @@ public class Editor {
             new ViewTreeObserver.OnDrawListener() {
         @Override
         public void onDraw() {
-            if (mMagnifier != null) {
+            if (mMagnifierAnimator != null) {
                 // Posting the method will ensure that updating the magnifier contents will
                 // happen right after the rendering of the current frame.
                 mTextView.post(mUpdateMagnifierRunnable);
@@ -262,7 +266,8 @@ public class Editor {
     boolean mDiscardNextActionUp;
     boolean mIgnoreActionUpEvent;
 
-    long mShowCursor;
+    private long mShowCursor;
+    private boolean mRenderCursorRegardlessTiming;
     private Blink mBlink;
 
     boolean mCursorVisible = true;
@@ -285,6 +290,7 @@ public class Editor {
     boolean mShowSoftInputOnFocus = true;
     private boolean mPreserveSelection;
     private boolean mRestartActionModeOnNextRefresh;
+    private boolean mRequestingLinkActionMode;
 
     private SelectionActionModeHelper mSelectionActionModeHelper;
 
@@ -370,7 +376,9 @@ public class Editor {
         mHapticTextHandleEnabled = mTextView.getContext().getResources().getBoolean(
                 com.android.internal.R.bool.config_enableHapticTextHandle);
 
-        mMagnifier = FLAG_USE_MAGNIFIER ? new Magnifier(mTextView) : null;
+        if (FLAG_USE_MAGNIFIER) {
+            mMagnifierAnimator = new MagnifierMotionAnimator(new Magnifier(mTextView));
+        }
     }
 
     ParcelableParcel saveInstanceState() {
@@ -681,9 +689,20 @@ public class Editor {
         }
     }
 
-    boolean isCursorVisible() {
+    private boolean isCursorVisible() {
         // The default value is true, even when there is no associated Editor
         return mCursorVisible && mTextView.isTextEditable();
+    }
+
+    boolean shouldRenderCursor() {
+        if (!isCursorVisible()) {
+            return false;
+        }
+        if (mRenderCursorRegardlessTiming) {
+            return true;
+        }
+        final long showCursorDelta = SystemClock.uptimeMillis() - mShowCursor;
+        return showCursorDelta % (2 * BLINK) < BLINK;
     }
 
     void prepareCursorControllers() {
@@ -1299,6 +1318,16 @@ public class Editor {
             if (mSelectionModifierCursorController != null) {
                 mSelectionModifierCursorController.resetTouchOffsets();
             }
+
+            ensureNoSelectionIfNonSelectable();
+        }
+    }
+
+    private void ensureNoSelectionIfNonSelectable() {
+        // This could be the case if a TextLink has been tapped.
+        if (!mTextView.textCanBeSelected() && mTextView.hasSelection()) {
+            Selection.setSelection((Spannable) mTextView.getText(),
+                    mTextView.length(), mTextView.length());
         }
     }
 
@@ -1382,6 +1411,8 @@ public class Editor {
 
             // Don't leave us in the middle of a batch edit. Same as in onFocusChanged
             ensureEndedBatchEdit();
+
+            ensureNoSelectionIfNonSelectable();
         }
     }
 
@@ -1745,15 +1776,18 @@ public class Editor {
             highlight = null;
         }
 
+        if (mSelectionActionModeHelper != null) {
+            mSelectionActionModeHelper.onDraw(canvas);
+            if (mSelectionActionModeHelper.isDrawingHighlight()) {
+                highlight = null;
+            }
+        }
+
         if (mTextView.canHaveDisplayList() && canvas.isHardwareAccelerated()) {
             drawHardwareAccelerated(canvas, layout, highlight, highlightPaint,
                     cursorOffsetVertical);
         } else {
             layout.draw(canvas, highlight, highlightPaint, cursorOffsetVertical);
-        }
-
-        if (mSelectionActionModeHelper != null) {
-            mSelectionActionModeHelper.onDraw(canvas);
         }
     }
 
@@ -2090,13 +2124,13 @@ public class Editor {
         getSelectionActionModeHelper().startSelectionActionModeAsync(adjustSelection);
     }
 
-    void startLinkActionModeAsync(TextLinks.TextLink link) {
-        Preconditions.checkNotNull(link);
+    void startLinkActionModeAsync(int start, int end) {
         if (!(mTextView.getText() instanceof Spannable)) {
             return;
         }
         stopTextActionMode();
-        getSelectionActionModeHelper().startLinkActionModeAsync(link);
+        mRequestingLinkActionMode = true;
+        getSelectionActionModeHelper().startLinkActionModeAsync(start, end);
     }
 
     /**
@@ -2181,7 +2215,9 @@ public class Editor {
         mTextActionMode = mTextView.startActionMode(actionModeCallback, ActionMode.TYPE_FLOATING);
 
         final boolean selectionStarted = mTextActionMode != null;
-        if (selectionStarted && !mTextView.isTextSelectable() && mShowSoftInputOnFocus) {
+        if (selectionStarted
+                && mTextView.isTextEditable() && !mTextView.isTextSelectable()
+                && mShowSoftInputOnFocus) {
             // Show the IME to be able to replace text, except when selecting non editable text.
             final InputMethodManager imm = InputMethodManager.peekInstance();
             if (imm != null) {
@@ -2291,10 +2327,14 @@ public class Editor {
         if (!selectAllGotFocus && text.length() > 0) {
             // Move cursor
             final int offset = mTextView.getOffsetForPosition(event.getX(), event.getY());
-            Selection.setSelection((Spannable) text, offset);
-            if (mSpellChecker != null) {
-                // When the cursor moves, the word that was typed may need spell check
-                mSpellChecker.onSelectionChanged();
+
+            final boolean shouldInsertCursor = !mRequestingLinkActionMode;
+            if (shouldInsertCursor) {
+                Selection.setSelection((Spannable) text, offset);
+                if (mSpellChecker != null) {
+                    // When the cursor moves, the word that was typed may need spell check
+                    mSpellChecker.onSelectionChanged();
+                }
             }
 
             if (!extractedTextModeWillBeStarted()) {
@@ -2304,16 +2344,17 @@ public class Editor {
                         mTextView.removeCallbacks(mInsertionActionModeRunnable);
                     }
 
-                    mShowSuggestionRunnable = new Runnable() {
-                        public void run() {
-                            replace();
-                        }
-                    };
+                    mShowSuggestionRunnable = this::replace;
+
                     // removeCallbacks is performed on every touch
                     mTextView.postDelayed(mShowSuggestionRunnable,
                             ViewConfiguration.getDoubleTapTimeout());
                 } else if (hasInsertionController()) {
-                    getInsertionController().show();
+                    if (shouldInsertCursor) {
+                        getInsertionController().show();
+                    } else {
+                        getInsertionController().hide();
+                    }
                 }
             }
         }
@@ -3997,7 +4038,7 @@ public class Editor {
 
         private void updateAssistMenuItems(Menu menu) {
             clearAssistMenuItems(menu);
-            if (!mTextView.isDeviceProvisioned()) {
+            if (!shouldEnableAssistMenuItems()) {
                 return;
             }
             final TextClassification textClassification =
@@ -4005,39 +4046,44 @@ public class Editor {
             if (textClassification == null) {
                 return;
             }
-            if (isValidAssistMenuItem(
-                    textClassification.getIcon(),
-                    textClassification.getLabel(),
-                    textClassification.getIntent())) {
+            if (!textClassification.getActions().isEmpty()) {
+                // Primary assist action (Always shown).
+                final MenuItem item = addAssistMenuItem(menu,
+                        textClassification.getActions().get(0), TextView.ID_ASSIST,
+                        MENU_ITEM_ORDER_ASSIST, MenuItem.SHOW_AS_ACTION_ALWAYS);
+                item.setIntent(textClassification.getIntent());
+            } else if (hasLegacyAssistItem(textClassification)) {
+                // Legacy primary assist action (Always shown).
                 final MenuItem item = menu.add(
                         TextView.ID_ASSIST, TextView.ID_ASSIST, MENU_ITEM_ORDER_ASSIST,
                         textClassification.getLabel())
                         .setIcon(textClassification.getIcon())
                         .setIntent(textClassification.getIntent());
                 item.setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS);
-                mAssistClickHandlers.put(
-                        item, TextClassification.createStartActivityOnClickListener(
-                                mTextView.getContext(), textClassification.getIntent()));
+                mAssistClickHandlers.put(item, TextClassification.createIntentOnClickListener(
+                        TextClassification.createPendingIntent(mTextView.getContext(),
+                                textClassification.getIntent())));
             }
-            final int count = textClassification.getSecondaryActionsCount();
-            for (int i = 0; i < count; i++) {
-                if (!isValidAssistMenuItem(
-                        textClassification.getSecondaryIcon(i),
-                        textClassification.getSecondaryLabel(i),
-                        textClassification.getSecondaryIntent(i))) {
-                    continue;
-                }
-                final int order = MENU_ITEM_ORDER_SECONDARY_ASSIST_ACTIONS_START + i;
-                final MenuItem item = menu.add(
-                        TextView.ID_ASSIST, Menu.NONE, order,
-                        textClassification.getSecondaryLabel(i))
-                        .setIcon(textClassification.getSecondaryIcon(i))
-                        .setIntent(textClassification.getSecondaryIntent(i));
-                item.setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER);
-                mAssistClickHandlers.put(item,
-                        TextClassification.createStartActivityOnClickListener(
-                                mTextView.getContext(), textClassification.getSecondaryIntent(i)));
+            final int count = textClassification.getActions().size();
+            for (int i = 1; i < count; i++) {
+                // Secondary assist action (Never shown).
+                addAssistMenuItem(menu, textClassification.getActions().get(i), Menu.NONE,
+                        MENU_ITEM_ORDER_SECONDARY_ASSIST_ACTIONS_START + i - 1,
+                        MenuItem.SHOW_AS_ACTION_NEVER);
             }
+        }
+
+        private MenuItem addAssistMenuItem(Menu menu, RemoteAction action, int intemId, int order,
+                int showAsAction) {
+            final MenuItem item = menu.add(TextView.ID_ASSIST, intemId, order, action.getTitle())
+                    .setContentDescription(action.getContentDescription());
+            if (action.shouldShowIcon()) {
+                item.setIcon(action.getIcon().loadDrawable(mTextView.getContext()));
+            }
+            item.setShowAsAction(showAsAction);
+            mAssistClickHandlers.put(item,
+                    TextClassification.createIntentOnClickListener(action.getActionIntent()));
+            return item;
         }
 
         private void clearAssistMenuItems(Menu menu) {
@@ -4052,30 +4098,11 @@ public class Editor {
             }
         }
 
-        private boolean isValidAssistMenuItem(Drawable icon, CharSequence label, Intent intent) {
-            final boolean hasUi = icon != null || !TextUtils.isEmpty(label);
-            final boolean hasAction = isSupportedIntent(intent);
-            return hasUi && hasAction;
-        }
-
-        private boolean isSupportedIntent(Intent intent) {
-            if (intent == null) {
-                return false;
-            }
-            final Context context = mTextView.getContext();
-            final ResolveInfo info = context.getPackageManager().resolveActivity(intent, 0);
-            final boolean samePackage = context.getPackageName().equals(
-                    info.activityInfo.packageName);
-            if (samePackage) {
-                return true;
-            }
-
-            final boolean exported =  info.activityInfo.exported;
-            final boolean requiresPermission = info.activityInfo.permission != null;
-            final boolean hasPermission = !requiresPermission
-                    || context.checkSelfPermission(info.activityInfo.permission)
-                            == PackageManager.PERMISSION_GRANTED;
-            return exported && hasPermission;
+        private boolean hasLegacyAssistItem(TextClassification classification) {
+            // Check whether we have the UI data and and action.
+            return (classification.getIcon() != null || !TextUtils.isEmpty(
+                    classification.getLabel())) && (classification.getIntent() != null
+                    || classification.getOnClickListener() != null);
         }
 
         private boolean onAssistMenuItemClicked(MenuItem assistMenuItem) {
@@ -4083,7 +4110,7 @@ public class Editor {
 
             final TextClassification textClassification =
                     getSelectionActionModeHelper().getTextClassification();
-            if (!mTextView.isDeviceProvisioned() || textClassification == null) {
+            if (!shouldEnableAssistMenuItems() || textClassification == null) {
                 // No textClassification result to handle the click. Eat the click.
                 return true;
             }
@@ -4092,8 +4119,8 @@ public class Editor {
             if (onClickListener == null) {
                 final Intent intent = assistMenuItem.getIntent();
                 if (intent != null) {
-                    onClickListener = TextClassification.createStartActivityOnClickListener(
-                            mTextView.getContext(), intent);
+                    onClickListener = TextClassification.createIntentOnClickListener(
+                            TextClassification.createPendingIntent(mTextView.getContext(), intent));
                 }
             }
             if (onClickListener != null) {
@@ -4102,6 +4129,12 @@ public class Editor {
             }
             // We tried our best.
             return true;
+        }
+
+        private boolean shouldEnableAssistMenuItems() {
+            return mTextView.isDeviceProvisioned()
+                && TextClassificationManager.getSettings(mTextView.getContext())
+                        .isSmartTextShareEnabled();
         }
 
         @Override
@@ -4146,6 +4179,7 @@ public class Editor {
             }
 
             mAssistClickHandlers.clear();
+            mRequestingLinkActionMode = false;
         }
 
         @Override
@@ -4171,7 +4205,7 @@ public class Editor {
                         primaryHorizontal,
                         layout.getLineTop(line),
                         primaryHorizontal,
-                        layout.getLineBottom(line) - layout.getLineBottom(line) + mHandleHeight);
+                        layout.getLineBottom(line) + mHandleHeight);
             }
             // Take TextView's padding and scroll into account.
             int textHorizontalOffset = mTextView.viewportToContentHorizontalOffset();
@@ -4287,6 +4321,88 @@ public class Editor {
             }
 
             imm.updateCursorAnchorInfo(mTextView, builder.build());
+        }
+    }
+
+    private static class MagnifierMotionAnimator {
+        private static final long DURATION = 100 /* miliseconds */;
+
+        // The magnifier being animated.
+        private final Magnifier mMagnifier;
+        // A value animator used to animate the magnifier.
+        private final ValueAnimator mAnimator;
+
+        // Whether the magnifier is currently visible.
+        private boolean mMagnifierIsShowing;
+        // The coordinates of the magnifier when the currently running animation started.
+        private float mAnimationStartX;
+        private float mAnimationStartY;
+        // The coordinates of the magnifier in the latest animation frame.
+        private float mAnimationCurrentX;
+        private float mAnimationCurrentY;
+        // The latest coordinates the motion animator was asked to #show() the magnifier at.
+        private float mLastX;
+        private float mLastY;
+
+        private MagnifierMotionAnimator(final Magnifier magnifier) {
+            mMagnifier = magnifier;
+            // Prepare the animator used to run the motion animation.
+            mAnimator = ValueAnimator.ofFloat(0, 1);
+            mAnimator.setDuration(DURATION);
+            mAnimator.setInterpolator(new LinearInterpolator());
+            mAnimator.addUpdateListener((animation) -> {
+                // Interpolate to find the current position of the magnifier.
+                mAnimationCurrentX = mAnimationStartX
+                        + (mLastX - mAnimationStartX) * animation.getAnimatedFraction();
+                mAnimationCurrentY = mAnimationStartY
+                        + (mLastY - mAnimationStartY) * animation.getAnimatedFraction();
+                mMagnifier.show(mAnimationCurrentX, mAnimationCurrentY);
+            });
+        }
+
+        /**
+         * Shows the magnifier at a new position.
+         * If the y coordinate is different from the previous y coordinate
+         * (probably corresponding to a line jump in the text), a short
+         * animation is added to the jump.
+         */
+        private void show(final float x, final float y) {
+            final boolean startNewAnimation = mMagnifierIsShowing && y != mLastY;
+
+            if (startNewAnimation) {
+                if (mAnimator.isRunning()) {
+                    mAnimator.cancel();
+                    mAnimationStartX = mAnimationCurrentX;
+                    mAnimationStartY = mAnimationCurrentY;
+                } else {
+                    mAnimationStartX = mLastX;
+                    mAnimationStartY = mLastY;
+                }
+                mAnimator.start();
+            } else {
+                if (!mAnimator.isRunning()) {
+                    mMagnifier.show(x, y);
+                }
+            }
+            mLastX = x;
+            mLastY = y;
+            mMagnifierIsShowing = true;
+        }
+
+        /**
+         * Updates the content of the magnifier.
+         */
+        private void update() {
+            mMagnifier.update();
+        }
+
+        /**
+         * Dismisses the magnifier, or does nothing if it is already dismissed.
+         */
+        private void dismiss() {
+            mMagnifier.dismiss();
+            mAnimator.cancel();
+            mMagnifierIsShowing = false;
         }
     }
 
@@ -4469,8 +4585,8 @@ public class Editor {
             return mContainer.isShowing();
         }
 
-        private boolean isVisible() {
-            // Always show a dragging handle.
+        private boolean shouldShow() {
+            // A dragging handle should always be shown.
             if (mIsDragging) {
                 return true;
             }
@@ -4481,6 +4597,10 @@ public class Editor {
 
             return mTextView.isPositionVisible(
                     mPositionX + mHotspotX + getHorizontalOffset(), mPositionY);
+        }
+
+        private void setVisible(final boolean visible) {
+            mContainer.getContentView().setVisibility(visible ? VISIBLE : INVISIBLE);
         }
 
         public abstract int getCurrentCursorOffset();
@@ -4576,7 +4696,7 @@ public class Editor {
                     onHandleMoved();
                 }
 
-                if (isVisible()) {
+                if (shouldShow()) {
                     // Transform to the window coordinates to follow the view tranformation.
                     final int[] pts = { mPositionX + mHotspotX + getHorizontalOffset(), mPositionY};
                     mTextView.transformFromViewToWindowSpace(pts);
@@ -4629,49 +4749,134 @@ public class Editor {
             return 0;
         }
 
-        protected final void showMagnifier(@NonNull final MotionEvent event) {
-            if (mMagnifier == null) {
-                return;
-            }
+        private boolean tooLargeTextForMagnifier() {
+            final float magnifierContentHeight = Math.round(
+                    mMagnifierAnimator.mMagnifier.getHeight()
+                            / mMagnifierAnimator.mMagnifier.getZoom());
+            final Paint.FontMetrics fontMetrics = mTextView.getPaint().getFontMetrics();
+            final float glyphHeight = fontMetrics.descent - fontMetrics.ascent;
+            return glyphHeight > magnifierContentHeight;
+        }
+
+        /**
+         * Computes the position where the magnifier should be shown, relative to
+         * {@code mTextView}, and writes them to {@code showPosInView}. Also decides
+         * whether the magnifier should be shown or dismissed after this touch event.
+         * @return Whether the magnifier should be shown at the computed coordinates or dismissed.
+         */
+        private boolean obtainMagnifierShowCoordinates(@NonNull final MotionEvent event,
+                final PointF showPosInView) {
 
             final int trigger = getMagnifierHandleTrigger();
             final int offset;
+            final int otherHandleOffset;
             switch (trigger) {
-                case MagnifierHandleTrigger.INSERTION: // Fall through.
+                case MagnifierHandleTrigger.INSERTION:
+                    offset = mTextView.getSelectionStart();
+                    otherHandleOffset = -1;
+                    break;
                 case MagnifierHandleTrigger.SELECTION_START:
                     offset = mTextView.getSelectionStart();
+                    otherHandleOffset = mTextView.getSelectionEnd();
                     break;
                 case MagnifierHandleTrigger.SELECTION_END:
                     offset = mTextView.getSelectionEnd();
+                    otherHandleOffset = mTextView.getSelectionStart();
                     break;
                 default:
                     offset = -1;
+                    otherHandleOffset = -1;
                     break;
             }
 
             if (offset == -1) {
-                dismissMagnifier();
+                return false;
             }
 
             final Layout layout = mTextView.getLayout();
             final int lineNumber = layout.getLineForOffset(offset);
-            // Horizontally move the magnifier smoothly.
+            // Compute whether the selection handles are currently on the same line, and,
+            // in this particular case, whether the selected text is right to left.
+            final boolean sameLineSelection = otherHandleOffset != -1
+                    && lineNumber == layout.getLineForOffset(otherHandleOffset);
+            final boolean rtl = sameLineSelection
+                    && (offset < otherHandleOffset)
+                        != (getHorizontal(mTextView.getLayout(), offset)
+                            < getHorizontal(mTextView.getLayout(), otherHandleOffset));
+
+            // Horizontally move the magnifier smoothly, clamp inside the current line / selection.
             final int[] textViewLocationOnScreen = new int[2];
             mTextView.getLocationOnScreen(textViewLocationOnScreen);
-            final float xPosInView = event.getRawX() - textViewLocationOnScreen[0];
+            final float touchXInView = event.getRawX() - textViewLocationOnScreen[0];
+            float leftBound = mTextView.getTotalPaddingLeft() - mTextView.getScrollX();
+            float rightBound = mTextView.getTotalPaddingLeft() - mTextView.getScrollX();
+            if (sameLineSelection && ((trigger == MagnifierHandleTrigger.SELECTION_END) ^ rtl)) {
+                leftBound += getHorizontal(mTextView.getLayout(), otherHandleOffset);
+            } else {
+                leftBound += mTextView.getLayout().getLineLeft(lineNumber);
+            }
+            if (sameLineSelection && ((trigger == MagnifierHandleTrigger.SELECTION_START) ^ rtl)) {
+                rightBound += getHorizontal(mTextView.getLayout(), otherHandleOffset);
+            } else {
+                rightBound += mTextView.getLayout().getLineRight(lineNumber);
+            }
+            final float contentWidth = Math.round(mMagnifierAnimator.mMagnifier.getWidth()
+                    / mMagnifierAnimator.mMagnifier.getZoom());
+            if (touchXInView < leftBound - contentWidth / 2
+                    || touchXInView > rightBound + contentWidth / 2) {
+                // The touch is too far from the current line / selection, so hide the magnifier.
+                return false;
+            }
+            showPosInView.x = Math.max(leftBound, Math.min(rightBound, touchXInView));
+
             // Vertically snap to middle of current line.
-            final float yPosInView = (mTextView.getLayout().getLineTop(lineNumber)
+            showPosInView.y = (mTextView.getLayout().getLineTop(lineNumber)
                     + mTextView.getLayout().getLineBottom(lineNumber)) / 2.0f
                     + mTextView.getTotalPaddingTop() - mTextView.getScrollY();
 
-            suspendBlink();
-            mMagnifier.show(xPosInView, yPosInView);
+            return true;
+        }
+
+        private boolean handleOverlapsMagnifier() {
+            final int handleY = mContainer.getDecorViewLayoutParams().y;
+            final int magnifierBottomWhenAtWindowTop =
+                    mTextView.getRootWindowInsets().getSystemWindowInsetTop()
+                        + mMagnifierAnimator.mMagnifier.getHeight();
+            return handleY <= magnifierBottomWhenAtWindowTop;
+        }
+
+        protected final void updateMagnifier(@NonNull final MotionEvent event) {
+            if (mMagnifierAnimator == null) {
+                return;
+            }
+
+            final PointF showPosInView = new PointF();
+            final boolean shouldShow = !tooLargeTextForMagnifier()
+                    && obtainMagnifierShowCoordinates(event, showPosInView);
+            if (shouldShow) {
+                // Make the cursor visible and stop blinking.
+                mRenderCursorRegardlessTiming = true;
+                mTextView.invalidateCursorPath();
+                suspendBlink();
+                // Hide handle if it overlaps the magnifier.
+                if (handleOverlapsMagnifier()) {
+                    setVisible(false);
+                } else {
+                    setVisible(true);
+                }
+
+                mMagnifierAnimator.show(showPosInView.x, showPosInView.y);
+            } else {
+                dismissMagnifier();
+            }
         }
 
         protected final void dismissMagnifier() {
-            if (mMagnifier != null) {
-                mMagnifier.dismiss();
+            if (mMagnifierAnimator != null) {
+                mMagnifierAnimator.dismiss();
+                mRenderCursorRegardlessTiming = false;
                 resumeBlink();
+                setVisible(true);
             }
         }
 
@@ -4853,11 +5058,11 @@ public class Editor {
                 case MotionEvent.ACTION_DOWN:
                     mDownPositionX = ev.getRawX();
                     mDownPositionY = ev.getRawY();
-                    showMagnifier(ev);
+                    updateMagnifier(ev);
                     break;
 
                 case MotionEvent.ACTION_MOVE:
-                    showMagnifier(ev);
+                    updateMagnifier(ev);
                     break;
 
                 case MotionEvent.ACTION_UP:
@@ -5211,11 +5416,11 @@ public class Editor {
                     // re-engages the handle.
                     mTouchWordDelta = 0.0f;
                     mPrevX = UNSET_X_VALUE;
-                    showMagnifier(event);
+                    updateMagnifier(event);
                     break;
 
                 case MotionEvent.ACTION_MOVE:
-                    showMagnifier(event);
+                    updateMagnifier(event);
                     break;
 
                 case MotionEvent.ACTION_UP:

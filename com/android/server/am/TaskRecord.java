@@ -62,19 +62,19 @@ import static com.android.server.am.ActivityStack.REMOVE_TASK_MODE_MOVING_TO_TOP
 import static com.android.server.am.ActivityStackSupervisor.ON_TOP;
 import static com.android.server.am.ActivityStackSupervisor.PAUSE_IMMEDIATELY;
 import static com.android.server.am.ActivityStackSupervisor.PRESERVE_WINDOWS;
-import static com.android.server.am.proto.TaskRecordProto.ACTIVITIES;
-import static com.android.server.am.proto.TaskRecordProto.BOUNDS;
-import static com.android.server.am.proto.TaskRecordProto.CONFIGURATION_CONTAINER;
-import static com.android.server.am.proto.TaskRecordProto.FULLSCREEN;
-import static com.android.server.am.proto.TaskRecordProto.ID;
-import static com.android.server.am.proto.TaskRecordProto.LAST_NON_FULLSCREEN_BOUNDS;
-import static com.android.server.am.proto.TaskRecordProto.MIN_HEIGHT;
-import static com.android.server.am.proto.TaskRecordProto.MIN_WIDTH;
-import static com.android.server.am.proto.TaskRecordProto.ORIG_ACTIVITY;
-import static com.android.server.am.proto.TaskRecordProto.REAL_ACTIVITY;
-import static com.android.server.am.proto.TaskRecordProto.RESIZE_MODE;
-import static com.android.server.am.proto.TaskRecordProto.STACK_ID;
-import static com.android.server.am.proto.TaskRecordProto.ACTIVITY_TYPE;
+import static com.android.server.am.TaskRecordProto.ACTIVITIES;
+import static com.android.server.am.TaskRecordProto.BOUNDS;
+import static com.android.server.am.TaskRecordProto.CONFIGURATION_CONTAINER;
+import static com.android.server.am.TaskRecordProto.FULLSCREEN;
+import static com.android.server.am.TaskRecordProto.ID;
+import static com.android.server.am.TaskRecordProto.LAST_NON_FULLSCREEN_BOUNDS;
+import static com.android.server.am.TaskRecordProto.MIN_HEIGHT;
+import static com.android.server.am.TaskRecordProto.MIN_WIDTH;
+import static com.android.server.am.TaskRecordProto.ORIG_ACTIVITY;
+import static com.android.server.am.TaskRecordProto.REAL_ACTIVITY;
+import static com.android.server.am.TaskRecordProto.RESIZE_MODE;
+import static com.android.server.am.TaskRecordProto.STACK_ID;
+import static com.android.server.am.TaskRecordProto.ACTIVITY_TYPE;
 
 import static java.lang.Integer.MAX_VALUE;
 
@@ -537,7 +537,7 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
             if (updatedConfig) {
                 final ActivityRecord r = topRunningActivityLocked();
                 if (r != null && !deferResume) {
-                    kept = r.ensureActivityConfigurationLocked(0 /* globalChanges */,
+                    kept = r.ensureActivityConfiguration(0 /* globalChanges */,
                             preserveWindow);
                     mService.mStackSupervisor.ensureActivitiesVisibleLocked(r, 0,
                             !PRESERVE_WINDOWS);
@@ -650,7 +650,7 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
             final ActivityRecord r = topRunningActivityLocked();
             final boolean wasFocused = r != null && supervisor.isFocusedStack(sourceStack)
                     && (topRunningActivityLocked() == r);
-            final boolean wasResumed = r != null && sourceStack.mResumedActivity == r;
+            final boolean wasResumed = r != null && sourceStack.getResumedActivity() == r;
             final boolean wasPaused = r != null && sourceStack.mPausingActivity == r;
 
             // In some cases the focused stack isn't the front stack. E.g. pinned stack.
@@ -695,7 +695,7 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
                         wasPaused, reason);
             }
             if (!animate) {
-                toStack.mNoAnimActivities.add(topActivity);
+                mService.mStackSupervisor.mNoAnimActivities.add(topActivity);
             }
 
             // We might trigger a configuration change. Save the current task bounds for freezing.
@@ -944,7 +944,7 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
     }
 
     @Override
-    protected ConfigurationContainer getChildAt(int index) {
+    protected ActivityRecord getChildAt(int index) {
         return mActivities.get(index);
     }
 
@@ -1103,7 +1103,7 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
             // Increment the total number of non-finishing activities
             reportOut.numActivities++;
 
-            if (reportOut.top == null || (reportOut.top.state == ActivityState.INITIALIZING)) {
+            if (reportOut.top == null || (reportOut.top.isState(ActivityState.INITIALIZING))) {
                 reportOut.top = r;
                 // Reset the number of running activities until we hit the first non-initializing
                 // activity
@@ -1754,6 +1754,22 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
         return !mTmpConfig.equals(newConfig);
     }
 
+    /**
+     * This should be called when an child activity changes state. This should only
+     * be called from
+     * {@link ActivityRecord#setState(ActivityState, String)} .
+     * @param record The {@link ActivityRecord} whose state has changed.
+     * @param state The new state.
+     * @param reason The reason for the change.
+     */
+    void onActivityStateChanged(ActivityRecord record, ActivityState state, String reason) {
+        final ActivityStack parent = getStack();
+
+        if (parent != null) {
+            parent.onActivityStateChanged(record, state, reason);
+        }
+    }
+
     @Override
     public void onConfigurationChanged(Configuration newParentConfig) {
         final boolean wasInMultiWindowMode = inMultiWindowMode();
@@ -1882,6 +1898,12 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
         }
     }
 
+    void clearAllPendingOptions() {
+        for (int i = getChildCount() - 1; i >= 0; i--) {
+            getChildAt(i).clearOptionsLocked(false /* withAbort */);
+        }
+    }
+
     void dump(PrintWriter pw, String prefix) {
         pw.print(prefix); pw.print("userId="); pw.print(userId);
                 pw.print(" effectiveUid="); UserHandle.formatUid(pw, effectiveUid);
@@ -2002,7 +2024,7 @@ class TaskRecord extends ConfigurationContainer implements TaskWindowContainerLi
         } else if (intent != null) {
             sb.append(" I=");
             sb.append(intent.getComponent().flattenToShortString());
-        } else if (affinityIntent != null) {
+        } else if (affinityIntent != null && affinityIntent.getComponent() != null) {
             sb.append(" aI=");
             sb.append(affinityIntent.getComponent().flattenToShortString());
         } else {

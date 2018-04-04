@@ -329,13 +329,16 @@ public interface WebViewProvider {
 
         public void onProvideVirtualStructure(android.view.ViewStructure structure);
 
-        @SuppressWarnings("unused")
-        public default void onProvideAutofillVirtualStructure(android.view.ViewStructure structure,
-                int flags) {
+        default void onProvideAutofillVirtualStructure(
+                @SuppressWarnings("unused") android.view.ViewStructure structure,
+                @SuppressWarnings("unused") int flags) {
         }
 
-        @SuppressWarnings("unused")
-        public default void autofill(SparseArray<AutofillValue>values) {
+        default void autofill(@SuppressWarnings("unused") SparseArray<AutofillValue> values) {
+        }
+
+        default boolean isVisibleToUserForAutofill(@SuppressWarnings("unused") int virtualId) {
+            return true; // true is the default value returned by View.isVisibleToUserForAutofill()
         }
 
         public AccessibilityNodeProvider getAccessibilityNodeProvider();
@@ -424,6 +427,11 @@ public interface WebViewProvider {
         public Handler getHandler(Handler originalHandler);
 
         public View findFocus(View originalFocusedView);
+
+        @SuppressWarnings("unused")
+        default boolean onCheckIsTextEditor() {
+            return false;
+        }
     }
 
     interface ScrollDelegate {

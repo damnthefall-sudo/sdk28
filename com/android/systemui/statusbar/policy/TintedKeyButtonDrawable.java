@@ -17,6 +17,7 @@
 package com.android.systemui.statusbar.policy;
 
 import android.annotation.ColorInt;
+import android.graphics.Color;
 import android.graphics.drawable.Drawable;
 
 import com.android.internal.graphics.ColorUtils;
@@ -30,6 +31,9 @@ public class TintedKeyButtonDrawable extends KeyButtonDrawable {
     private final int mLightColor;
     private final int mDarkColor;
 
+    public static final float DARK_INTENSITY_NOT_SET = -1f;
+    private float mDarkIntensity = DARK_INTENSITY_NOT_SET;
+
     public static TintedKeyButtonDrawable create(Drawable drawable, @ColorInt int lightColor,
             @ColorInt int darkColor) {
         return new TintedKeyButtonDrawable(new Drawable[] { drawable }, lightColor, darkColor);
@@ -39,19 +43,36 @@ public class TintedKeyButtonDrawable extends KeyButtonDrawable {
         super(drawables);
         mLightColor = lightColor;
         mDarkColor = darkColor;
+        setDarkIntensity(0f); // Set initial coloration
     }
 
     @Override
     public void setDarkIntensity(float intensity) {
         // Duplicate intensity scaling from KeyButtonDrawable
-        int intermediateColor = ColorUtils.compositeColors(
-                setAlphaFloat(mDarkColor, intensity),
-                setAlphaFloat(mLightColor,1f - intensity));
+        mDarkIntensity = intensity;
+
+        // Dark and light colors may have an alpha component
+        final int intermediateColor = ColorUtils.compositeColors(
+                blendAlpha(mDarkColor, intensity),
+                blendAlpha(mLightColor, (1f - intensity)));
+
         getDrawable(0).setTint(intermediateColor);
         invalidateSelf();
     }
 
-    private int setAlphaFloat(int color, float alpha) {
-        return ColorUtils.setAlphaComponent(color, (int) (alpha * 255f));
+    private int blendAlpha(int color, float alpha) {
+        final float newAlpha = alpha < 0f ? 0f : (alpha > 1f ? 1f : alpha);
+        final float colorAlpha = Color.alpha(color) / 255f;
+        final int alphaInt = (int) (255 * newAlpha * colorAlpha); // Blend by multiplying
+        // Ensure alpha is clamped [0-255] or ColorUtils will crash
+        return ColorUtils.setAlphaComponent(color, alphaInt);
+    }
+
+    public boolean isDarkIntensitySet() {
+        return mDarkIntensity != DARK_INTENSITY_NOT_SET;
+    }
+
+    public float getDarkIntensity() {
+        return mDarkIntensity;
     }
 }

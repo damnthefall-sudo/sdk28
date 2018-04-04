@@ -26,6 +26,7 @@ import android.widget.ImageView;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 
+import com.android.internal.widget.MessagingImageMessage;
 import com.android.internal.widget.MessagingPropertyAnimator;
 import com.android.internal.widget.ViewClippingUtil;
 import com.android.systemui.Interpolators;
@@ -80,7 +81,7 @@ public class TransformState {
     private boolean mSameAsAny;
     private float mTransformationEndY = UNDEFINED;
     private float mTransformationEndX = UNDEFINED;
-    private Interpolator mDefaultInterpolator = Interpolators.FAST_OUT_SLOW_IN;
+    protected Interpolator mDefaultInterpolator = Interpolators.FAST_OUT_SLOW_IN;
 
     public void initFrom(View view, TransformInfo transformInfo) {
         mTransformedView = view;
@@ -131,14 +132,18 @@ public class TransformState {
         transformViewFrom(otherState, TRANSFORM_Y, null, transformationAmount);
     }
 
-    private void transformViewFrom(TransformState otherState, int transformationFlags,
+    protected void transformViewFrom(TransformState otherState, int transformationFlags,
             ViewTransformationHelper.CustomTransformation customTransformation,
             float transformationAmount) {
         final View transformedView = mTransformedView;
         boolean transformX = (transformationFlags & TRANSFORM_X) != 0;
         boolean transformY = (transformationFlags & TRANSFORM_Y) != 0;
-        boolean differentHeight = otherState.getViewHeight() != getViewHeight();
-        boolean differentWidth = otherState.getViewWidth() != getViewWidth();
+        int viewHeight = getViewHeight();
+        int otherHeight = otherState.getViewHeight();
+        boolean differentHeight = otherHeight != viewHeight && otherHeight != 0 && viewHeight != 0;
+        int viewWidth = getViewWidth();
+        int otherWidth = otherState.getViewWidth();
+        boolean differentWidth = otherWidth != viewWidth && otherWidth != 0 && viewWidth != 0;
         boolean transformScale = transformScale(otherState) && (differentHeight || differentWidth);
         // lets animate the positions correctly
         if (transformationAmount == 0.0f
@@ -165,15 +170,15 @@ public class TransformState {
                 // we also want to animate the scale if we're the same
                 View otherView = otherState.getTransformedView();
                 if (transformScale && differentWidth) {
-                    setTransformationStartScaleX(otherState.getViewWidth() * otherView.getScaleX()
-                            / (float) getViewWidth());
+                    setTransformationStartScaleX(otherWidth * otherView.getScaleX()
+                            / (float) viewWidth);
                     transformedView.setPivotX(0);
                 } else {
                     setTransformationStartScaleX(UNDEFINED);
                 }
                 if (transformScale && differentHeight) {
-                    setTransformationStartScaleY(otherState.getViewHeight() * otherView.getScaleY()
-                            / (float) getViewHeight());
+                    setTransformationStartScaleY(otherHeight * otherView.getScaleY()
+                            / (float) viewHeight);
                     transformedView.setPivotY(0);
                 } else {
                     setTransformationStartScaleY(UNDEFINED);
@@ -442,6 +447,11 @@ public class TransformState {
         }
         if (view.getId() == com.android.internal.R.id.notification_messaging) {
             MessagingLayoutTransformState result = MessagingLayoutTransformState.obtain();
+            result.initFrom(view, transformInfo);
+            return result;
+        }
+        if (view instanceof MessagingImageMessage) {
+            MessagingImageTransformState result = MessagingImageTransformState.obtain();
             result.initFrom(view, transformInfo);
             return result;
         }

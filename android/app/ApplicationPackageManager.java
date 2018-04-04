@@ -20,6 +20,7 @@ import android.annotation.DrawableRes;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.annotation.StringRes;
+import android.annotation.UserIdInt;
 import android.annotation.XmlRes;
 import android.content.ComponentName;
 import android.content.ContentResolver;
@@ -69,6 +70,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
+import android.os.PersistableBundle;
 import android.os.Process;
 import android.os.RemoteException;
 import android.os.SystemProperties;
@@ -137,6 +139,11 @@ public class ApplicationPackageManager extends PackageManager {
             }
             return mUserManager;
         }
+    }
+
+    @Override
+    public int getUserId() {
+        return mContext.getUserId();
     }
 
     @Override
@@ -1026,16 +1033,22 @@ public class ApplicationPackageManager extends PackageManager {
     }
 
     @Override
-    public ResolveInfo resolveService(Intent intent, int flags) {
+    public ResolveInfo resolveServiceAsUser(Intent intent, @ResolveInfoFlags int flags,
+            @UserIdInt int userId) {
         try {
             return mPM.resolveService(
                 intent,
                 intent.resolveTypeIfNeeded(mContext.getContentResolver()),
                 flags,
-                mContext.getUserId());
+                userId);
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
+    }
+
+    @Override
+    public ResolveInfo resolveService(Intent intent, int flags) {
+        return resolveServiceAsUser(intent, flags, mContext.getUserId());
     }
 
     @Override
@@ -1349,11 +1362,10 @@ public class ApplicationPackageManager extends PackageManager {
         if (badgeColor == null) {
             return null;
         }
-        badgeColor.setTint(getUserBadgeColor(user));
         Drawable badgeForeground = getDrawableForDensity(
                 com.android.internal.R.drawable.ic_corp_badge_case, density);
-        Drawable badge = new LayerDrawable(
-                new Drawable[] {badgeColor, badgeForeground });
+        badgeForeground.setTint(getUserBadgeColor(user));
+        Drawable badge = new LayerDrawable(new Drawable[] {badgeColor, badgeForeground });
         return badge;
     }
 
@@ -1409,7 +1421,7 @@ public class ApplicationPackageManager extends PackageManager {
                     sameUid ? app.sourceDir : app.publicSourceDir,
                     sameUid ? app.splitSourceDirs : app.splitPublicSourceDirs,
                     app.resourceDirs, app.sharedLibraryFiles, Display.DEFAULT_DISPLAY,
-                    mContext.mLoadedApk);
+                    mContext.mPackageInfo);
         if (r != null) {
             return r;
         }
@@ -2140,12 +2152,39 @@ public class ApplicationPackageManager extends PackageManager {
     }
 
     @Override
-    public String[] setPackagesSuspendedAsUser(String[] packageNames, boolean suspended,
-            int userId) {
+    public String[] setPackagesSuspended(String[] packageNames, boolean suspended,
+            PersistableBundle appExtras, PersistableBundle launcherExtras,
+            String dialogMessage) {
+        // TODO (b/75332201): Pass in the dialogMessage and use it in the interceptor dialog
         try {
-            return mPM.setPackagesSuspendedAsUser(packageNames, suspended, userId);
+            return mPM.setPackagesSuspendedAsUser(packageNames, suspended, appExtras,
+                    launcherExtras, mContext.getOpPackageName(), mContext.getUserId());
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
+        }
+    }
+
+    @Override
+    public PersistableBundle getSuspendedPackageAppExtras(String packageName) {
+        try {
+            return mPM.getSuspendedPackageAppExtras(packageName, mContext.getUserId());
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    @Override
+    public Bundle getSuspendedPackageAppExtras() {
+        final PersistableBundle extras = getSuspendedPackageAppExtras(mContext.getOpPackageName());
+        return extras != null ? new Bundle(extras.deepCopy()) : null;
+    }
+
+    @Override
+    public void setSuspendedPackageAppExtras(String packageName, PersistableBundle appExtras) {
+        try {
+            mPM.setSuspendedPackageAppExtras(packageName, appExtras, mContext.getUserId());
+        } catch (RemoteException e) {
+            e.rethrowFromSystemServer();
         }
     }
 
@@ -2156,6 +2195,17 @@ public class ApplicationPackageManager extends PackageManager {
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         }
+    }
+
+    /** @hide */
+    @Override
+    public boolean isPackageSuspended(String packageName) {
+        return isPackageSuspendedForUser(packageName, mContext.getUserId());
+    }
+
+    @Override
+    public boolean isPackageSuspended() {
+        return isPackageSuspendedForUser(mContext.getOpPackageName(), mContext.getUserId());
     }
 
     /** @hide */
@@ -2795,6 +2845,24 @@ public class ApplicationPackageManager extends PackageManager {
                 }
             }
             return mArtManager;
+        }
+    }
+
+    @Override
+    public String getSystemTextClassifierPackageName() {
+        try {
+            return mPM.getSystemTextClassifierPackageName();
+        } catch (RemoteException e) {
+            throw e.rethrowAsRuntimeException();
+        }
+    }
+
+    @Override
+    public boolean isPackageStateProtected(String packageName, int userId) {
+        try {
+            return mPM.isPackageStateProtected(packageName, userId);
+        } catch (RemoteException e) {
+            throw e.rethrowAsRuntimeException();
         }
     }
 }

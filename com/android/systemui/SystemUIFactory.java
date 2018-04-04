@@ -27,9 +27,11 @@ import com.android.internal.logging.MetricsLogger;
 import com.android.internal.widget.LockPatternUtils;
 import com.android.keyguard.ViewMediatorCallback;
 import com.android.systemui.Dependency.DependencyProvider;
+import com.android.systemui.classifier.FalsingManager;
 import com.android.systemui.keyguard.DismissCallbackRegistry;
 import com.android.systemui.qs.QSTileHost;
 import com.android.systemui.statusbar.KeyguardIndicationController;
+import com.android.systemui.statusbar.NotificationBlockingHelperManager;
 import com.android.systemui.statusbar.NotificationEntryManager;
 import com.android.systemui.statusbar.NotificationGutsManager;
 import com.android.systemui.statusbar.NotificationListener;
@@ -52,6 +54,7 @@ import com.android.systemui.statusbar.phone.StatusBar;
 import com.android.systemui.statusbar.phone.StatusBarIconController;
 import com.android.systemui.statusbar.phone.StatusBarKeyguardViewManager;
 import com.android.systemui.statusbar.policy.DeviceProvisionedController;
+import com.android.systemui.statusbar.policy.SmartReplyConstants;
 
 import java.util.function.Consumer;
 
@@ -94,14 +97,14 @@ public class SystemUIFactory {
             LockPatternUtils lockPatternUtils,
             ViewGroup container, DismissCallbackRegistry dismissCallbackRegistry) {
         return new KeyguardBouncer(context, callback, lockPatternUtils, container,
-                dismissCallbackRegistry);
+                dismissCallbackRegistry, FalsingManager.getInstance(context));
     }
 
     public ScrimController createScrimController(LightBarController lightBarController,
-            ScrimView scrimBehind, ScrimView scrimInFront, View headsUpScrim,
-            LockscreenWallpaper lockscreenWallpaper, Consumer<Integer> scrimVisibleListener,
-            DozeParameters dozeParameters, AlarmManager alarmManager) {
-        return new ScrimController(lightBarController, scrimBehind, scrimInFront, headsUpScrim,
+            ScrimView scrimBehind, ScrimView scrimInFront, LockscreenWallpaper lockscreenWallpaper,
+            Consumer<Integer> scrimVisibleListener, DozeParameters dozeParameters,
+            AlarmManager alarmManager) {
+        return new ScrimController(lightBarController, scrimBehind, scrimInFront,
                 scrimVisibleListener, dozeParameters, alarmManager);
     }
 
@@ -128,8 +131,12 @@ public class SystemUIFactory {
         providers.put(NotificationGroupManager.class, NotificationGroupManager::new);
         providers.put(NotificationMediaManager.class, () -> new NotificationMediaManager(context));
         providers.put(NotificationGutsManager.class, () -> new NotificationGutsManager(context));
+        providers.put(NotificationBlockingHelperManager.class,
+                () -> new NotificationBlockingHelperManager(context));
         providers.put(NotificationRemoteInputManager.class,
                 () -> new NotificationRemoteInputManager(context));
+        providers.put(SmartReplyConstants.class,
+                () -> new SmartReplyConstants(Dependency.get(Dependency.MAIN_HANDLER), context));
         providers.put(NotificationListener.class, () -> new NotificationListener(context));
         providers.put(NotificationLogger.class, NotificationLogger::new);
         providers.put(NotificationViewHierarchyManager.class,

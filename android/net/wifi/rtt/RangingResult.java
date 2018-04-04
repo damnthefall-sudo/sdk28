@@ -19,30 +19,32 @@ package android.net.wifi.rtt;
 import android.annotation.IntDef;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.SystemApi;
 import android.net.MacAddress;
 import android.net.wifi.aware.PeerHandle;
-import android.os.Handler;
 import android.os.Parcel;
 import android.os.Parcelable;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 
 /**
  * Ranging result for a request started by
- * {@link WifiRttManager#startRanging(RangingRequest, RangingResultCallback, Handler)}. Results are
- * returned in {@link RangingResultCallback#onRangingResults(List)}.
+ * {@link WifiRttManager#startRanging(RangingRequest, java.util.concurrent.Executor, RangingResultCallback)}.
+ * Results are returned in {@link RangingResultCallback#onRangingResults(List)}.
  * <p>
  * A ranging result is the distance measurement result for a single device specified in the
  * {@link RangingRequest}.
  */
 public final class RangingResult implements Parcelable {
     private static final String TAG = "RangingResult";
+    private static final byte[] EMPTY_BYTE_ARRAY = new byte[0];
 
     /** @hide */
-    @IntDef({STATUS_SUCCESS, STATUS_FAIL})
+    @IntDef({STATUS_SUCCESS, STATUS_FAIL, STATUS_RESPONDER_DOES_NOT_SUPPORT_IEEE80211MC})
     @Retention(RetentionPolicy.SOURCE)
     public @interface RangeResultStatus {
     }
@@ -59,43 +61,60 @@ public final class RangingResult implements Parcelable {
      */
     public static final int STATUS_FAIL = 1;
 
+    /**
+     * Individual range request status, {@link #getStatus()}. Indicates that the ranging operation
+     * failed because the specified peer does not support IEEE 802.11mc RTT operations. Support by
+     * an Access Point can be confirmed using
+     * {@link android.net.wifi.ScanResult#is80211mcResponder()}.
+     * <p>
+     * On such a failure, the individual result fields of {@link RangingResult} such as
+     * {@link RangingResult#getDistanceMm()} are invalid.
+     */
+    public static final int STATUS_RESPONDER_DOES_NOT_SUPPORT_IEEE80211MC = 2;
+
     private final int mStatus;
     private final MacAddress mMac;
     private final PeerHandle mPeerHandle;
     private final int mDistanceMm;
     private final int mDistanceStdDevMm;
     private final int mRssi;
-    private final LocationConfigurationInformation mLci;
-    private final LocationCivic mLcr;
+    private final int mNumAttemptedMeasurements;
+    private final int mNumSuccessfulMeasurements;
+    private final byte[] mLci;
+    private final byte[] mLcr;
     private final long mTimestamp;
 
     /** @hide */
     public RangingResult(@RangeResultStatus int status, @NonNull MacAddress mac, int distanceMm,
-            int distanceStdDevMm, int rssi, LocationConfigurationInformation lci, LocationCivic lcr,
-            long timestamp) {
+            int distanceStdDevMm, int rssi, int numAttemptedMeasurements,
+            int numSuccessfulMeasurements, byte[] lci, byte[] lcr, long timestamp) {
         mStatus = status;
         mMac = mac;
         mPeerHandle = null;
         mDistanceMm = distanceMm;
         mDistanceStdDevMm = distanceStdDevMm;
         mRssi = rssi;
-        mLci = lci;
-        mLcr = lcr;
+        mNumAttemptedMeasurements = numAttemptedMeasurements;
+        mNumSuccessfulMeasurements = numSuccessfulMeasurements;
+        mLci = lci == null ? EMPTY_BYTE_ARRAY : lci;
+        mLcr = lcr == null ? EMPTY_BYTE_ARRAY : lcr;
         mTimestamp = timestamp;
     }
 
     /** @hide */
     public RangingResult(@RangeResultStatus int status, PeerHandle peerHandle, int distanceMm,
-            int distanceStdDevMm, int rssi, LocationConfigurationInformation lci, LocationCivic lcr,
-            long timestamp) {
+            int distanceStdDevMm, int rssi, int numAttemptedMeasurements,
+            int numSuccessfulMeasurements, byte[] lci, byte[] lcr, long timestamp) {
         mStatus = status;
         mMac = null;
         mPeerHandle = peerHandle;
         mDistanceMm = distanceMm;
         mDistanceStdDevMm = distanceStdDevMm;
         mRssi = rssi;
-        mLci = lci;
-        mLcr = lcr;
+        mNumAttemptedMeasurements = numAttemptedMeasurements;
+        mNumSuccessfulMeasurements = numSuccessfulMeasurements;
+        mLci = lci == null ? EMPTY_BYTE_ARRAY : lci;
+        mLcr = lcr == null ? EMPTY_BYTE_ARRAY : lcr;
         mTimestamp = timestamp;
     }
 
@@ -135,6 +154,8 @@ public final class RangingResult implements Parcelable {
      * @return The distance (in mm) to the device specified by {@link #getMacAddress()} or
      * {@link #getPeerHandle()}.
      * <p>
+     * Note: the measured distance may be negative for very close devices.
+     * <p>
      * Only valid if {@link #getStatus()} returns {@link #STATUS_SUCCESS}, otherwise will throw an
      * exception.
      */
@@ -149,7 +170,9 @@ public final class RangingResult implements Parcelable {
     /**
      * @return The standard deviation of the measured distance (in mm) to the device specified by
      * {@link #getMacAddress()} or {@link #getPeerHandle()}. The standard deviation is calculated
-     * over the measurements executed in a single RTT burst.
+     * over the measurements executed in a single RTT burst. The number of measurements is returned
+     * by {@link #getNumSuccessfulMeasurements()} - 0 successful measurements indicate that the
+     * standard deviation is not valid (a valid standard deviation requires at least 2 data points).
      * <p>
      * Only valid if {@link #getStatus()} returns {@link #STATUS_SUCCESS}, otherwise will throw an
      * exception.
@@ -163,7 +186,7 @@ public final class RangingResult implements Parcelable {
     }
 
     /**
-     * @return The average RSSI (in units of -0.5dB) observed during the RTT measurement.
+     * @return The average RSSI, in units of dBm, observed during the RTT measurement.
      * <p>
      * Only valid if {@link #getStatus()} returns {@link #STATUS_SUCCESS}, otherwise will throw an
      * exception.
@@ -177,29 +200,76 @@ public final class RangingResult implements Parcelable {
     }
 
     /**
-     * @return The Location Configuration Information (LCI) as self-reported by the peer.
+     * @return The number of attempted measurements used in the RTT exchange resulting in this set
+     * of results. The number of successful measurements is returned by
+     * {@link #getNumSuccessfulMeasurements()} which at most, if there are no errors, will be 1 less
+     * that the number of attempted measurements.
+     * <p>
+     * Only valid if {@link #getStatus()} returns {@link #STATUS_SUCCESS}, otherwise will throw an
+     * exception.
+     */
+    public int getNumAttemptedMeasurements() {
+        if (mStatus != STATUS_SUCCESS) {
+            throw new IllegalStateException(
+                    "getNumAttemptedMeasurements(): invoked on an invalid result: getStatus()="
+                            + mStatus);
+        }
+        return mNumAttemptedMeasurements;
+    }
+
+    /**
+     * @return The number of successful measurements used to calculate the distance and standard
+     * deviation. If the number of successful measurements if 1 then then standard deviation,
+     * returned by {@link #getDistanceStdDevMm()}, is not valid (a 0 is returned for the standard
+     * deviation).
+     * <p>
+     * The total number of measurement attempts is returned by
+     * {@link #getNumAttemptedMeasurements()}. The number of successful measurements will be at
+     * most 1 less then the number of attempted measurements.
+     * <p>
+     * Only valid if {@link #getStatus()} returns {@link #STATUS_SUCCESS}, otherwise will throw an
+     * exception.
+     */
+    public int getNumSuccessfulMeasurements() {
+        if (mStatus != STATUS_SUCCESS) {
+            throw new IllegalStateException(
+                    "getNumSuccessfulMeasurements(): invoked on an invalid result: getStatus()="
+                            + mStatus);
+        }
+        return mNumSuccessfulMeasurements;
+    }
+
+    /**
+     * @return The Location Configuration Information (LCI) as self-reported by the peer. The format
+     * is specified in the IEEE 802.11-2016 specifications, section 9.4.2.22.10.
      * <p>
      * Note: the information is NOT validated - use with caution. Consider validating it with
      * other sources of information before using it.
+     *
+     * @hide
      */
-    @Nullable
-    public LocationConfigurationInformation getReportedLocationConfigurationInformation() {
+    @SystemApi
+    @NonNull
+    public byte[] getLci() {
         if (mStatus != STATUS_SUCCESS) {
             throw new IllegalStateException(
-                    "getReportedLocationConfigurationInformation(): invoked on an invalid result: "
-                            + "getStatus()=" + mStatus);
+                    "getLci(): invoked on an invalid result: getStatus()=" + mStatus);
         }
         return mLci;
     }
 
     /**
-     * @return The Location Civic report (LCR) as self-reported by the peer.
+     * @return The Location Civic report (LCR) as self-reported by the peer. The format
+     * is specified in the IEEE 802.11-2016 specifications, section 9.4.2.22.13.
      * <p>
      * Note: the information is NOT validated - use with caution. Consider validating it with
      * other sources of information before using it.
+     *
+     * @hide
      */
-    @Nullable
-    public LocationCivic getReportedLocationCivic() {
+    @SystemApi
+    @NonNull
+    public byte[] getLcr() {
         if (mStatus != STATUS_SUCCESS) {
             throw new IllegalStateException(
                     "getReportedLocationCivic(): invoked on an invalid result: getStatus()="
@@ -209,15 +279,18 @@ public final class RangingResult implements Parcelable {
     }
 
     /**
-     * @return The timestamp, in us since boot, at which the ranging operation was performed.
+     * @return The timestamp at which the ranging operation was performed. The timestamp is in
+     * milliseconds since boot, including time spent in sleep, corresponding to values provided by
+     * {@link android.os.SystemClock#elapsedRealtime()}.
      * <p>
      * Only valid if {@link #getStatus()} returns {@link #STATUS_SUCCESS}, otherwise will throw an
      * exception.
      */
-    public long getRangingTimestampUs() {
+    public long getRangingTimestampMillis() {
         if (mStatus != STATUS_SUCCESS) {
             throw new IllegalStateException(
-                    "getRangingTimestamp(): invoked on an invalid result: getStatus()=" + mStatus);
+                    "getRangingTimestampMillis(): invoked on an invalid result: getStatus()="
+                            + mStatus);
         }
         return mTimestamp;
     }
@@ -245,18 +318,10 @@ public final class RangingResult implements Parcelable {
         dest.writeInt(mDistanceMm);
         dest.writeInt(mDistanceStdDevMm);
         dest.writeInt(mRssi);
-        if (mLci == null) {
-            dest.writeBoolean(false);
-        } else {
-            dest.writeBoolean(true);
-            mLci.writeToParcel(dest, flags);
-        }
-        if (mLcr == null) {
-            dest.writeBoolean(false);
-        } else {
-            dest.writeBoolean(true);
-            mLcr.writeToParcel(dest, flags);
-        }
+        dest.writeInt(mNumAttemptedMeasurements);
+        dest.writeInt(mNumSuccessfulMeasurements);
+        dest.writeByteArray(mLci);
+        dest.writeByteArray(mLcr);
         dest.writeLong(mTimestamp);
     }
 
@@ -282,23 +347,17 @@ public final class RangingResult implements Parcelable {
             int distanceMm = in.readInt();
             int distanceStdDevMm = in.readInt();
             int rssi = in.readInt();
-            boolean lciPresent = in.readBoolean();
-            LocationConfigurationInformation lci = null;
-            if (lciPresent) {
-                lci = LocationConfigurationInformation.CREATOR.createFromParcel(in);
-            }
-            boolean lcrPresent = in.readBoolean();
-            LocationCivic lcr = null;
-            if (lcrPresent) {
-                lcr = LocationCivic.CREATOR.createFromParcel(in);
-            }
+            int numAttemptedMeasurements = in.readInt();
+            int numSuccessfulMeasurements = in.readInt();
+            byte[] lci = in.createByteArray();
+            byte[] lcr = in.createByteArray();
             long timestamp = in.readLong();
             if (peerHandlePresent) {
                 return new RangingResult(status, peerHandle, distanceMm, distanceStdDevMm, rssi,
-                        lci, lcr, timestamp);
+                        numAttemptedMeasurements, numSuccessfulMeasurements, lci, lcr, timestamp);
             } else {
                 return new RangingResult(status, mac, distanceMm, distanceStdDevMm, rssi,
-                        lci, lcr, timestamp);
+                        numAttemptedMeasurements, numSuccessfulMeasurements, lci, lcr, timestamp);
             }
         }
     };
@@ -310,7 +369,9 @@ public final class RangingResult implements Parcelable {
                 mMac).append(", peerHandle=").append(
                 mPeerHandle == null ? "<null>" : mPeerHandle.peerId).append(", distanceMm=").append(
                 mDistanceMm).append(", distanceStdDevMm=").append(mDistanceStdDevMm).append(
-                ", rssi=").append(mRssi).append(", lci=").append(mLci).append(", lcr=").append(
+                ", rssi=").append(mRssi).append(", numAttemptedMeasurements=").append(
+                mNumAttemptedMeasurements).append(", numSuccessfulMeasurements=").append(
+                mNumSuccessfulMeasurements).append(", lci=").append(mLci).append(", lcr=").append(
                 mLcr).append(", timestamp=").append(mTimestamp).append("]").toString();
     }
 
@@ -329,13 +390,15 @@ public final class RangingResult implements Parcelable {
         return mStatus == lhs.mStatus && Objects.equals(mMac, lhs.mMac) && Objects.equals(
                 mPeerHandle, lhs.mPeerHandle) && mDistanceMm == lhs.mDistanceMm
                 && mDistanceStdDevMm == lhs.mDistanceStdDevMm && mRssi == lhs.mRssi
-                && Objects.equals(mLci, lhs.mLci) && Objects.equals(mLcr, lhs.mLcr)
+                && mNumAttemptedMeasurements == lhs.mNumAttemptedMeasurements
+                && mNumSuccessfulMeasurements == lhs.mNumSuccessfulMeasurements
+                && Arrays.equals(mLci, lhs.mLci) && Arrays.equals(mLcr, lhs.mLcr)
                 && mTimestamp == lhs.mTimestamp;
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(mStatus, mMac, mPeerHandle, mDistanceMm, mDistanceStdDevMm, mRssi,
-                mLci, mLcr, mTimestamp);
+                mNumAttemptedMeasurements, mNumSuccessfulMeasurements, mLci, mLcr, mTimestamp);
     }
 }

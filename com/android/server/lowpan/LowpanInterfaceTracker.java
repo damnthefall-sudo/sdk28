@@ -326,6 +326,8 @@ class LowpanInterfaceTracker extends StateMachine {
         public void enter() {
             shutdownNetworkAgent();
             mNetworkInfo.setIsAvailable(true);
+
+            mIpManager.stop();
         }
 
         @Override

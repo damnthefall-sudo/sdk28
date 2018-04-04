@@ -16,11 +16,14 @@
 
 package com.android.settingslib.wifi;
 
+import android.content.Context;
 import android.net.wifi.ScanResult;
 import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiInfo;
 import android.os.SystemClock;
 import android.support.annotation.VisibleForTesting;
+
+import com.android.settingslib.R;
 
 import java.util.Map;
 
@@ -76,7 +79,8 @@ public class WifiUtils {
      * ["rssi 5Ghz", "num results on 5GHz" / "rssi 5Ghz", "num results on 5GHz"]
      * For instance [-40,5/-30,2]
      */
-    private static String getVisibilityStatus(AccessPoint accessPoint) {
+    @VisibleForTesting
+    static String getVisibilityStatus(AccessPoint accessPoint) {
         final WifiInfo info = accessPoint.getInfo();
         StringBuilder visibility = new StringBuilder();
         StringBuilder scans24GHz = new StringBuilder();
@@ -109,7 +113,10 @@ public class WifiUtils {
 
         // TODO: sort list by RSSI or age
         long nowMs = SystemClock.elapsedRealtime();
-        for (ScanResult result : accessPoint.getScanResults().values()) {
+        for (ScanResult result : accessPoint.getScanResults()) {
+            if (result == null) {
+                continue;
+            }
             if (result.frequency >= AccessPoint.LOWER_FREQ_5GHZ
                     && result.frequency <= AccessPoint.HIGHER_FREQ_5GHZ) {
                 // Strictly speaking: [4915, 5825]
@@ -193,5 +200,19 @@ public class WifiUtils {
         // For debugging purposes we may want to use mRssi rather than result.level as the average
         // speed wil be determined by mRssi
         return timedScore.getScore().calculateBadge(result.level);
+    }
+
+    public static String getMeteredLabel(Context context, WifiConfiguration config) {
+        // meteredOverride is whether the user manually set the metered setting or not.
+        // meteredHint is whether the network itself is telling us that it is metered
+        if (config.meteredOverride == WifiConfiguration.METERED_OVERRIDE_METERED
+                || (config.meteredHint && !isMeteredOverridden(config))) {
+            return context.getString(R.string.wifi_metered_label);
+        }
+        return context.getString(R.string.wifi_unmetered_label);
+    }
+
+    public static boolean isMeteredOverridden(WifiConfiguration config) {
+        return config.meteredOverride != WifiConfiguration.METERED_OVERRIDE_NONE;
     }
 }

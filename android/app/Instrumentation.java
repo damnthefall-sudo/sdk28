@@ -1216,10 +1216,10 @@ public class Instrumentation {
                     + " disabling AppComponentFactory", new Throwable());
             return AppComponentFactory.DEFAULT;
         }
-        LoadedApk loadedApk = mThread.peekLoadedApk(pkg, true);
+        LoadedApk apk = mThread.peekPackageInfo(pkg, true);
         // This is in the case of starting up "android".
-        if (loadedApk == null) loadedApk = mThread.getSystemContext().mLoadedApk;
-        return loadedApk.getAppFactory();
+        if (apk == null) apk = mThread.getSystemContext().mPackageInfo;
+        return apk.getAppFactory();
     }
 
     private void prePerformCreate(Activity activity) {
@@ -1679,7 +1679,7 @@ public class Instrumentation {
     public void execStartActivities(Context who, IBinder contextThread,
             IBinder token, Activity target, Intent[] intents, Bundle options) {
         execStartActivitiesAsUser(who, contextThread, token, target, intents, options,
-                UserHandle.myUserId());
+                who.getUserId());
     }
 
     /**
@@ -1688,9 +1688,13 @@ public class Instrumentation {
      * {@link ActivityMonitor} objects only match against the first activity in
      * the array.
      *
+     * @return The corresponding flag {@link ActivityManager#START_CANCELED},
+     *         {@link ActivityManager#START_SUCCESS} etc. indicating whether the launch was
+     *         successful.
+     *
      * {@hide}
      */
-    public void execStartActivitiesAsUser(Context who, IBinder contextThread,
+    public int execStartActivitiesAsUser(Context who, IBinder contextThread,
             IBinder token, Activity target, Intent[] intents, Bundle options,
             int userId) {
         IApplicationThread whoThread = (IApplicationThread) contextThread;
@@ -1705,11 +1709,11 @@ public class Instrumentation {
                     }
                     if (result != null) {
                         am.mHits++;
-                        return;
+                        return ActivityManager.START_CANCELED;
                     } else if (am.match(who, null, intents[0])) {
                         am.mHits++;
                         if (am.isBlocking()) {
-                            return;
+                            return ActivityManager.START_CANCELED;
                         }
                         break;
                     }
@@ -1727,6 +1731,7 @@ public class Instrumentation {
                 .startActivities(whoThread, who.getBasePackageName(), intents, resolvedTypes,
                         token, options, userId);
             checkStartActivityResult(result, intents[0]);
+            return result;
         } catch (RemoteException e) {
             throw new RuntimeException("Failure from system", e);
         }
@@ -1874,8 +1879,8 @@ public class Instrumentation {
      */
     public ActivityResult execStartActivityAsCaller(
             Context who, IBinder contextThread, IBinder token, Activity target,
-            Intent intent, int requestCode, Bundle options, IBinder permissionToken,
-            boolean ignoreTargetSecurity, int userId) {
+            Intent intent, int requestCode, Bundle options, boolean ignoreTargetSecurity,
+            int userId) {
         IApplicationThread whoThread = (IApplicationThread) contextThread;
         if (mActivityMonitors != null) {
             synchronized (mSync) {
@@ -1906,8 +1911,7 @@ public class Instrumentation {
                 .startActivityAsCaller(whoThread, who.getBasePackageName(), intent,
                         intent.resolveTypeIfNeeded(who.getContentResolver()),
                         token, target != null ? target.mEmbeddedID : null,
-                        requestCode, 0, null, options, permissionToken,
-                        ignoreTargetSecurity, userId);
+                        requestCode, 0, null, options, ignoreTargetSecurity, userId);
             checkStartActivityResult(result, intent);
         } catch (RemoteException e) {
             throw new RuntimeException("Failure from system", e);

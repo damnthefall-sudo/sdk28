@@ -50,9 +50,25 @@ import java.util.Arrays;
  */
 @SystemApi
 public final class KeyChainProtectionParams implements Parcelable {
+
+    // IMPORTANT! PLEASE READ!
+    // -----------------------
+    // If you edit this file (e.g., to add new fields), please MAKE SURE to also do the following:
+    // - Update the #writeToParcel(Parcel) method below
+    // - Update the #(Parcel) constructor below
+    // - Update android.security.keystore.recovery.KeyChainSnapshotTest to make sure nobody
+    //     accidentally breaks your fields in the Parcel in the future.
+    // - Update com.android.server.locksettings.recoverablekeystore.serialization
+    //     .KeyChainSnapshotSerializer to correctly serialize your new field
+    // - Update com.android.server.locksettings.recoverablekeystore.serialization
+    //     .KeyChainSnapshotSerializer to correctly deserialize your new field
+    // - Update com.android.server.locksettings.recoverablekeystore.serialization
+    //     .KeychainSnapshotSerializerTest to make sure nobody breaks serialization of your field
+    //     in the future.
+
     /** @hide */
     @Retention(RetentionPolicy.SOURCE)
-    @IntDef(prefix = {"TYPE_"}, value = {TYPE_LOCKSCREEN, TYPE_CUSTOM_PASSWORD})
+    @IntDef(prefix = {"TYPE_"}, value = {TYPE_LOCKSCREEN})
     public @interface UserSecretType {
     }
 
@@ -60,11 +76,6 @@ public final class KeyChainProtectionParams implements Parcelable {
      * Lockscreen secret is required to recover KeyStore.
      */
     public static final int TYPE_LOCKSCREEN = 100;
-
-    /**
-     * Custom passphrase, unrelated to lock screen, is required to recover KeyStore.
-     */
-    public static final int TYPE_CUSTOM_PASSWORD = 101;
 
     /** @hide */
     @Retention(RetentionPolicy.SOURCE)
@@ -99,28 +110,12 @@ public final class KeyChainProtectionParams implements Parcelable {
     private KeyDerivationParams mKeyDerivationParams;
     private byte[] mSecret; // Derived from user secret. The field must have limited visibility.
 
-    /**
-     * @param secret Constructor creates a reference to the secret. Caller must use
-     * @link {#clearSecret} to overwrite its value in memory.
-     * @hide
-     */
-    public KeyChainProtectionParams(@UserSecretType int userSecretType,
-            @LockScreenUiFormat int lockScreenUiFormat,
-            @NonNull KeyDerivationParams keyDerivationParams,
-            @NonNull byte[] secret) {
-        mUserSecretType = userSecretType;
-        mLockScreenUiFormat = lockScreenUiFormat;
-        mKeyDerivationParams = Preconditions.checkNotNull(keyDerivationParams);
-        mSecret = Preconditions.checkNotNull(secret);
-    }
-
     private KeyChainProtectionParams() {
 
     }
 
     /**
      * @see TYPE_LOCKSCREEN
-     * @see TYPE_CUSTOM_PASSWORD
      */
     public @UserSecretType int getUserSecretType() {
         return mUserSecretType;
@@ -164,9 +159,9 @@ public final class KeyChainProtectionParams implements Parcelable {
 
         /**
          * Sets user secret type.
+         * Default value is {@link TYPE_LOCKSCREEN}.
          *
          * @see TYPE_LOCKSCREEN
-         * @see TYPE_CUSTOM_PASSWORD
          * @param userSecretType The secret type
          * @return This builder.
          */
@@ -192,7 +187,7 @@ public final class KeyChainProtectionParams implements Parcelable {
         /**
          * Sets parameters of the key derivation function.
          *
-         * @param keyDerivationParams Key derivation Params
+         * @param keyDerivationParams Key derivation parameters
          * @return This builder.
          */
         public Builder setKeyDerivationParams(@NonNull KeyDerivationParams
@@ -215,8 +210,8 @@ public final class KeyChainProtectionParams implements Parcelable {
 
         /**
          * Creates a new {@link KeyChainProtectionParams} instance.
-         * The instance will include default values, if {@link setSecret}
-         * or {@link setUserSecretType} were not called.
+         * The instance will include default values, if {@link #setSecret}
+         * or {@link #setUserSecretType} were not called.
          *
          * @return new instance
          * @throws NullPointerException if some required fields were not set.
@@ -235,17 +230,7 @@ public final class KeyChainProtectionParams implements Parcelable {
     }
 
     /**
-     * Removes secret from memory than object is no longer used.
-     * Since finalizer call is not reliable, please use @link {#clearSecret} directly.
-     */
-    @Override
-    protected void finalize() throws Throwable {
-        clearSecret();
-        super.finalize();
-    }
-
-    /**
-     * Fills mSecret with zeroes.
+     * Fills secret with zeroes.
      */
     public void clearSecret() {
         Arrays.fill(mSecret, (byte) 0);

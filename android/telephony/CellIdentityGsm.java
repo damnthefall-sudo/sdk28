@@ -16,6 +16,7 @@
 
 package android.telephony;
 
+import android.annotation.Nullable;
 import android.os.Parcel;
 import android.text.TextUtils;
 
@@ -36,22 +37,16 @@ public final class CellIdentityGsm extends CellIdentity {
     private final int mArfcn;
     // 6-bit Base Station Identity Code
     private final int mBsic;
-    // long alpha Operator Name String or Enhanced Operator Name String
-    private final String mAlphaLong;
-    // short alpha Operator Name String or Enhanced Operator Name String
-    private final String mAlphaShort;
 
     /**
      * @hide
      */
     public CellIdentityGsm() {
-        super(TAG, TYPE_GSM, null, null);
+        super(TAG, TYPE_GSM, null, null, null, null);
         mLac = Integer.MAX_VALUE;
         mCid = Integer.MAX_VALUE;
         mArfcn = Integer.MAX_VALUE;
         mBsic = Integer.MAX_VALUE;
-        mAlphaLong = null;
-        mAlphaShort = null;
     }
     /**
      * public constructor
@@ -97,16 +92,13 @@ public final class CellIdentityGsm extends CellIdentity {
      */
     public CellIdentityGsm(int lac, int cid, int arfcn, int bsic, String mccStr,
                             String mncStr, String alphal, String alphas) {
-        super(TAG, TYPE_GSM, mccStr, mncStr);
+        super(TAG, TYPE_GSM, mccStr, mncStr, alphal, alphas);
         mLac = lac;
         mCid = cid;
         mArfcn = arfcn;
         // In RIL BSIC is a UINT8, so 0xFF is the 'INVALID' designator
         // for inbound parcels
         mBsic = (bsic == 0xFF) ? Integer.MAX_VALUE : bsic;
-
-        mAlphaLong = alphal;
-        mAlphaShort = alphas;
     }
 
     private CellIdentityGsm(CellIdentityGsm cid) {
@@ -120,7 +112,7 @@ public final class CellIdentityGsm extends CellIdentity {
 
     /**
      * @return 3-digit Mobile Country Code, 0..999, Integer.MAX_VALUE if unknown
-     * @deprecated Use {@link #getMccStr} instead.
+     * @deprecated Use {@link #getMccString} instead.
      */
     @Deprecated
     public int getMcc() {
@@ -129,7 +121,7 @@ public final class CellIdentityGsm extends CellIdentity {
 
     /**
      * @return 2 or 3-digit Mobile Network Code, 0..999, Integer.MAX_VALUE if unknown
-     * @deprecated Use {@link #getMncStr} instead.
+     * @deprecated Use {@link #getMncString} instead.
      */
     @Deprecated
     public int getMnc() {
@@ -176,33 +168,22 @@ public final class CellIdentityGsm extends CellIdentity {
     /**
      * @return Mobile Country Code in string format, null if unknown
      */
-    public String getMccStr() {
+    public String getMccString() {
         return mMccStr;
     }
 
     /**
      * @return Mobile Network Code in string format, null if unknown
      */
-    public String getMncStr() {
+    public String getMncString() {
         return mMncStr;
     }
 
-    /**
-     * @return The long alpha tag associated with the current scan result (may be the operator
-     * name string or extended operator name string). May be null if unknown.
-     */
-    public CharSequence getOperatorAlphaLong() {
-        return mAlphaLong;
+    /** @hide */
+    @Override
+    public int getChannelNumber() {
+        return mArfcn;
     }
-
-    /**
-     * @return The short alpha tag associated with the current scan result (may be the operator
-     * name string or extended operator name string).  May be null if unknown.
-     */
-    public CharSequence getOperatorAlphaShort() {
-        return mAlphaShort;
-    }
-
 
     /**
      * @deprecated Primary Scrambling Code is not applicable to GSM.
@@ -215,7 +196,7 @@ public final class CellIdentityGsm extends CellIdentity {
 
     @Override
     public int hashCode() {
-        return Objects.hash(mMccStr, mMncStr, mLac, mCid, mAlphaLong, mAlphaShort);
+        return Objects.hash(mLac, mCid, super.hashCode());
     }
 
     @Override
@@ -235,8 +216,7 @@ public final class CellIdentityGsm extends CellIdentity {
                 && mBsic == o.mBsic
                 && TextUtils.equals(mMccStr, o.mMccStr)
                 && TextUtils.equals(mMncStr, o.mMncStr)
-                && TextUtils.equals(mAlphaLong, o.mAlphaLong)
-                && TextUtils.equals(mAlphaShort, o.mAlphaShort);
+                && super.equals(other);
     }
 
     @Override
@@ -262,8 +242,6 @@ public final class CellIdentityGsm extends CellIdentity {
         dest.writeInt(mCid);
         dest.writeInt(mArfcn);
         dest.writeInt(mBsic);
-        dest.writeString(mAlphaLong);
-        dest.writeString(mAlphaShort);
     }
 
     /** Construct from Parcel, type has already been processed */
@@ -273,8 +251,6 @@ public final class CellIdentityGsm extends CellIdentity {
         mCid = in.readInt();
         mArfcn = in.readInt();
         mBsic = in.readInt();
-        mAlphaLong = in.readString();
-        mAlphaShort = in.readString();
 
         if (DBG) log(toString());
     }

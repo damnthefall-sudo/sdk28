@@ -34,6 +34,8 @@ import android.net.http.SslError;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.support.v4.widget.SwipeRefreshLayout;
+import android.text.TextUtils;
 import android.util.ArrayMap;
 import android.util.Log;
 import android.util.TypedValue;
@@ -41,6 +43,7 @@ import android.util.SparseArray;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
+import android.webkit.CookieManager;
 import android.webkit.SslErrorHandler;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
@@ -88,6 +91,7 @@ public class CaptivePortalLoginActivity extends Activity {
     private ConnectivityManager mCm;
     private boolean mLaunchBrowser = false;
     private MyWebViewClient mWebViewClient;
+    private SwipeRefreshLayout mSwipeRefreshLayout;
     // Ensures that done() happens once exactly, handling concurrent callers with atomic operations.
     private final AtomicBoolean isDone = new AtomicBoolean(false);
 
@@ -145,6 +149,7 @@ public class CaptivePortalLoginActivity extends Activity {
 
         final WebView webview = getWebview();
         webview.clearCache(true);
+        CookieManager.getInstance().setAcceptThirdPartyCookies(webview, true);
         WebSettings webSettings = webview.getSettings();
         webSettings.setJavaScriptEnabled(true);
         webSettings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
@@ -159,6 +164,13 @@ public class CaptivePortalLoginActivity extends Activity {
         // Start initial page load so WebView finishes loading proxy settings.
         // Actual load of mUrl is initiated by MyWebViewClient.
         webview.loadData("", "text/html", null);
+
+        mSwipeRefreshLayout = findViewById(R.id.swipe_refresh);
+        mSwipeRefreshLayout.setOnRefreshListener(() -> {
+                webview.reload();
+                mSwipeRefreshLayout.setRefreshing(true);
+            });
+
     }
 
     // Find WebView's proxy BroadcastReceiver and prompt it to read proxy system properties.
@@ -393,6 +405,7 @@ public class CaptivePortalLoginActivity extends Activity {
         public void onPageFinished(WebView view, String url) {
             mPagesLoaded++;
             getProgressBar().setVisibility(View.INVISIBLE);
+            mSwipeRefreshLayout.setRefreshing(false);
             if (mPagesLoaded == 1) {
                 // Now that WebView has loaded at least one page we know it has read in the proxy
                 // settings.  Now prompt the WebView read the Network-specific proxy settings.
@@ -519,7 +532,7 @@ public class CaptivePortalLoginActivity extends Activity {
 
     private String getHeaderTitle() {
         NetworkInfo info = mCm.getNetworkInfo(mNetwork);
-        if (info == null) {
+        if (info == null || TextUtils.isEmpty(info.getExtraInfo())) {
             return getString(R.string.action_bar_label);
         }
         NetworkCapabilities nc = mCm.getNetworkCapabilities(mNetwork);

@@ -25,7 +25,6 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
-import android.media.AudioManager;
 import android.os.Binder;
 import android.os.IBinder;
 import android.os.ParcelUuid;
@@ -262,7 +261,7 @@ public final class BluetoothA2dp implements BluetoothProfile {
         ComponentName comp = intent.resolveSystemService(mContext.getPackageManager(), 0);
         intent.setComponent(comp);
         if (comp == null || !mContext.bindServiceAsUser(intent, mConnection, 0,
-                android.os.Process.myUserHandle())) {
+                mContext.getUser())) {
             Log.e(TAG, "Could not bind to Bluetooth A2DP Service with " + intent);
             return false;
         }
@@ -300,11 +299,7 @@ public final class BluetoothA2dp implements BluetoothProfile {
     }
 
     /**
-     * Initiate connection to a profile of the remote bluetooth device.
-     *
-     * <p> Currently, the system supports only 1 connection to the
-     * A2DP profile. The API will automatically disconnect connected
-     * devices before connecting.
+     * Initiate connection to a profile of the remote Bluetooth device.
      *
      * <p> This API returns false in scenarios like the profile on the
      * device is already connected or Bluetooth is not turned on.
@@ -603,34 +598,6 @@ public final class BluetoothA2dp implements BluetoothProfile {
     }
 
     /**
-     * Tells remote device to adjust volume. Only if absolute volume is
-     * supported. Uses the following values:
-     * <ul>
-     * <li>{@link AudioManager#ADJUST_LOWER}</li>
-     * <li>{@link AudioManager#ADJUST_RAISE}</li>
-     * <li>{@link AudioManager#ADJUST_MUTE}</li>
-     * <li>{@link AudioManager#ADJUST_UNMUTE}</li>
-     * </ul>
-     *
-     * @param direction One of the supported adjust values.
-     * @hide
-     */
-    public void adjustAvrcpAbsoluteVolume(int direction) {
-        if (DBG) Log.d(TAG, "adjustAvrcpAbsoluteVolume");
-        try {
-            mServiceLock.readLock().lock();
-            if (mService != null && isEnabled()) {
-                mService.adjustAvrcpAbsoluteVolume(direction);
-            }
-            if (mService == null) Log.w(TAG, "Proxy not attached to service");
-        } catch (RemoteException e) {
-            Log.e(TAG, "Error talking to BT service in adjustAvrcpAbsoluteVolume()", e);
-        } finally {
-            mServiceLock.readLock().unlock();
-        }
-    }
-
-    /**
      * Tells remote device to set an absolute volume. Only if absolute volume is supported
      *
      * @param volume Absolute volume to be set on AVRCP side
@@ -699,15 +666,17 @@ public final class BluetoothA2dp implements BluetoothProfile {
     /**
      * Gets the current codec status (configuration and capability).
      *
+     * @param device the remote Bluetooth device. If null, use the current
+     * active A2DP Bluetooth device.
      * @return the current codec status
      * @hide
      */
-    public BluetoothCodecStatus getCodecStatus() {
-        if (DBG) Log.d(TAG, "getCodecStatus");
+    public BluetoothCodecStatus getCodecStatus(BluetoothDevice device) {
+        if (DBG) Log.d(TAG, "getCodecStatus(" + device + ")");
         try {
             mServiceLock.readLock().lock();
             if (mService != null && isEnabled()) {
-                return mService.getCodecStatus();
+                return mService.getCodecStatus(device);
             }
             if (mService == null) {
                 Log.w(TAG, "Proxy not attached to service");
@@ -724,15 +693,18 @@ public final class BluetoothA2dp implements BluetoothProfile {
     /**
      * Sets the codec configuration preference.
      *
+     * @param device the remote Bluetooth device. If null, use the current
+     * active A2DP Bluetooth device.
      * @param codecConfig the codec configuration preference
      * @hide
      */
-    public void setCodecConfigPreference(BluetoothCodecConfig codecConfig) {
-        if (DBG) Log.d(TAG, "setCodecConfigPreference");
+    public void setCodecConfigPreference(BluetoothDevice device,
+                                         BluetoothCodecConfig codecConfig) {
+        if (DBG) Log.d(TAG, "setCodecConfigPreference(" + device + ")");
         try {
             mServiceLock.readLock().lock();
             if (mService != null && isEnabled()) {
-                mService.setCodecConfigPreference(codecConfig);
+                mService.setCodecConfigPreference(device, codecConfig);
             }
             if (mService == null) Log.w(TAG, "Proxy not attached to service");
             return;
@@ -747,36 +719,42 @@ public final class BluetoothA2dp implements BluetoothProfile {
     /**
      * Enables the optional codecs.
      *
+     * @param device the remote Bluetooth device. If null, use the currect
+     * active A2DP Bluetooth device.
      * @hide
      */
-    public void enableOptionalCodecs() {
-        if (DBG) Log.d(TAG, "enableOptionalCodecs");
-        enableDisableOptionalCodecs(true);
+    public void enableOptionalCodecs(BluetoothDevice device) {
+        if (DBG) Log.d(TAG, "enableOptionalCodecs(" + device + ")");
+        enableDisableOptionalCodecs(device, true);
     }
 
     /**
      * Disables the optional codecs.
      *
+     * @param device the remote Bluetooth device. If null, use the currect
+     * active A2DP Bluetooth device.
      * @hide
      */
-    public void disableOptionalCodecs() {
-        if (DBG) Log.d(TAG, "disableOptionalCodecs");
-        enableDisableOptionalCodecs(false);
+    public void disableOptionalCodecs(BluetoothDevice device) {
+        if (DBG) Log.d(TAG, "disableOptionalCodecs(" + device + ")");
+        enableDisableOptionalCodecs(device, false);
     }
 
     /**
      * Enables or disables the optional codecs.
      *
+     * @param device the remote Bluetooth device. If null, use the currect
+     * active A2DP Bluetooth device.
      * @param enable if true, enable the optional codecs, other disable them
      */
-    private void enableDisableOptionalCodecs(boolean enable) {
+    private void enableDisableOptionalCodecs(BluetoothDevice device, boolean enable) {
         try {
             mServiceLock.readLock().lock();
             if (mService != null && isEnabled()) {
                 if (enable) {
-                    mService.enableOptionalCodecs();
+                    mService.enableOptionalCodecs(device);
                 } else {
-                    mService.disableOptionalCodecs();
+                    mService.disableOptionalCodecs(device);
                 }
             }
             if (mService == null) Log.w(TAG, "Proxy not attached to service");

@@ -367,19 +367,20 @@ public class AppWindowContainerController
                     if (wtoken.isHidden()) {
                         wtoken.waitingToShow = true;
                     }
-
-                    if (wtoken.isClientHidden()) {
-                        // In the case where we are making an app visible but holding off for a
-                        // transition, we still need to tell the client to make its windows visible
-                        // so they get drawn. Otherwise, we will wait on performing the transition
-                        // until all windows have been drawn, they never will be, and we are sad.
-                        wtoken.setClientHidden(false);
-                    }
                 }
+
+                // In the case where we are making an app visible but holding off for a transition,
+                // we still need to tell the client to make its windows visible so they get drawn.
+                // Otherwise, we will wait on performing the transition until all windows have been
+                // drawn, they never will be, and we are sad.
+                wtoken.setClientHidden(false);
+
                 wtoken.requestUpdateWallpaperIfNeeded();
 
                 if (DEBUG_ADD_REMOVE) Slog.v(TAG_WM, "No longer Stopped: " + wtoken);
                 wtoken.mAppStopped = false;
+
+                mContainer.transferStartingWindowFromHiddenAboveTokenIfNeeded();
             }
 
             // If we are preparing an app transition, then delay changing
@@ -616,7 +617,8 @@ public class AppWindowContainerController
 
             if (DEBUG_STARTING_WINDOW) Slog.v(TAG_WM, "Schedule remove starting " + mContainer
                     + " startingWindow=" + mContainer.startingWindow
-                    + " startingView=" + mContainer.startingSurface);
+                    + " startingView=" + mContainer.startingSurface
+                    + " Callers=" + Debug.getCallers(5));
 
             // Use the same thread to remove the window as we used to add it, as otherwise we end up
             // with things in the view hierarchy being called from different threads.

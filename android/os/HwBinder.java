@@ -29,7 +29,13 @@ public abstract class HwBinder implements IHwBinder {
 
     private static final NativeAllocationRegistry sNativeRegistry;
 
-    /** @hide */
+    /**
+     * Create and initialize a HwBinder object and the native objects
+     * used to allow this to participate in hwbinder transactions.
+     *
+     * @hide
+     */
+    @SystemApi
     public HwBinder() {
         native_setup();
 
@@ -44,23 +50,55 @@ public abstract class HwBinder implements IHwBinder {
             int code, HwParcel request, HwParcel reply, int flags)
         throws RemoteException;
 
-    /** @hide */
+    /**
+     * Process a hwbinder transaction.
+     *
+     * @param code interface specific code for interface.
+     * @param request parceled transaction
+     * @param reply object to parcel reply into
+     * @param flags transaction flags to be chosen by wire protocol
+     *
+     * @hide
+     */
+    @SystemApi
     public abstract void onTransact(
             int code, HwParcel request, HwParcel reply, int flags)
         throws RemoteException;
 
-    /** @hide */
+    /**
+     * Registers this service with the hwservicemanager.
+     *
+     * @param serviceName instance name of the service
+     * @hide
+     */
+    @SystemApi
     public native final void registerService(String serviceName)
         throws RemoteException;
 
-    /** @hide */
+    /**
+     * Returns the specified service from the hwservicemanager. Does not retry.
+     *
+     * @param iface fully-qualified interface name for example foo.bar@1.3::IBaz
+     * @param serviceName the instance name of the service for example default.
+     * @throws NoSuchElementException when the service is unavailable
+     * @hide
+     */
+    @SystemApi
     public static final IHwBinder getService(
             String iface,
             String serviceName)
         throws RemoteException, NoSuchElementException {
         return getService(iface, serviceName, false /* retry */);
     }
-    /** @hide */
+    /**
+     * Returns the specified service from the hwservicemanager.
+     * @param iface fully-qualified interface name for example foo.bar@1.3::IBaz
+     * @param serviceName the instance name of the service for example default.
+     * @param retry whether to wait for the service to start if it's not already started
+     * @throws NoSuchElementException when the service is unavailable
+     * @hide
+     */
+    @SystemApi
     public static native final IHwBinder getService(
             String iface,
             String serviceName,
@@ -71,6 +109,9 @@ public abstract class HwBinder implements IHwBinder {
      * Configures how many threads the process-wide hwbinder threadpool
      * has to process incoming requests.
      *
+     * @param maxThreads total number of threads to create (includes this thread if
+     *     callerWillJoin is true)
+     * @param callerWillJoin whether joinRpcThreadpool will be called in advance
      * @hide
      */
     @SystemApi
@@ -108,7 +149,25 @@ public abstract class HwBinder implements IHwBinder {
     private static native void native_report_sysprop_change();
 
     /**
+     * Enable instrumentation if available.
+     *
+     * On a non-user build, this method:
+     * - tries to enable atracing (if enabled)
+     * - tries to enable coverage dumps (if running in VTS)
+     * - tries to enable record and replay (if running in VTS)
+     *
+     * @hide
+     */
+    @SystemApi
+    public static void enableInstrumentation() {
+        native_report_sysprop_change();
+    }
+
+    /**
      * Notifies listeners that a system property has changed
+     *
+     * TODO(b/72480743): remove this method
+     *
      * @hide
      */
     public static void reportSyspropChanged() {

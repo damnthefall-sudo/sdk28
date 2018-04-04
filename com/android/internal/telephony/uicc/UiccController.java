@@ -24,20 +24,24 @@ import android.os.Message;
 import android.os.Registrant;
 import android.os.RegistrantList;
 import android.os.storage.StorageManager;
+import android.telephony.CarrierConfigManager;
 import android.telephony.Rlog;
 import android.telephony.TelephonyManager;
-import android.text.format.Time;
+import android.util.LocalLog;
 
 import com.android.internal.telephony.CommandException;
 import com.android.internal.telephony.CommandsInterface;
+import com.android.internal.telephony.IccCardConstants;
 import com.android.internal.telephony.PhoneConstants;
+import com.android.internal.telephony.PhoneFactory;
+import com.android.internal.telephony.RadioConfig;
+import com.android.internal.telephony.SubscriptionInfoUpdater;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
-import java.util.LinkedList;
 import java.util.Set;
 
 /**
@@ -120,15 +124,15 @@ public class UiccController extends Handler {
     protected RegistrantList mIccChangedRegistrants = new RegistrantList();
 
     private UiccStateChangedLauncher mLauncher;
+    private RadioConfig mRadioConfig;
 
-    // Logging for dumpsys. Useful in cases when the cards run into errors.
-    private static final int MAX_PROACTIVE_COMMANDS_TO_LOG = 20;
-    private LinkedList<String> mCardLogs = new LinkedList<String>();
+    // LocalLog buffer to hold important SIM related events for debugging
+    static LocalLog sLocalLog = new LocalLog(100);
 
     public static UiccController make(Context c, CommandsInterface[] ci) {
         synchronized (mLock) {
             if (mInstance != null) {
-                throw new RuntimeException("MSimUiccController.make() should only be called once");
+                throw new RuntimeException("UiccController.make() should only be called once");
             }
             mInstance = new UiccController(c, ci);
             return mInstance;
@@ -139,21 +143,28 @@ public class UiccController extends Handler {
         if (DBG) log("Creating UiccController");
         mContext = c;
         mCis = ci;
-        if (VDBG) {
-            log("config_num_physical_slots = " + c.getResources().getInteger(
-                    com.android.internal.R.integer.config_num_physical_slots));
+        if (DBG) {
+            String logStr = "config_num_physical_slots = " + c.getResources().getInteger(
+                    com.android.internal.R.integer.config_num_physical_slots);
+            log(logStr);
+            sLocalLog.log(logStr);
         }
-        mUiccSlots = new UiccSlot[c.getResources().getInteger(
-                com.android.internal.R.integer.config_num_physical_slots)];
+        int numPhysicalSlots = c.getResources().getInteger(
+                com.android.internal.R.integer.config_num_physical_slots);
+        // Minimum number of physical slot count should be equals to or greater than phone count,
+        // if it is less than phone count use phone count as physical slot count.
+        if (numPhysicalSlots < mCis.length) {
+            numPhysicalSlots = mCis.length;
+        }
+
+        mUiccSlots = new UiccSlot[numPhysicalSlots];
         mPhoneIdToSlotId = new int[ci.length];
         Arrays.fill(mPhoneIdToSlotId, INVALID_SLOT_ID);
         if (VDBG) logPhoneIdToSlotIdMapping();
+        mRadioConfig = RadioConfig.getInstance(mContext);
+        mRadioConfig.registerForSimSlotStatusChanged(this, EVENT_SLOT_STATUS_CHANGED, null);
         for (int i = 0; i < mCis.length; i++) {
             mCis[i].registerForIccStatusChanged(this, EVENT_ICC_STATUS_CHANGED, i);
-            // slot status should be the same on all RILs; request it only for phoneId 0
-            if (i == 0) {
-                mCis[i].registerForIccSlotStatusChanged(this, EVENT_SLOT_STATUS_CHANGED, i);
-            }
 
             // TODO remove this once modem correctly notifies the unsols
             // If the device is unencrypted or has been decrypted or FBE is supported,
@@ -252,7 +263,7 @@ public class UiccController extends Handler {
 
     /** Map logicalSlot to physicalSlot, and activate the physicalSlot if it is inactive. */
     public void switchSlots(int[] physicalSlots, Message response) {
-        // TODO(amitmahajan): Method implementation.
+        mRadioConfig.setSimSlotsMapping(physicalSlots, response);
     }
 
     /**
@@ -296,12 +307,8 @@ public class UiccController extends Handler {
             for (int idx = 0; idx < mUiccSlots.length; idx++) {
                 if (mUiccSlots[idx] != null) {
                     UiccCard uiccCard = mUiccSlots[idx].getUiccCard();
-                    if (uiccCard != null) {
-                        // todo: uncomment this once getCardId() is added
-                        //if (cardId.equals(uiccCard.getCardId())) {
-                        if (false) {
-                            return idx;
-                        }
+                    if (uiccCard != null && cardId.equals(uiccCard.getCardId())) {
+                        return idx;
                     }
                 }
             }
@@ -366,6 +373,8 @@ public class UiccController extends Handler {
                 return;
             }
 
+            sLocalLog.log("handleMessage: Received " + msg.what + " for phoneId " + phoneId);
+
             AsyncResult ar = (AsyncResult)msg.obj;
             switch (msg.what) {
                 case EVENT_ICC_STATUS_CHANGED:
@@ -387,7 +396,7 @@ public class UiccController extends Handler {
                             log("Received EVENT_RADIO_AVAILABLE/EVENT_RADIO_ON for phoneId 0, "
                                     + "calling getIccSlotsStatus");
                         }
-                        mCis[phoneId].getIccSlotsStatus(obtainMessage(EVENT_GET_SLOT_STATUS_DONE,
+                        mRadioConfig.getSimSlotsStatus(obtainMessage(EVENT_GET_SLOT_STATUS_DONE,
                                 phoneId));
                     }
                     break;
@@ -454,6 +463,15 @@ public class UiccController extends Handler {
         }
     }
 
+    static void updateInternalIccState(String value, String reason, int phoneId) {
+        SubscriptionInfoUpdater subInfoUpdator = PhoneFactory.getSubscriptionInfoUpdater();
+        if (subInfoUpdator != null) {
+            subInfoUpdator.updateInternalIccState(value, reason, phoneId);
+        } else {
+            Rlog.e(LOG_TAG, "subInfoUpdate is null.");
+        }
+    }
+
     private synchronized void onGetIccCardStatusDone(AsyncResult ar, Integer index) {
         if (ar.exception != null) {
             Rlog.e(LOG_TAG,"Error getting ICC status. "
@@ -468,12 +486,14 @@ public class UiccController extends Handler {
 
         IccCardStatus status = (IccCardStatus)ar.result;
 
+        sLocalLog.log("onGetIccCardStatusDone: phoneId " + index + " IccCardStatus: " + status);
+
         int slotId = status.physicalSlotIndex;
         if (VDBG) log("onGetIccCardStatusDone: phoneId " + index + " physicalSlotIndex " + slotId);
         if (slotId == INVALID_SLOT_ID) {
             slotId = index;
-            mPhoneIdToSlotId[index] = slotId;
         }
+        mPhoneIdToSlotId[index] = slotId;
 
         if (VDBG) logPhoneIdToSlotIdMapping();
 
@@ -498,15 +518,20 @@ public class UiccController extends Handler {
         }
         Throwable e = ar.exception;
         if (e != null) {
+            String logStr;
             if (!(e instanceof CommandException) || ((CommandException) e).getCommandError()
                     != CommandException.Error.REQUEST_NOT_SUPPORTED) {
                 // this is not expected; there should be no exception other than
                 // REQUEST_NOT_SUPPORTED
-                Rlog.e(LOG_TAG, "Unexpected error getting slot status.", ar.exception);
+                logStr = "Unexpected error getting slot status: " + ar.exception;
+                Rlog.e(LOG_TAG, logStr);
+                sLocalLog.log(logStr);
             } else {
                 // REQUEST_NOT_SUPPORTED
-                log("onGetSlotStatusDone: request not supported; marking mIsSlotStatusSupported "
-                        + "to false");
+                logStr = "onGetSlotStatusDone: request not supported; marking "
+                        + "mIsSlotStatusSupported to false";
+                log(logStr);
+                sLocalLog.log(logStr);
                 mIsSlotStatusSupported = false;
             }
             return;
@@ -518,6 +543,8 @@ public class UiccController extends Handler {
             log("onGetSlotStatusDone: No change in slot status");
             return;
         }
+
+        sLastSlotStatus = status;
 
         int numActiveSlots = 0;
         for (int i = 0; i < status.size(); i++) {
@@ -563,6 +590,8 @@ public class UiccController extends Handler {
 
         // broadcast slot status changed
         Intent intent = new Intent(TelephonyManager.ACTION_SIM_SLOT_STATUS_CHANGED);
+        intent.addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT);
+        intent.addFlags(Intent.FLAG_RECEIVER_INCLUDE_BACKGROUND);
         mContext.sendBroadcast(intent, android.Manifest.permission.READ_PRIVILEGED_PHONE_STATE);
     }
 
@@ -584,22 +613,10 @@ public class UiccController extends Handler {
             log("    phoneId " + i + " slotId " + mPhoneIdToSlotId[i]);
         }
     }
-    /**
-     * Slots are initialized when none of them are null.
-     * todo: is this even needed?
-     */
-    private synchronized boolean areSlotsInitialized() {
-        for (UiccSlot slot : mUiccSlots) {
-            if (slot == null) {
-                return false;
-            }
-        }
-        return true;
-    }
 
     private void onSimRefresh(AsyncResult ar, Integer index) {
         if (ar.exception != null) {
-            Rlog.e(LOG_TAG, "Sim REFRESH with exception: " + ar.exception);
+            Rlog.e(LOG_TAG, "onSimRefresh: Sim REFRESH with exception: " + ar.exception);
             return;
         }
 
@@ -610,6 +627,7 @@ public class UiccController extends Handler {
 
         IccRefreshResponse resp = (IccRefreshResponse) ar.result;
         log("onSimRefresh: " + resp);
+        sLocalLog.log("onSimRefresh: " + resp);
 
         if (resp == null) {
             Rlog.e(LOG_TAG, "onSimRefresh: received without input");
@@ -622,7 +640,6 @@ public class UiccController extends Handler {
             return;
         }
 
-        log("Handling refresh: " + resp);
         boolean changed = false;
         switch(resp.refreshResult) {
             case IccRefreshResponse.REFRESH_RESULT_RESET:
@@ -636,6 +653,12 @@ public class UiccController extends Handler {
         }
 
         if (changed && resp.refreshResult == IccRefreshResponse.REFRESH_RESULT_RESET) {
+            // If there is any change on RESET, reset carrier config as well. From carrier config
+            // perspective, this is treated the same as sim state unknown
+            CarrierConfigManager configManager = (CarrierConfigManager)
+                    mContext.getSystemService(Context.CARRIER_CONFIG_SERVICE);
+            configManager.updateConfigForPhoneId(index, IccCardConstants.INTENT_VALUE_ICC_UNKNOWN);
+
             boolean requirePowerOffOnSimRefreshReset = mContext.getResources().getBoolean(
                     com.android.internal.R.bool.config_requireRadioPowerOffOnSimRefreshReset);
             if (requirePowerOffOnSimRefreshReset) {
@@ -659,14 +682,8 @@ public class UiccController extends Handler {
         Rlog.d(LOG_TAG, string);
     }
 
-    // TODO: This is hacky. We need a better way of saving the logs.
     public void addCardLog(String data) {
-        Time t = new Time();
-        t.setToNow();
-        mCardLogs.addLast(t.format("%m-%d %H:%M:%S") + " " + data);
-        if (mCardLogs.size() > MAX_PROACTIVE_COMMANDS_TO_LOG) {
-            mCardLogs.removeFirst();
-        }
+        sLocalLog.log(data);
     }
 
     public void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
@@ -689,9 +706,7 @@ public class UiccController extends Handler {
                 mUiccSlots[i].dump(fd, pw, args);
             }
         }
-        pw.println("mCardLogs: ");
-        for (int i = 0; i < mCardLogs.size(); ++i) {
-            pw.println("  " + mCardLogs.get(i));
-        }
+        pw.println(" sLocalLog= ");
+        sLocalLog.dump(fd, pw, args);
     }
 }

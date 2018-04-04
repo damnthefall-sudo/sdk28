@@ -33,12 +33,12 @@ import android.telephony.DisconnectCause;
 import android.telephony.PhoneNumberUtils;
 import android.telephony.Rlog;
 import android.telephony.ServiceState;
+import android.telephony.ims.ImsCallProfile;
+import android.telephony.ims.ImsStreamMediaProfile;
 import android.text.TextUtils;
 
 import com.android.ims.ImsCall;
-import com.android.ims.ImsCallProfile;
 import com.android.ims.ImsException;
-import com.android.ims.ImsStreamMediaProfile;
 import com.android.ims.internal.ImsVideoCallProviderWrapper;
 import com.android.internal.telephony.CallStateException;
 import com.android.internal.telephony.Connection;
@@ -105,6 +105,8 @@ public class ImsPhoneConnection extends Connection implements
 
     private ImsRttTextHandler mRttTextHandler;
     private android.telecom.Connection.RttTextStream mRttTextStream;
+    // This reflects the RTT status as reported to us by the IMS stack via the media profile.
+    private boolean mIsRttEnabledForCall = false;
 
     /**
      * Used to indicate that this call is in the midst of being merged into a conference.
@@ -343,6 +345,23 @@ public class ImsPhoneConnection extends Connection implements
     }
 
     @Override
+    public void deflect(String number) throws CallStateException {
+        if (mParent.getState().isRinging()) {
+            try {
+                if (mImsCall != null) {
+                    mImsCall.deflect(number);
+                } else {
+                    throw new CallStateException("no valid ims call to deflect");
+                }
+            } catch (ImsException e) {
+                throw new CallStateException("cannot deflect call");
+            }
+        } else {
+            throw new CallStateException("phone not ringing");
+        }
+    }
+
+    @Override
     public void hangup() throws CallStateException {
         if (!mDisconnected) {
             mOwner.hangup(this);
@@ -428,6 +447,7 @@ public class ImsPhoneConnection extends Connection implements
             mDisconnected = true;
 
             mOwner.mPhone.notifyDisconnect(this);
+            notifyDisconnect(mCause);
 
             if (mParent != null) {
                 changed = mParent.connectionDisconnected(this);
@@ -873,6 +893,25 @@ public class ImsPhoneConnection extends Connection implements
                         mShouldIgnoreVideoStateChanges = true;
                     }
                 }
+
+                if (negotiatedCallProfile.mMediaProfile != null) {
+                    mIsRttEnabledForCall = negotiatedCallProfile.mMediaProfile.isRttCall();
+
+                    if (mIsRttEnabledForCall && mRttTextHandler == null) {
+                        Rlog.d(LOG_TAG, "updateMediaCapabilities -- turning RTT on, profile="
+                                + negotiatedCallProfile);
+                        startRttTextProcessing();
+                        onRttInitiated();
+                        changed = true;
+                    } else if (!mIsRttEnabledForCall && mRttTextHandler != null) {
+                        Rlog.d(LOG_TAG, "updateMediaCapabilities -- turning RTT off, profile="
+                                + negotiatedCallProfile);
+                        mRttTextHandler.tearDown();
+                        mRttTextHandler = null;
+                        onRttTerminated();
+                        changed = true;
+                    }
+                }
             }
 
             // Check for a change in the capabilities for the call and update
@@ -946,7 +985,6 @@ public class ImsPhoneConnection extends Connection implements
         imsCall.sendRttModifyResponse(accept);
         if (accept) {
             setCurrentRttTextStream(textStream);
-            startRttTextProcessing();
         } else {
             Rlog.e(LOG_TAG, "sendRttModifyResponse: foreground call has no connections");
         }
@@ -960,7 +998,19 @@ public class ImsPhoneConnection extends Connection implements
         mRttTextStream = rttTextStream;
     }
 
+    public boolean hasRttTextStream() {
+        return mRttTextStream != null;
+    }
+
+    public boolean isRttEnabledForCall() {
+        return mIsRttEnabledForCall;
+    }
+
     public void startRttTextProcessing() {
+        if (mRttTextStream == null) {
+            Rlog.w(LOG_TAG, "startRttTextProcessing: no RTT text stream. Ignoring.");
+            return;
+        }
         getOrCreateRttTextHandler().initialize(mRttTextStream);
     }
 

@@ -14,6 +14,9 @@
 
 package com.android.systemui.globalactions;
 
+import static android.view.ViewGroup.LayoutParams.MATCH_PARENT;
+import static android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+
 import static com.android.internal.widget.LockPatternUtils.StrongAuthTracker.SOME_AUTH_REQUIRED_AFTER_USER_REQUEST;
 import static com.android.internal.widget.LockPatternUtils.StrongAuthTracker.STRONG_AUTH_NOT_REQUIRED;
 import static com.android.internal.widget.LockPatternUtils.StrongAuthTracker.STRONG_AUTH_REQUIRED_AFTER_USER_LOCKDOWN;
@@ -147,6 +150,7 @@ class GlobalActionsDialog implements DialogInterface.OnDismissListener,
     private boolean mHasTelephony;
     private boolean mHasVibrator;
     private boolean mHasLogoutButton;
+    private boolean mHasLockdownButton;
     private final boolean mShowSilentToggle;
     private final EmergencyAffordanceManager mEmergencyAffordanceManager;
     private final ScreenshotHelper mScreenshotHelper;
@@ -244,6 +248,7 @@ class GlobalActionsDialog implements DialogInterface.OnDismissListener,
         } else {
             WindowManager.LayoutParams attrs = mDialog.getWindow().getAttributes();
             attrs.setTitle("ActionsDialog");
+            attrs.layoutInDisplayCutoutMode = LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
             mDialog.getWindow().setAttributes(attrs);
             mDialog.show();
             mWindowManagerFuncs.onGlobalActionsShown();
@@ -311,6 +316,7 @@ class GlobalActionsDialog implements DialogInterface.OnDismissListener,
 
         ArraySet<String> addedKeys = new ArraySet<String>();
         mHasLogoutButton = false;
+        mHasLockdownButton = false;
         for (int i = 0; i < defaultActions.length; i++) {
             String actionKey = defaultActions[i];
             if (addedKeys.contains(actionKey)) {
@@ -341,6 +347,7 @@ class GlobalActionsDialog implements DialogInterface.OnDismissListener,
                             Settings.Secure.LOCKDOWN_IN_POWER_MENU, 0) != 0
                         && shouldDisplayLockdown()) {
                     mItems.add(getLockdownAction());
+                    mHasLockdownButton = true;
                 }
             } else if (GLOBAL_ACTION_KEY_VOICEASSIST.equals(actionKey)) {
                 mItems.add(getVoiceAssistAction());
@@ -587,9 +594,9 @@ class GlobalActionsDialog implements DialogInterface.OnDismissListener,
             // switching user
             mHandler.postDelayed(() -> {
                 try {
+                    int currentUserId = getCurrentUser().id;
                     ActivityManager.getService().switchUser(UserHandle.USER_SYSTEM);
-                    ActivityManager.getService().stopUser(getCurrentUser().id, true /*force*/,
-                            null);
+                    ActivityManager.getService().stopUser(currentUserId, true /*force*/, null);
                 } catch (RemoteException re) {
                     Log.e(TAG, "Couldn't logout user " + re);
                 }
@@ -685,7 +692,7 @@ class GlobalActionsDialog implements DialogInterface.OnDismissListener,
     }
 
     private Action getLockdownAction() {
-        return new SinglePressAction(R.drawable.ic_lock_lock,
+        return new SinglePressAction(com.android.systemui.R.drawable.ic_lock_lockdown,
                 R.string.global_action_lockdown) {
 
             @Override
@@ -871,10 +878,8 @@ class GlobalActionsDialog implements DialogInterface.OnDismissListener,
         public View getView(int position, View convertView, ViewGroup parent) {
             Action action = getItem(position);
             View view = action.create(mContext, convertView, parent, LayoutInflater.from(mContext));
-            // When there is no logout button, only power off and restart should be in white
-            // background, thus setting division view at third item; with logout button being the
-            // third item, set the division view at fourth item instead.
-            if (position == (mHasLogoutButton ? 3 : 2)) {
+            // Everything but screenshot, the last item, gets white background.
+            if (position == getCount() - 1) {
                 HardwareUiLayout.get(parent).setDivisionView(view);
             }
             return view;
@@ -1352,11 +1357,17 @@ class GlobalActionsDialog implements DialogInterface.OnDismissListener,
             // Window initialization
             Window window = getWindow();
             window.requestFeature(Window.FEATURE_NO_TITLE);
-            window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND
-                    | WindowManager.LayoutParams.FLAG_LAYOUT_INSET_DECOR);
+            // Inflate the decor view, so the attributes below are not overwritten by the theme.
+            window.getDecorView();
+            window.getAttributes().systemUiVisibility |= View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+            window.setLayout(MATCH_PARENT, MATCH_PARENT);
+            window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
             window.addFlags(
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                     | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                    | WindowManager.LayoutParams.FLAG_LAYOUT_INSET_DECOR
                     | WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED
                     | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
                     | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED);
@@ -1367,6 +1378,7 @@ class GlobalActionsDialog implements DialogInterface.OnDismissListener,
             mListView = findViewById(android.R.id.list);
             mHardwareLayout = HardwareUiLayout.get(mListView);
             mHardwareLayout.setOutsideTouchListener(view -> dismiss());
+            setTitle(R.string.global_actions);
         }
 
         private void updateList() {
@@ -1459,20 +1471,6 @@ class GlobalActionsDialog implements DialogInterface.OnDismissListener,
         private float getAnimTranslation() {
             return getContext().getResources().getDimension(
                     com.android.systemui.R.dimen.global_actions_panel_width) / 2;
-        }
-
-        @Override
-        public boolean dispatchPopulateAccessibilityEvent(AccessibilityEvent event) {
-            if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-                for (int i = 0; i < mAdapter.getCount(); ++i) {
-                    CharSequence label =
-                            mAdapter.getItem(i).getLabelForAccessibility(getContext());
-                    if (label != null) {
-                        event.getText().add(label);
-                    }
-                }
-            }
-            return super.dispatchPopulateAccessibilityEvent(event);
         }
 
         @Override

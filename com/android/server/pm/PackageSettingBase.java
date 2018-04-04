@@ -20,11 +20,16 @@ import static android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DEFAULT;
 import static android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED;
 import static android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED;
 
+import static com.android.server.pm.PackageManagerService.PLATFORM_PACKAGE_NAME;
+
 import android.content.pm.ApplicationInfo;
 import android.content.pm.IntentFilterVerificationInfo;
 import android.content.pm.PackageManager;
+import android.content.pm.PackageParser;
 import android.content.pm.PackageUserState;
 import android.content.pm.Signature;
+import android.os.BaseBundle;
+import android.os.PersistableBundle;
 import android.service.pm.PackageProto;
 import android.util.ArraySet;
 import android.util.SparseArray;
@@ -44,19 +49,6 @@ import java.util.Set;
 public abstract class PackageSettingBase extends SettingBase {
 
     private static final int[] EMPTY_INT_ARRAY = new int[0];
-
-    /**
-     * Indicates the state of installation. Used by PackageManager to figure out
-     * incomplete installations. Say a package is being installed (the state is
-     * set to PKG_INSTALL_INCOMPLETE) and remains so till the package
-     * installation is successful or unsuccessful in which case the
-     * PackageManager will no longer maintain state information associated with
-     * the package. If some exception(like device freeze or battery being pulled
-     * out) occurs during installation of a package, the PackageManager needs
-     * this information to clean up the previously failed installation.
-     */
-    static final int PKG_INSTALL_COMPLETE = 1;
-    static final int PKG_INSTALL_INCOMPLETE = 0;
 
     public final String name;
     final String realName;
@@ -120,8 +112,6 @@ public abstract class PackageSettingBase extends SettingBase {
     // Whether this package is currently stopped, thus can not be
     // started until explicitly launched by the user.
     private final SparseArray<PackageUserState> userState = new SparseArray<PackageUserState>();
-
-    int installStatus = PKG_INSTALL_COMPLETE;
 
     /**
      * Non-persisted value. During an "upgrade without restart", we need the set
@@ -208,14 +198,6 @@ public abstract class PackageSettingBase extends SettingBase {
         return volumeUuid;
     }
 
-    public void setInstallStatus(int newStatus) {
-        installStatus = newStatus;
-    }
-
-    public int getInstallStatus() {
-        return installStatus;
-    }
-
     public void setTimeStamp(long newStamp) {
         timeStamp = newStamp;
     }
@@ -234,6 +216,10 @@ public abstract class PackageSettingBase extends SettingBase {
 
     public Signature[] getSignatures() {
         return signatures.mSigningDetails.signatures;
+    }
+
+    public PackageParser.SigningDetails getSigningDetails() {
+        return signatures.mSigningDetails;
     }
 
     /**
@@ -255,7 +241,6 @@ public abstract class PackageSettingBase extends SettingBase {
         cpuAbiOverrideString = orig.cpuAbiOverrideString;
         firstInstallTime = orig.firstInstallTime;
         installPermissionsFixed = orig.installPermissionsFixed;
-        installStatus = orig.installStatus;
         installerPackageName = orig.installerPackageName;
         isOrphaned = orig.isOrphaned;
         keySetData = orig.keySetData;
@@ -413,8 +398,13 @@ public abstract class PackageSettingBase extends SettingBase {
         return readUserState(userId).suspended;
     }
 
-    void setSuspended(boolean suspended, int userId) {
-        modifyUserState(userId).suspended = suspended;
+    void setSuspended(boolean suspended, String suspendingPackage, PersistableBundle appExtras,
+            PersistableBundle launcherExtras, int userId) {
+        final PackageUserState existingUserState = modifyUserState(userId);
+        existingUserState.suspended = suspended;
+        existingUserState.suspendingPackage = suspended ? suspendingPackage : null;
+        existingUserState.suspendedAppExtras = suspended ? appExtras : null;
+        existingUserState.suspendedLauncherExtras = suspended ? launcherExtras : null;
     }
 
     public boolean getInstantApp(int userId) {
@@ -434,7 +424,9 @@ public abstract class PackageSettingBase extends SettingBase {
     }
 
     void setUserState(int userId, long ceDataInode, int enabled, boolean installed, boolean stopped,
-            boolean notLaunched, boolean hidden, boolean suspended, boolean instantApp,
+            boolean notLaunched, boolean hidden, boolean suspended, String suspendingPackage,
+            PersistableBundle suspendedAppExtras, PersistableBundle suspendedLauncherExtras,
+            boolean instantApp,
             boolean virtualPreload, String lastDisableAppCaller,
             ArraySet<String> enabledComponents, ArraySet<String> disabledComponents,
             int domainVerifState, int linkGeneration, int installReason,
@@ -447,6 +439,9 @@ public abstract class PackageSettingBase extends SettingBase {
         state.notLaunched = notLaunched;
         state.hidden = hidden;
         state.suspended = suspended;
+        state.suspendingPackage = suspendingPackage;
+        state.suspendedAppExtras = suspendedAppExtras;
+        state.suspendedLauncherExtras = suspendedLauncherExtras;
         state.lastDisableAppCaller = lastDisableAppCaller;
         state.enabledComponents = enabledComponents;
         state.disabledComponents = disabledComponents;
@@ -613,6 +608,9 @@ public abstract class PackageSettingBase extends SettingBase {
             proto.write(PackageProto.UserInfoProto.INSTALL_TYPE, installType);
             proto.write(PackageProto.UserInfoProto.IS_HIDDEN, state.hidden);
             proto.write(PackageProto.UserInfoProto.IS_SUSPENDED, state.suspended);
+            if (state.suspended) {
+                proto.write(PackageProto.UserInfoProto.SUSPENDING_PACKAGE, state.suspendingPackage);
+            }
             proto.write(PackageProto.UserInfoProto.IS_STOPPED, state.stopped);
             proto.write(PackageProto.UserInfoProto.IS_LAUNCHED, !state.notLaunched);
             proto.write(PackageProto.UserInfoProto.ENABLED_STATE, state.enabled);

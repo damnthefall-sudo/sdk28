@@ -104,6 +104,9 @@ public abstract class Connection {
         public void onConnectionEvent(String event, Bundle extras);
         public void onRttModifyRequestReceived();
         public void onRttModifyResponseReceived(int status);
+        public void onDisconnect(int cause);
+        public void onRttInitiated();
+        public void onRttTerminated();
     }
 
     /**
@@ -143,6 +146,12 @@ public abstract class Connection {
         public void onRttModifyRequestReceived() {}
         @Override
         public void onRttModifyResponseReceived(int status) {}
+        @Override
+        public void onDisconnect(int cause) {}
+        @Override
+        public void onRttInitiated() {}
+        @Override
+        public void onRttTerminated() {}
     }
 
     public static final int AUDIO_QUALITY_STANDARD = 1;
@@ -485,6 +494,11 @@ public abstract class Connection {
     }
 
     /**
+     * Deflect individual Connection
+     */
+    public abstract void deflect(String number) throws CallStateException;
+
+    /**
      * Hangup individual Connection
      */
     public abstract void hangup() throws CallStateException;
@@ -516,7 +530,7 @@ public abstract class Connection {
         mUserData = null;
     }
 
-    public final void addPostDialListener(PostDialListener listener) {
+    public void addPostDialListener(PostDialListener listener) {
         if (!mPostDialListeners.contains(listener)) {
             mPostDialListeners.add(listener);
         }
@@ -660,7 +674,7 @@ public abstract class Connection {
      *
      * @param listener A listener.
      */
-    public final void addListener(Listener listener) {
+    public void addListener(Listener listener) {
         mListeners.add(listener);
     }
 
@@ -1051,6 +1065,29 @@ public abstract class Connection {
     public void onRttModifyResponseReceived(int status) {
         for (Listener l : mListeners) {
             l.onRttModifyResponseReceived(status);
+        }
+    }
+
+    public void onRttInitiated() {
+        for (Listener l : mListeners) {
+            l.onRttInitiated();
+        }
+    }
+
+    public void onRttTerminated() {
+        for (Listener l : mListeners) {
+            l.onRttTerminated();
+        }
+    }
+    /**
+     * Notify interested parties that this connection disconnected.
+     * {@code TelephonyConnection}, for example, uses this.
+     * @param reason the disconnect code, per {@link DisconnectCause}.
+     */
+    protected void notifyDisconnect(int reason) {
+        Rlog.i(TAG, "notifyDisconnect: callId=" + getTelecomCallId() + ", reason=" + reason);
+        for (Listener l : mListeners) {
+            l.onDisconnect(reason);
         }
     }
 

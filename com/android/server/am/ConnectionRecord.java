@@ -22,8 +22,6 @@ import android.content.Context;
 import android.util.proto.ProtoOutputStream;
 import android.util.proto.ProtoUtils;
 
-import com.android.server.am.proto.ConnectionRecordProto;
-
 import java.io.PrintWriter;
 
 /**
@@ -175,10 +173,6 @@ final class ConnectionRecord {
         }
         if (binding.service != null) {
             proto.write(ConnectionRecordProto.SERVICE_NAME, binding.service.shortName);
-        }
-        if (conn != null) {
-            proto.write(ConnectionRecordProto.CONN_HEX_HASH,
-                    Integer.toHexString(System.identityHashCode(conn.asBinder())));
         }
         proto.end(token);
     }

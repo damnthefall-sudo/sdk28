@@ -77,11 +77,26 @@ public final class AutofillManagerServiceShellCommand extends ShellCommand {
             pw.println("  get max_partitions");
             pw.println("    Gets the maximum number of partitions per session.");
             pw.println("");
+            pw.println("  get max_visible_datasets");
+            pw.println("    Gets the maximum number of visible datasets in the UI.");
+            pw.println("");
+            pw.println("  get full_screen_mode");
+            pw.println("    Gets the Fill UI full screen mode");
+            pw.println("");
+            pw.println("  get fc_score [--algorithm ALGORITHM] value1 value2");
+            pw.println("    Gets the field classification score for 2 fields.");
+            pw.println("");
             pw.println("  set log_level [off | debug | verbose]");
             pw.println("    Sets the Autofill log level.");
             pw.println("");
             pw.println("  set max_partitions number");
             pw.println("    Sets the maximum number of partitions per session.");
+            pw.println("");
+            pw.println("  set max_visible_datasets number");
+            pw.println("    Sets the maximum number of visible datasets in the UI.");
+            pw.println("");
+            pw.println("  set full_screen_mode [true | false | default]");
+            pw.println("    Sets the Fill UI full screen mode");
             pw.println("");
             pw.println("  list sessions [--user USER_ID]");
             pw.println("    Lists all pending sessions.");
@@ -91,9 +106,6 @@ public final class AutofillManagerServiceShellCommand extends ShellCommand {
             pw.println("");
             pw.println("  reset");
             pw.println("    Resets all pending sessions and cached service connections.");
-            pw.println("");
-            pw.println("  get fc_score [--algorithm ALGORITHM] value1 value2");
-            pw.println("    Gets the field classification score for 2 fields.");
             pw.println("");
         }
     }
@@ -105,8 +117,12 @@ public final class AutofillManagerServiceShellCommand extends ShellCommand {
                 return getLogLevel(pw);
             case "max_partitions":
                 return getMaxPartitions(pw);
+            case "max_visible_datasets":
+                return getMaxVisibileDatasets(pw);
             case "fc_score":
                 return getFieldClassificationScore(pw);
+            case "full_screen_mode":
+                return getFullScreenMode(pw);
             default:
                 pw.println("Invalid set: " + what);
                 return -1;
@@ -121,6 +137,10 @@ public final class AutofillManagerServiceShellCommand extends ShellCommand {
                 return setLogLevel(pw);
             case "max_partitions":
                 return setMaxPartitions();
+            case "max_visible_datasets":
+                return setMaxVisibileDatasets();
+            case "full_screen_mode":
+                return setFullScreenMode(pw);
             default:
                 pw.println("Invalid set: " + what);
                 return -1;
@@ -173,6 +193,16 @@ public final class AutofillManagerServiceShellCommand extends ShellCommand {
         return 0;
     }
 
+    private int getMaxVisibileDatasets(PrintWriter pw) {
+        pw.println(mService.getMaxVisibleDatasets());
+        return 0;
+    }
+
+    private int setMaxVisibileDatasets() {
+        mService.setMaxVisibleDatasets(Integer.parseInt(getNextArgRequired()));
+        return 0;
+    }
+
     private int getFieldClassificationScore(PrintWriter pw) {
         final String nextArg = getNextArgRequired();
         final String algorithm, value1;
@@ -197,6 +227,36 @@ public final class AutofillManagerServiceShellCommand extends ShellCommand {
         }));
 
         return waitForLatch(pw, latch);
+    }
+
+    private int getFullScreenMode(PrintWriter pw) {
+        final Boolean mode = mService.getFullScreenMode();
+        if (mode == null) {
+            pw.println("default");
+        } else if (mode) {
+            pw.println("true");
+        } else {
+            pw.println("false");
+        }
+        return 0;
+    }
+
+    private int setFullScreenMode(PrintWriter pw) {
+        final String mode = getNextArgRequired();
+        switch (mode.toLowerCase()) {
+            case "true":
+                mService.setFullScreenMode(Boolean.TRUE);
+                return 0;
+            case "false":
+                mService.setFullScreenMode(Boolean.FALSE);
+                return 0;
+            case "default":
+                mService.setFullScreenMode(null);
+                return 0;
+            default:
+                pw.println("Invalid mode: " + mode);
+                return -1;
+        }
     }
 
     private int requestDestroy(PrintWriter pw) {

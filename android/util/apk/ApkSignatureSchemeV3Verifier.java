@@ -62,6 +62,7 @@ import java.security.spec.InvalidKeySpecException;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 
@@ -165,7 +166,7 @@ public class ApkSignatureSchemeV3Verifier {
     private static VerifiedSigner verify(
             RandomAccessFile apk,
             SignatureInfo signatureInfo,
-            boolean doVerifyIntegrity) throws SecurityException {
+            boolean doVerifyIntegrity) throws SecurityException, IOException {
         int signerCount = 0;
         Map<Integer, byte[]> contentDigests = new ArrayMap<>();
         VerifiedSigner result = null;
@@ -214,7 +215,9 @@ public class ApkSignatureSchemeV3Verifier {
         }
 
         if (contentDigests.containsKey(CONTENT_DIGEST_VERITY_CHUNKED_SHA256)) {
-            result.verityRootHash = contentDigests.get(CONTENT_DIGEST_VERITY_CHUNKED_SHA256);
+            byte[] verityDigest = contentDigests.get(CONTENT_DIGEST_VERITY_CHUNKED_SHA256);
+            result.verityRootHash = ApkSigningBlockUtils.parseVerityDigestAndVerifySourceLength(
+                    verityDigest, apk.length(), signatureInfo);
         }
 
         return result;
@@ -438,8 +441,8 @@ public class ApkSignatureSchemeV3Verifier {
         List<Integer> flagsList = new ArrayList<>();
 
         // Proof-of-rotation struct:
-        // is basically a singly linked list of nodes, called levels here, each of which have the
-        // following structure:
+        // A uint32 version code followed by basically a singly linked list of nodes, called levels
+        // here, each of which have the following structure:
         // * length-prefix for the entire level
         //     - length-prefixed signed data (if previous level exists)
         //         * length-prefixed X509 Certificate
@@ -450,9 +453,14 @@ public class ApkSignatureSchemeV3Verifier {
         //     - length-prefixed signature over the signed data in this level.  The signature here
         //         is verified using the certificate from the previous level.
         // The linking is provided by the certificate of each level signing the one of the next.
-        while (porBuf.hasRemaining()) {
-            levelCount++;
-            try {
+
+        try {
+
+            // get the version code, but don't do anything with it: creator knew about all our flags
+            porBuf.getInt();
+            HashSet<X509Certificate> certHistorySet = new HashSet<>();
+            while (porBuf.hasRemaining()) {
+                levelCount++;
                 ByteBuffer level = getLengthPrefixedSlice(porBuf);
                 ByteBuffer signedData = getLengthPrefixedSlice(level);
                 int flags = level.getInt();
@@ -477,6 +485,7 @@ public class ApkSignatureSchemeV3Verifier {
                     }
                 }
 
+                signedData.rewind();
                 byte[] encodedCert = readLengthPrefixedByteArray(signedData);
                 int signedSigAlgorithm = signedData.getInt();
                 if (lastCert != null && lastSigAlgorithm != signedSigAlgorithm) {
@@ -488,19 +497,25 @@ public class ApkSignatureSchemeV3Verifier {
                 lastCert = new VerbatimX509Certificate(lastCert, encodedCert);
 
                 lastSigAlgorithm = sigAlgorithm;
+                if (certHistorySet.contains(lastCert)) {
+                    throw new SecurityException("Encountered duplicate entries in "
+                            + "Proof-of-rotation record at certificate #" + levelCount + ".  All "
+                            + "signing certificates should be unique");
+                }
+                certHistorySet.add(lastCert);
                 certs.add(lastCert);
                 flagsList.add(flags);
-            } catch (IOException | BufferUnderflowException e) {
-                throw new IOException("Failed to parse Proof-of-rotation record", e);
-            } catch (NoSuchAlgorithmException | InvalidKeyException
-                    | InvalidAlgorithmParameterException | SignatureException e) {
-                throw new SecurityException(
-                        "Failed to verify signature over signed data for certificate #"
-                                + levelCount + " when verifying Proof-of-rotation record", e);
-            } catch (CertificateException e) {
-                throw new SecurityException("Failed to decode certificate #" + levelCount
-                        + " when verifying Proof-of-rotation record", e);
             }
+        } catch (IOException | BufferUnderflowException e) {
+            throw new IOException("Failed to parse Proof-of-rotation record", e);
+        } catch (NoSuchAlgorithmException | InvalidKeyException
+                | InvalidAlgorithmParameterException | SignatureException e) {
+            throw new SecurityException(
+                    "Failed to verify signature over signed data for certificate #"
+                            + levelCount + " when verifying Proof-of-rotation record", e);
+        } catch (CertificateException e) {
+            throw new SecurityException("Failed to decode certificate #" + levelCount
+                    + " when verifying Proof-of-rotation record", e);
         }
         return new VerifiedProofOfRotation(certs, flagsList);
     }
@@ -520,6 +535,20 @@ public class ApkSignatureSchemeV3Verifier {
         try (RandomAccessFile apk = new RandomAccessFile(apkPath, "r")) {
             SignatureInfo signatureInfo = findSignature(apk);
             return ApkSigningBlockUtils.generateApkVerity(apkPath, bufferFactory, signatureInfo);
+        }
+    }
+
+    static byte[] generateFsverityRootHash(String apkPath)
+            throws NoSuchAlgorithmException, DigestException, IOException,
+                   SignatureNotFoundException {
+        try (RandomAccessFile apk = new RandomAccessFile(apkPath, "r")) {
+            SignatureInfo signatureInfo = findSignature(apk);
+            VerifiedSigner vSigner = verify(apk, false);
+            if (vSigner.verityRootHash == null) {
+                return null;
+            }
+            return ApkVerityBuilder.generateFsverityRootHash(
+                    apk, ByteBuffer.wrap(vSigner.verityRootHash), signatureInfo);
         }
     }
 

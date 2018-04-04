@@ -51,6 +51,7 @@ import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.PersistableBundle;
 import android.os.RemoteException;
 import android.os.UserHandle;
 import android.os.UserManager;
@@ -441,6 +442,7 @@ public abstract class PackageManager {
      * @hide
      */
     @SystemApi
+    @TestApi
     public static final int MATCH_FACTORY_ONLY = 0x00200000;
 
     /**
@@ -1950,6 +1952,14 @@ public abstract class PackageManager {
      * <li>Minor version number in bits 21-12</li>
      * <li>Patch version number in bits 11-0</li>
      * </ul>
+     * A version of 1.1.0 or higher also indicates:
+     * <ul>
+     * <li>The {@code VK_ANDROID_external_memory_android_hardware_buffer} extension is
+     *     supported.</li>
+     * <li>{@code SYNC_FD} external semaphore and fence handles are supported.</li>
+     * <li>{@code VkPhysicalDeviceSamplerYcbcrConversionFeatures::samplerYcbcrConversion} is
+     *     supported.</li>
+     * </ul>
      */
     @SdkConstant(SdkConstantType.FEATURE)
     public static final String FEATURE_VULKAN_HARDWARE_VERSION = "android.hardware.vulkan.version";
@@ -2061,6 +2071,15 @@ public abstract class PackageManager {
             "android.hardware.sensor.hifi_sensors";
 
     /**
+     * Feature for {@link #getSystemAvailableFeatures} and {@link #hasSystemFeature}:
+     * The device supports a hardware mechanism for invoking an assist gesture.
+     * @see android.provider.Settings.Secure#ASSIST_GESTURE_ENABLED
+     * @hide
+     */
+    @SdkConstant(SdkConstantType.FEATURE)
+    public static final String FEATURE_ASSIST_GESTURE = "android.hardware.sensor.assist";
+
+    /**
      * Feature for {@link #getSystemAvailableFeatures} and
      * {@link #hasSystemFeature}: The device has a telephony radio with data
      * communication support.
@@ -2099,8 +2118,6 @@ public abstract class PackageManager {
     /**
      * Feature for {@link #getSystemAvailableFeatures} and {@link #hasSystemFeature}: The device
      * supports embedded subscriptions on eUICCs.
-     * TODO(b/35851809): Make this public.
-     * @hide
      */
     @SdkConstant(SdkConstantType.FEATURE)
     public static final String FEATURE_TELEPHONY_EUICC = "android.hardware.telephony.euicc";
@@ -2604,6 +2621,14 @@ public abstract class PackageManager {
     public static final String FEATURE_VR_HEADTRACKING = "android.hardware.vr.headtracking";
 
     /**
+     * Feature for {@link #getSystemAvailableFeatures} and {@link #hasSystemFeature}:
+     * The device has a StrongBox hardware-backed Keystore.
+     */
+    @SdkConstant(SdkConstantType.FEATURE)
+    public static final String FEATURE_STRONGBOX_KEYSTORE =
+            "android.hardware.strongbox_keystore";
+
+    /**
      * Action to external storage service to clean out removed apps.
      * @hide
      */
@@ -2948,6 +2973,11 @@ public abstract class PackageManager {
      * Constant for specifying the highest installed package version code.
      */
     public static final int VERSION_CODE_HIGHEST = -1;
+
+    /** {@hide} */
+    public int getUserId() {
+        return UserHandle.myUserId();
+    }
 
     /**
      * Retrieve overall information about an application package that is
@@ -3681,6 +3711,7 @@ public abstract class PackageManager {
      *
      * @hide
      */
+    @TestApi
     public abstract @Nullable String[] getNamesForUids(int[] uids);
 
     /**
@@ -4152,6 +4183,12 @@ public abstract class PackageManager {
      *         matching service was found.
      */
     public abstract ResolveInfo resolveService(Intent intent, @ResolveInfoFlags int flags);
+
+    /**
+     * @hide
+     */
+    public abstract ResolveInfo resolveServiceAsUser(Intent intent, @ResolveInfoFlags int flags,
+            @UserIdInt int userId);
 
     /**
      * Retrieve all services that can match the given intent.
@@ -4750,7 +4787,7 @@ public abstract class PackageManager {
 
             PackageParser.Package pkg = parser.parseMonolithicPackage(apkFile, 0);
             if ((flags & GET_SIGNATURES) != 0) {
-                PackageParser.collectCertificates(pkg, 0);
+                PackageParser.collectCertificates(pkg, false /* skipVerify */);
             }
             PackageUserState state = new PackageUserState();
             return PackageParser.generatePackageInfo(pkg, null, flags, 0, 0, null, state);
@@ -5045,6 +5082,7 @@ public abstract class PackageManager {
      * which market the package came from.
      *
      * @param packageName The name of the package to query
+     * @throws IllegalArgumentException if the given package name is not installed
      */
     public abstract String getInstallerPackageName(String packageName);
 
@@ -5196,7 +5234,7 @@ public abstract class PackageManager {
      */
     @Deprecated
     public void getPackageSizeInfo(String packageName, IPackageStatsObserver observer) {
-        getPackageSizeInfoAsUser(packageName, UserHandle.myUserId(), observer);
+        getPackageSizeInfoAsUser(packageName, getUserId(), observer);
     }
 
     /**
@@ -5474,28 +5512,49 @@ public abstract class PackageManager {
     /**
      * Puts the package in a suspended state, where attempts at starting activities are denied.
      *
-     * <p>It doesn't remove the data or the actual package file. The application notifications
-     * will be hidden, the application will not show up in recents, will not be able to show
-     * toasts or dialogs or ring the device.
+     * <p>It doesn't remove the data or the actual package file. The application's notifications
+     * will be hidden, any of its started activities will be stopped and it will not be able to
+     * show toasts or dialogs or ring the device. When the user tries to launch a suspended app, a
+     * system dialog with the given {@code dialogMessage} will be shown instead.</p>
      *
      * <p>The package must already be installed. If the package is uninstalled while suspended
-     * the package will no longer be suspended.
+     * the package will no longer be suspended. </p>
+     *
+     * <p>Optionally, the suspending app can provide extra information in the form of
+     * {@link PersistableBundle} objects to be shared with the apps being suspended and the
+     * launcher to support customization that they might need to handle the suspended state. </p>
+     *
+     * <p>The caller must hold {@link Manifest.permission#SUSPEND_APPS} or
+     * {@link Manifest.permission#MANAGE_USERS} to use this api.</p>
      *
      * @param packageNames The names of the packages to set the suspended status.
      * @param suspended If set to {@code true} than the packages will be suspended, if set to
-     * {@code false} the packages will be unsuspended.
-     * @param userId The user id.
+     * {@code false}, the packages will be unsuspended.
+     * @param appExtras An optional {@link PersistableBundle} that the suspending app can provide
+     *                  which will be shared with the apps being suspended. Ignored if
+     *                  {@code suspended} is false.
+     * @param launcherExtras An optional {@link PersistableBundle} that the suspending app can
+     *                       provide which will be shared with the launcher. Ignored if
+     *                       {@code suspended} is false.
+     * @param dialogMessage The message to be displayed to the user, when they try to launch a
+     *                      suspended app.
      *
      * @return an array of package names for which the suspended status is not set as requested in
      * this method.
      *
      * @hide
      */
-    public abstract String[] setPackagesSuspendedAsUser(
-            String[] packageNames, boolean suspended, @UserIdInt int userId);
+    @SystemApi
+    @RequiresPermission(anyOf = {Manifest.permission.SUSPEND_APPS,
+            Manifest.permission.MANAGE_USERS})
+    public String[] setPackagesSuspended(String[] packageNames, boolean suspended,
+            @Nullable PersistableBundle appExtras, @Nullable PersistableBundle launcherExtras,
+            String dialogMessage) {
+        throw new UnsupportedOperationException("setPackagesSuspended not implemented");
+    }
 
     /**
-     * @see #setPackageSuspendedAsUser(String, boolean, int)
+     * @see #setPackagesSuspended(String[], boolean, PersistableBundle, PersistableBundle, String)
      * @param packageName The name of the package to get the suspended status of.
      * @param userId The user id.
      * @return {@code true} if the package is suspended or {@code false} if the package is not
@@ -5503,6 +5562,103 @@ public abstract class PackageManager {
      * @hide
      */
     public abstract boolean isPackageSuspendedForUser(String packageName, int userId);
+
+    /**
+     * Query if an app is currently suspended.
+     *
+     * @return {@code true} if the given package is suspended, {@code false} otherwise
+     *
+     * @see #setPackagesSuspended(String[], boolean, PersistableBundle, PersistableBundle, String)
+     * @hide
+     */
+    @SystemApi
+    public boolean isPackageSuspended(String packageName) {
+        throw new UnsupportedOperationException("isPackageSuspended not implemented");
+    }
+
+    /**
+     * Apps can query this to know if they have been suspended. A system app with the permission
+     * {@code android.permission.SUSPEND_APPS} can put any app on the device into a suspended state.
+     *
+     * <p>While in this state, the application's notifications will be hidden, any of its started
+     * activities will be stopped and it will not be able to show toasts or dialogs or ring the
+     * device. When the user tries to launch a suspended app, the system will, instead, show a
+     * dialog to the user informing them that they cannot use this app while it is suspended.
+     *
+     * <p>When an app is put into this state, the broadcast action
+     * {@link Intent#ACTION_MY_PACKAGE_SUSPENDED} will be delivered to any of its broadcast
+     * receivers that included this action in their intent-filters, <em>including manifest
+     * receivers.</em> Similarly, a broadcast action {@link Intent#ACTION_MY_PACKAGE_UNSUSPENDED}
+     * is delivered when a previously suspended app is taken out of this state.
+     * </p>
+     *
+     * @return {@code true} if the calling package has been suspended, {@code false} otherwise.
+     *
+     * @see #getSuspendedPackageAppExtras()
+     * @see Intent#ACTION_MY_PACKAGE_SUSPENDED
+     * @see Intent#ACTION_MY_PACKAGE_UNSUSPENDED
+     */
+    public boolean isPackageSuspended() {
+        throw new UnsupportedOperationException("isPackageSuspended not implemented");
+    }
+
+    /**
+     * Retrieve the {@link PersistableBundle} that was passed as {@code appExtras} when the given
+     * package was suspended.
+     *
+     * <p> The caller must hold permission {@link Manifest.permission#SUSPEND_APPS} to use this
+     * api.</p>
+     *
+     * @param packageName The package to retrieve extras for.
+     * @return The {@code appExtras} for the suspended package.
+     *
+     * @see #setPackagesSuspended(String[], boolean, PersistableBundle, PersistableBundle, String)
+     * @hide
+     */
+    @SystemApi
+    @RequiresPermission(Manifest.permission.SUSPEND_APPS)
+    public @Nullable PersistableBundle getSuspendedPackageAppExtras(String packageName) {
+        throw new UnsupportedOperationException("getSuspendedPackageAppExtras not implemented");
+    }
+
+    /**
+     * Set the app extras for a suspended package. This method can be used to update the appExtras
+     * for a package that was earlier suspended using
+     * {@link #setPackagesSuspended(String[], boolean, PersistableBundle, PersistableBundle,
+     * String)}
+     * Does nothing if the given package is not already in a suspended state.
+     *
+     * @param packageName The package for which the appExtras need to be updated
+     * @param appExtras The new appExtras for the given package
+     *
+     * @see #setPackagesSuspended(String[], boolean, PersistableBundle, PersistableBundle, String)
+     *
+     * @hide
+     */
+    @SystemApi
+    @RequiresPermission(Manifest.permission.SUSPEND_APPS)
+    public void setSuspendedPackageAppExtras(String packageName,
+            @Nullable PersistableBundle appExtras) {
+        throw new UnsupportedOperationException("setSuspendedPackageAppExtras not implemented");
+    }
+
+    /**
+     * Returns any extra information supplied as {@code appExtras} to the system when the calling
+     * app was suspended.
+     *
+     * <p>Note: If no extras were supplied to the system, this method will return {@code null}, even
+     * when the calling app has been suspended.</p>
+     *
+     * @return A {@link Bundle} containing the extras for the app, or {@code null} if the
+     * package is not currently suspended.
+     *
+     * @see #isPackageSuspended()
+     * @see Intent#ACTION_MY_PACKAGE_UNSUSPENDED
+     * @see Intent#ACTION_MY_PACKAGE_SUSPENDED
+     */
+    public @Nullable Bundle getSuspendedPackageAppExtras() {
+        throw new UnsupportedOperationException("getSuspendedPackageAppExtras not implemented");
+    }
 
     /**
      * Provide a hint of what the {@link ApplicationInfo#category} value should
@@ -5992,4 +6148,26 @@ public abstract class PackageManager {
         throw new UnsupportedOperationException(
                 "hasSigningCertificate not implemented in subclass");
     }
+
+    /**
+     * @return the system defined text classifier package name, or null if there's none.
+     *
+     * @hide
+     */
+    public String getSystemTextClassifierPackageName() {
+        throw new UnsupportedOperationException(
+                "getSystemTextClassifierPackageName not implemented in subclass");
+    }
+
+    /**
+     * @return whether a given package's state is protected, e.g. package cannot be disabled,
+     *         suspended, hidden or force stopped.
+     *
+     * @hide
+     */
+    public boolean isPackageStateProtected(String packageName, int userId) {
+        throw new UnsupportedOperationException(
+            "isPackageStateProtected not implemented in subclass");
+    }
+
 }

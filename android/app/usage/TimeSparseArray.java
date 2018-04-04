@@ -17,6 +17,7 @@
 package android.app.usage;
 
 import android.util.LongSparseArray;
+import android.util.Slog;
 
 /**
  * An array that indexes by a long timestamp, representing milliseconds since the epoch.
@@ -24,6 +25,8 @@ import android.util.LongSparseArray;
  * {@hide}
  */
 public class TimeSparseArray<E> extends LongSparseArray<E> {
+    private static final String TAG = TimeSparseArray.class.getSimpleName();
+
     public TimeSparseArray() {
         super();
     }
@@ -67,6 +70,30 @@ public class TimeSparseArray<E> extends LongSparseArray<E> {
         } else {
             return -1;
         }
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * Overridden to ensure no collisions. The key (time in milliseconds) is incremented till an
+     * empty place is found.
+     */
+    @Override
+    public void put(long key, E value) {
+        final long origKey = key;
+        int keyIndex = indexOfKey(key);
+        if (keyIndex >= 0) {
+            final long sz = size();
+            while (keyIndex < sz && keyAt(keyIndex) == key) {
+                key++;
+                keyIndex++;
+            }
+            if (key >= origKey + 10) {
+                Slog.w(TAG, "Value " + value + " supposed to be inserted at " + origKey
+                        + " displaced to " + key);
+            }
+        }
+        super.put(key, value);
     }
 
     /**

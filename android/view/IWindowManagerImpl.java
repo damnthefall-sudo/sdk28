@@ -346,7 +346,7 @@ public class IWindowManagerImpl implements IWindowManager {
     }
 
     @Override
-    public void setScreenCaptureDisabled(int userId, boolean disabled) {
+    public void refreshScreenCaptureDisabled(int userId) {
         // TODO Auto-generated method stub
     }
 
@@ -384,6 +384,15 @@ public class IWindowManagerImpl implements IWindowManager {
     @Override
     public void setPipVisibility(boolean visible) {
         // TODO Auto-generated method stub
+    }
+
+    @Override
+    public void setShelfHeight(boolean visible, int shelfHeight) {
+        // TODO Auto-generated method stub
+    }
+
+    @Override
+    public void setNavBarVirtualKeyHapticFeedbackEnabled(boolean enabled) {
     }
 
     @Override
@@ -526,14 +535,6 @@ public class IWindowManagerImpl implements IWindowManager {
     }
 
     @Override
-    public void enableSurfaceTrace(ParcelFileDescriptor fd) throws RemoteException {
-    }
-
-    @Override
-    public void disableSurfaceTrace() throws RemoteException {
-    }
-
-    @Override
     public Region getCurrentImeTouchRegion() throws RemoteException {
         return null;
     }
@@ -560,5 +561,13 @@ public class IWindowManagerImpl implements IWindowManager {
     @Override
     public boolean isWindowTraceEnabled() throws RemoteException {
         return false;
+    }
+
+    @Override
+    public void requestUserActivityNotification() throws RemoteException {
+    }
+
+    @Override
+    public void dontOverrideDisplayInfo(int displayId) throws RemoteException {
     }
 }

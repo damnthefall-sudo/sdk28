@@ -137,6 +137,10 @@ public class KeyguardHostView extends FrameLayout implements SecurityCallback {
         mCancelAction = cancelAction;
     }
 
+    public boolean hasDismissActions() {
+        return mDismissAction != null || mCancelAction != null;
+    }
+
     public void cancelDismissAction() {
         setOnDismissAction(null, null);
     }
@@ -149,7 +153,6 @@ public class KeyguardHostView extends FrameLayout implements SecurityCallback {
         mSecurityContainer.setLockPatternUtils(mLockPatternUtils);
         mSecurityContainer.setSecurityCallback(this);
         mSecurityContainer.showPrimarySecurityScreen(false);
-        // mSecurityContainer.updateSecurityViews(false /* not bouncing */);
     }
 
     /**
@@ -195,16 +198,6 @@ public class KeyguardHostView extends FrameLayout implements SecurityCallback {
             return true;
         }
         return false;
-    }
-
-    @Override
-    public boolean dispatchPopulateAccessibilityEvent(AccessibilityEvent event) {
-        if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            event.getText().add(mSecurityContainer.getCurrentSecurityModeContentDescription());
-            return true;
-        } else {
-            return super.dispatchPopulateAccessibilityEvent(event);
-        }
     }
 
     protected KeyguardSecurityContainer getSecurityContainer() {
@@ -253,6 +246,10 @@ public class KeyguardHostView extends FrameLayout implements SecurityCallback {
         if (mViewMediatorCallback != null) {
             mViewMediatorCallback.setNeedsInput(needsInput);
         }
+    }
+
+    public CharSequence getAccessibilityTitleForCurrentMode() {
+        return mSecurityContainer.getTitle();
     }
 
     public void userActivity() {

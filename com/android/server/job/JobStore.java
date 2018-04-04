@@ -19,6 +19,7 @@ package com.android.server.job;
 import static com.android.server.job.JobSchedulerService.sElapsedRealtimeClock;
 import static com.android.server.job.JobSchedulerService.sSystemClock;
 
+import android.annotation.Nullable;
 import android.app.ActivityManager;
 import android.app.IActivityManager;
 import android.app.job.JobInfo;
@@ -29,6 +30,7 @@ import android.os.Environment;
 import android.os.Handler;
 import android.os.PersistableBundle;
 import android.os.Process;
+import android.os.SystemClock;
 import android.os.UserHandle;
 import android.text.format.DateUtils;
 import android.util.ArraySet;
@@ -61,6 +63,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 /**
  * Maintains the master list of jobs that the job scheduler is tracking. These jobs are compared by
@@ -84,7 +88,7 @@ public final class JobStore {
     private static final int MAX_OPS_BEFORE_WRITE = 1;
 
     final Object mLock;
-    final JobSet mJobSet; // per-caller-uid tracking
+    final JobSet mJobSet; // per-caller-uid and per-source-uid tracking
     final Context mContext;
 
     // Bookkeeping around incorrect boot-time system clock
@@ -133,7 +137,7 @@ public final class JobStore {
         File systemDir = new File(dataDir, "system");
         File jobDir = new File(systemDir, "job");
         jobDir.mkdirs();
-        mJobsFile = new AtomicFile(new File(jobDir, "jobs.xml"));
+        mJobsFile = new AtomicFile(new File(jobDir, "jobs.xml"), "jobs");
 
         mJobSet = new JobSet();
 
@@ -284,20 +288,21 @@ public final class JobStore {
      * transient unified collections for them to iterate over and then discard, or creating
      * iterators every time a client needs to perform a sweep.
      */
-    public void forEachJob(JobStatusFunctor functor) {
-        mJobSet.forEachJob(functor);
+    public void forEachJob(Consumer<JobStatus> functor) {
+        mJobSet.forEachJob(null, functor);
     }
 
-    public void forEachJob(int uid, JobStatusFunctor functor) {
+    public void forEachJob(@Nullable Predicate<JobStatus> filterPredicate,
+            Consumer<JobStatus> functor) {
+        mJobSet.forEachJob(filterPredicate, functor);
+    }
+
+    public void forEachJob(int uid, Consumer<JobStatus> functor) {
         mJobSet.forEachJob(uid, functor);
     }
 
-    public void forEachJobForSourceUid(int sourceUid, JobStatusFunctor functor) {
+    public void forEachJobForSourceUid(int sourceUid, Consumer<JobStatus> functor) {
         mJobSet.forEachJobForSourceUid(sourceUid, functor);
-    }
-
-    public interface JobStatusFunctor {
-        public void process(JobStatus jobStatus);
     }
 
     /** Version of the db schema. */
@@ -340,12 +345,9 @@ public final class JobStore {
             final List<JobStatus> storeCopy = new ArrayList<JobStatus>();
             synchronized (mLock) {
                 // Clone the jobs so we can release the lock before writing.
-                mJobSet.forEachJob(new JobStatusFunctor() {
-                    @Override
-                    public void process(JobStatus job) {
-                        if (job.isPersisted()) {
-                            storeCopy.add(new JobStatus(job));
-                        }
+                mJobSet.forEachJob(null, (job) -> {
+                    if (job.isPersisted()) {
+                        storeCopy.add(new JobStatus(job));
                     }
                 });
             }
@@ -361,6 +363,7 @@ public final class JobStore {
             int numSystemJobs = 0;
             int numSyncJobs = 0;
             try {
+                final long startTime = SystemClock.uptimeMillis();
                 ByteArrayOutputStream baos = new ByteArrayOutputStream();
                 XmlSerializer out = new FastXmlSerializer();
                 out.setOutput(baos, StandardCharsets.UTF_8.name());
@@ -393,7 +396,7 @@ public final class JobStore {
                 out.endDocument();
 
                 // Write out to disk in one fell swoop.
-                FileOutputStream fos = mJobsFile.startWrite();
+                FileOutputStream fos = mJobsFile.startWrite(startTime);
                 fos.write(baos.toByteArray());
                 mJobsFile.finishWrite(fos);
                 mDirtyOperations = 0;
@@ -474,6 +477,9 @@ public final class JobStore {
                 final NetworkRequest network = jobStatus.getJob().getRequiredNetwork();
                 out.attribute(null, "net-capabilities", Long.toString(
                         BitUtils.packBits(network.networkCapabilities.getCapabilities())));
+                out.attribute(null, "net-unwanted-capabilities", Long.toString(
+                        BitUtils.packBits(network.networkCapabilities.getUnwantedCapabilities())));
+
                 out.attribute(null, "net-transport-types", Long.toString(
                         BitUtils.packBits(network.networkCapabilities.getTransportTypes())));
             }
@@ -885,12 +891,19 @@ public final class JobStore {
             String val;
 
             final String netCapabilities = parser.getAttributeValue(null, "net-capabilities");
+            final String netUnwantedCapabilities = parser.getAttributeValue(
+                    null, "net-unwanted-capabilities");
             final String netTransportTypes = parser.getAttributeValue(null, "net-transport-types");
             if (netCapabilities != null && netTransportTypes != null) {
                 final NetworkRequest request = new NetworkRequest.Builder().build();
+                final long unwantedCapabilities = netUnwantedCapabilities != null
+                        ? Long.parseLong(netUnwantedCapabilities)
+                        : BitUtils.packBits(request.networkCapabilities.getUnwantedCapabilities());
+
                 // We're okay throwing NFE here; caught by caller
                 request.networkCapabilities.setCapabilities(
-                        BitUtils.unpackBits(Long.parseLong(netCapabilities)));
+                        BitUtils.unpackBits(Long.parseLong(netCapabilities)),
+                        BitUtils.unpackBits(unwantedCapabilities));
                 request.networkCapabilities.setTransportTypes(
                         BitUtils.unpackBits(Long.parseLong(netTransportTypes)));
                 jobBuilder.setRequiredNetwork(request);
@@ -998,10 +1011,11 @@ public final class JobStore {
     }
 
     static final class JobSet {
-        // Key is the getUid() originator of the jobs in each sheaf
-        private SparseArray<ArraySet<JobStatus>> mJobs;
-        // Same data but with the key as getSourceUid() of the jobs in each sheaf
-        private SparseArray<ArraySet<JobStatus>> mJobsPerSourceUid;
+        @VisibleForTesting // Key is the getUid() originator of the jobs in each sheaf
+        final SparseArray<ArraySet<JobStatus>> mJobs;
+
+        @VisibleForTesting // Same data but with the key as getSourceUid() of the jobs in each sheaf
+        final SparseArray<ArraySet<JobStatus>> mJobsPerSourceUid;
 
         public JobSet() {
             mJobs = new SparseArray<ArraySet<JobStatus>>();
@@ -1044,7 +1058,13 @@ public final class JobStore {
                 jobsForSourceUid = new ArraySet<>();
                 mJobsPerSourceUid.put(sourceUid, jobsForSourceUid);
             }
-            return jobs.add(job) && jobsForSourceUid.add(job);
+            final boolean added = jobs.add(job);
+            final boolean addedInSource = jobsForSourceUid.add(job);
+            if (added != addedInSource) {
+                Slog.wtf(TAG, "mJobs and mJobsPerSourceUid mismatch; caller= " + added
+                        + " source= " + addedInSource);
+            }
+            return added || addedInSource;
         }
 
         public boolean remove(JobStatus job) {
@@ -1073,25 +1093,38 @@ public final class JobStore {
 
         /**
          * Removes the jobs of all users not specified by the whitelist of user ids.
-         * The jobs scheduled by non existent users will not be removed if they were
+         * This will remove jobs scheduled *by* non-existent users as well as jobs scheduled *for*
+         * non-existent users
          */
-        public void removeJobsOfNonUsers(int[] whitelist) {
-            for (int jobSetIndex = mJobsPerSourceUid.size() - 1; jobSetIndex >= 0; jobSetIndex--) {
-                final int jobUserId = UserHandle.getUserId(mJobsPerSourceUid.keyAt(jobSetIndex));
-                if (!ArrayUtils.contains(whitelist, jobUserId)) {
-                    mJobsPerSourceUid.removeAt(jobSetIndex);
-                }
-            }
+        public void removeJobsOfNonUsers(final int[] whitelist) {
+            final Predicate<JobStatus> noSourceUser =
+                    job -> !ArrayUtils.contains(whitelist, job.getSourceUserId());
+            final Predicate<JobStatus> noCallingUser =
+                    job -> !ArrayUtils.contains(whitelist, job.getUserId());
+            removeAll(noSourceUser.or(noCallingUser));
+        }
+
+        private void removeAll(Predicate<JobStatus> predicate) {
             for (int jobSetIndex = mJobs.size() - 1; jobSetIndex >= 0; jobSetIndex--) {
-                final ArraySet<JobStatus> jobsForUid = mJobs.valueAt(jobSetIndex);
-                for (int jobIndex = jobsForUid.size() - 1; jobIndex >= 0; jobIndex--) {
-                    final int jobUserId = jobsForUid.valueAt(jobIndex).getUserId();
-                    if (!ArrayUtils.contains(whitelist, jobUserId)) {
-                        jobsForUid.removeAt(jobIndex);
+                final ArraySet<JobStatus> jobs = mJobs.valueAt(jobSetIndex);
+                for (int jobIndex = jobs.size() - 1; jobIndex >= 0; jobIndex--) {
+                    if (predicate.test(jobs.valueAt(jobIndex))) {
+                        jobs.removeAt(jobIndex);
                     }
                 }
-                if (jobsForUid.size() == 0) {
+                if (jobs.size() == 0) {
                     mJobs.removeAt(jobSetIndex);
+                }
+            }
+            for (int jobSetIndex = mJobsPerSourceUid.size() - 1; jobSetIndex >= 0; jobSetIndex--) {
+                final ArraySet<JobStatus> jobs = mJobsPerSourceUid.valueAt(jobSetIndex);
+                for (int jobIndex = jobs.size() - 1; jobIndex >= 0; jobIndex--) {
+                    if (predicate.test(jobs.valueAt(jobIndex))) {
+                        jobs.removeAt(jobIndex);
+                    }
+                }
+                if (jobs.size() == 0) {
+                    mJobsPerSourceUid.removeAt(jobSetIndex);
                 }
             }
         }
@@ -1161,31 +1194,35 @@ public final class JobStore {
             return total;
         }
 
-        public void forEachJob(JobStatusFunctor functor) {
+        public void forEachJob(@Nullable Predicate<JobStatus> filterPredicate,
+                Consumer<JobStatus> functor) {
             for (int uidIndex = mJobs.size() - 1; uidIndex >= 0; uidIndex--) {
                 ArraySet<JobStatus> jobs = mJobs.valueAt(uidIndex);
                 if (jobs != null) {
                     for (int i = jobs.size() - 1; i >= 0; i--) {
-                        functor.process(jobs.valueAt(i));
+                        final JobStatus jobStatus = jobs.valueAt(i);
+                        if ((filterPredicate == null) || filterPredicate.test(jobStatus)) {
+                            functor.accept(jobStatus);
+                        }
                     }
                 }
             }
         }
 
-        public void forEachJob(int callingUid, JobStatusFunctor functor) {
+        public void forEachJob(int callingUid, Consumer<JobStatus> functor) {
             ArraySet<JobStatus> jobs = mJobs.get(callingUid);
             if (jobs != null) {
                 for (int i = jobs.size() - 1; i >= 0; i--) {
-                    functor.process(jobs.valueAt(i));
+                    functor.accept(jobs.valueAt(i));
                 }
             }
         }
 
-        public void forEachJobForSourceUid(int sourceUid, JobStatusFunctor functor) {
+        public void forEachJobForSourceUid(int sourceUid, Consumer<JobStatus> functor) {
             final ArraySet<JobStatus> jobs = mJobsPerSourceUid.get(sourceUid);
             if (jobs != null) {
                 for (int i = jobs.size() - 1; i >= 0; i--) {
-                    functor.process(jobs.valueAt(i));
+                    functor.accept(jobs.valueAt(i));
                 }
             }
         }

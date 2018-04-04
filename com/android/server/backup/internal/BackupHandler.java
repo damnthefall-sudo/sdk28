@@ -16,12 +16,10 @@
 
 package com.android.server.backup.internal;
 
-import static com.android.server.backup.RefactoredBackupManagerService.DEBUG;
-import static com.android.server.backup.RefactoredBackupManagerService.MORE_DEBUG;
-import static com.android.server.backup.RefactoredBackupManagerService.TAG;
-import static com.android.server.backup.RefactoredBackupManagerService.TIMEOUT_RESTORE_INTERVAL;
+import static com.android.server.backup.BackupManagerService.DEBUG;
+import static com.android.server.backup.BackupManagerService.MORE_DEBUG;
+import static com.android.server.backup.BackupManagerService.TAG;
 
-import android.app.AlarmManager;
 import android.app.backup.RestoreSet;
 import android.content.Intent;
 import android.os.Handler;
@@ -34,10 +32,12 @@ import android.util.Pair;
 import android.util.Slog;
 
 import com.android.internal.backup.IBackupTransport;
+import com.android.internal.util.Preconditions;
 import com.android.server.EventLogTags;
+import com.android.server.backup.BackupAgentTimeoutParameters;
+import com.android.server.backup.BackupManagerService;
 import com.android.server.backup.BackupRestoreTask;
 import com.android.server.backup.DataChangedJournal;
-import com.android.server.backup.RefactoredBackupManagerService;
 import com.android.server.backup.transport.TransportClient;
 import com.android.server.backup.TransportManager;
 import com.android.server.backup.fullbackup.PerformAdbBackupTask;
@@ -81,12 +81,15 @@ public class BackupHandler extends Handler {
     public static final int MSG_BACKUP_RESTORE_STEP = 20;
     public static final int MSG_OP_COMPLETE = 21;
 
-    private final RefactoredBackupManagerService backupManagerService;
+    private final BackupManagerService backupManagerService;
+    private final BackupAgentTimeoutParameters mAgentTimeoutParameters;
 
-    public BackupHandler(
-            RefactoredBackupManagerService backupManagerService, Looper looper) {
+    public BackupHandler(BackupManagerService backupManagerService, Looper looper) {
         super(looper);
         this.backupManagerService = backupManagerService;
+        mAgentTimeoutParameters = Preconditions.checkNotNull(
+                backupManagerService.getAgentTimeoutParameters(),
+                "Timeout parameters cannot be null");
     }
 
     public void handleMessage(Message msg) {
@@ -304,7 +307,7 @@ public class BackupHandler extends Handler {
                     sets = transport.getAvailableRestoreSets();
                     // cache the result in the active session
                     synchronized (params.session) {
-                        params.session.mRestoreSets = sets;
+                        params.session.setRestoreSets(sets);
                     }
                     if (sets == null) {
                         EventLog.writeEvent(EventLogTags.RESTORE_TRANSPORT_FAILURE);
@@ -324,7 +327,8 @@ public class BackupHandler extends Handler {
 
                     // Done: reset the session timeout clock
                     removeMessages(MSG_RESTORE_SESSION_TIMEOUT);
-                    sendEmptyMessageDelayed(MSG_RESTORE_SESSION_TIMEOUT, TIMEOUT_RESTORE_INTERVAL);
+                    sendEmptyMessageDelayed(MSG_RESTORE_SESSION_TIMEOUT,
+                            mAgentTimeoutParameters.getRestoreAgentTimeoutMillis());
 
                     params.listener.onFinished(callerLogString);
                 }

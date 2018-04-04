@@ -16,6 +16,7 @@
 
 package android.os;
 
+import android.annotation.SystemApi;
 import android.annotation.SystemService;
 import android.content.Context;
 import android.content.Intent;
@@ -138,6 +139,23 @@ public class BatteryManager {
      */
     public static final String EXTRA_SEQUENCE = "seq";
 
+    /**
+     * Extra for {@link android.content.Intent#ACTION_BATTERY_LEVEL_CHANGED}:
+     * Contains list of Bundles representing battery events
+     * @hide
+     */
+    @SystemApi
+    public static final String EXTRA_EVENTS = "android.os.extra.EVENTS";
+
+    /**
+     * Extra for event in {@link android.content.Intent#ACTION_BATTERY_LEVEL_CHANGED}:
+     * Long value representing time when event occurred as returned by
+     * {@link android.os.SystemClock#elapsedRealtime()}
+     * @hide
+     */
+    @SystemApi
+    public static final String EXTRA_EVENT_TIMESTAMP = "android.os.extra.EVENT_TIMESTAMP";
+
     // values for "status" field in the ACTION_BATTERY_CHANGED Intent
     public static final int BATTERY_STATUS_UNKNOWN = Constants.BATTERY_STATUS_UNKNOWN;
     public static final int BATTERY_STATUS_CHARGING = Constants.BATTERY_STATUS_CHARGING;
@@ -157,11 +175,11 @@ public class BatteryManager {
     // values of the "plugged" field in the ACTION_BATTERY_CHANGED intent.
     // These must be powers of 2.
     /** Power source is an AC charger. */
-    public static final int BATTERY_PLUGGED_AC = 1;
+    public static final int BATTERY_PLUGGED_AC = OsProtoEnums.BATTERY_PLUGGED_AC; // = 1
     /** Power source is a USB port. */
-    public static final int BATTERY_PLUGGED_USB = 2;
+    public static final int BATTERY_PLUGGED_USB = OsProtoEnums.BATTERY_PLUGGED_USB; // = 2
     /** Power source is wireless. */
-    public static final int BATTERY_PLUGGED_WIRELESS = 4;
+    public static final int BATTERY_PLUGGED_WIRELESS = OsProtoEnums.BATTERY_PLUGGED_WIRELESS; // = 4
 
     /** @hide */
     public static final int BATTERY_PLUGGED_ANY =
@@ -322,5 +340,17 @@ public class BatteryManager {
      */
     public long getLongProperty(int id) {
         return queryProperty(id);
+    }
+
+    /**
+     * Return true if the plugType given is wired
+     * @param plugType {@link #BATTERY_PLUGGED_AC}, {@link #BATTERY_PLUGGED_USB},
+     *        or {@link #BATTERY_PLUGGED_WIRELESS}
+     *
+     * @return true if plugType is wired
+     * @hide
+     */
+    public static boolean isPlugWired(int plugType) {
+        return plugType == BATTERY_PLUGGED_USB || plugType == BATTERY_PLUGGED_AC;
     }
 }

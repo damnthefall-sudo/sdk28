@@ -102,9 +102,12 @@ public class NetdEventListenerService extends INetdEventListener.Stub {
 
 
     /**
-     * There are only 2 possible callbacks.
+     * There are only 3 possible callbacks.
      *
-     * mNetdEventCallbackList[CALLBACK_CALLER_DEVICE_POLICY].
+     * mNetdEventCallbackList[CALLBACK_CALLER_CONNECTIVITY_SERVICE]
+     * Callback registered/unregistered by ConnectivityService.
+     *
+     * mNetdEventCallbackList[CALLBACK_CALLER_DEVICE_POLICY]
      * Callback registered/unregistered when logging is being enabled/disabled in DPM
      * by the device owner. It's DevicePolicyManager's responsibility to ensure that.
      *
@@ -113,6 +116,7 @@ public class NetdEventListenerService extends INetdEventListener.Stub {
      */
     @GuardedBy("this")
     private static final int[] ALLOWED_CALLBACK_TYPES = {
+        INetdEventCallback.CALLBACK_CALLER_CONNECTIVITY_SERVICE,
         INetdEventCallback.CALLBACK_CALLER_DEVICE_POLICY,
         INetdEventCallback.CALLBACK_CALLER_NETWORK_WATCHLIST
     };
@@ -212,6 +216,19 @@ public class NetdEventListenerService extends INetdEventListener.Stub {
     @Override
     // Called concurrently by multiple binder threads.
     // This method must not block or perform long-running operations.
+    public synchronized void onPrivateDnsValidationEvent(int netId,
+            String ipAddress, String hostname, boolean validated)
+            throws RemoteException {
+        for (INetdEventCallback callback : mNetdEventCallbackList) {
+            if (callback != null) {
+                callback.onPrivateDnsValidationEvent(netId, ipAddress, hostname, validated);
+            }
+        }
+    }
+
+    @Override
+    // Called concurrently by multiple binder threads.
+    // This method must not block or perform long-running operations.
     public synchronized void onConnectEvent(int netId, int error, int latencyMs, String ipAddr,
             int port, int uid) throws RemoteException {
         long timestamp = System.currentTimeMillis();
@@ -219,11 +236,7 @@ public class NetdEventListenerService extends INetdEventListener.Stub {
 
         for (INetdEventCallback callback : mNetdEventCallbackList) {
             if (callback != null) {
-                // TODO(rickywai): Remove this checking to collect ip in watchlist.
-                if (callback ==
-                        mNetdEventCallbackList[INetdEventCallback.CALLBACK_CALLER_DEVICE_POLICY]) {
-                    callback.onConnectEvent(ipAddr, port, timestamp, uid);
-                }
+                callback.onConnectEvent(ipAddr, port, timestamp, uid);
             }
         }
     }
@@ -255,6 +268,29 @@ public class NetdEventListenerService extends INetdEventListener.Stub {
         String dstMac = event.dstHwAddr.toString();
         StatsLog.write(StatsLog.PACKET_WAKEUP_OCCURRED,
                 uid, iface, ethertype, dstMac, srcIp, dstIp, ipNextHeader, srcPort, dstPort);
+    }
+
+    @Override
+    public synchronized void onTcpSocketStatsEvent(int[] networkIds,
+            int[] sentPackets, int[] lostPackets, int[] rttsUs, int[] sentAckDiffsMs) {
+        if (networkIds.length != sentPackets.length
+                || networkIds.length != lostPackets.length
+                || networkIds.length != rttsUs.length
+                || networkIds.length != sentAckDiffsMs.length) {
+            Log.e(TAG, "Mismatched lengths of TCP socket stats data arrays");
+            return;
+        }
+
+        long timestamp = System.currentTimeMillis();
+        for (int i = 0; i < networkIds.length; i++) {
+            int netId = networkIds[i];
+            int sent = sentPackets[i];
+            int lost = lostPackets[i];
+            int rttUs = rttsUs[i];
+            int sentAckDiffMs = sentAckDiffsMs[i];
+            getMetricsForNetwork(timestamp, netId)
+                    .addTcpStatsResult(sent, lost, rttUs, sentAckDiffMs);
+        }
     }
 
     private void addWakeupEvent(WakeupEvent event) {

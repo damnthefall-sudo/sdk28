@@ -22,32 +22,40 @@ import android.annotation.Nullable;
 import android.content.Context;
 import android.media.AudioAttributes;
 import android.media.AudioManager;
-import android.media.MediaPlayerBase;
+import android.media.DataSourceDesc;
+import android.media.MediaItem2;
+import android.media.MediaMetadata2;
+import android.media.MediaPlayer2;
+import android.media.SessionToken2;
+import android.media.session.MediaController;
+import android.media.session.PlaybackState;
 import android.media.update.ApiLoader;
 import android.media.update.VideoView2Provider;
-import android.media.update.ViewProvider;
+import android.media.update.ViewGroupHelper;
 import android.net.Uri;
+import android.os.Bundle;
 import android.util.AttributeSet;
-import android.view.KeyEvent;
-import android.view.MotionEvent;
+import android.view.View;
+
+import com.android.internal.annotations.VisibleForTesting;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executor;
 
-// TODO: Use @link tag to refer MediaPlayer2 in docs once MediaPlayer2.java is submitted. Same to
-// MediaSession2.
-// TODO: change the reference from MediaPlayer to MediaPlayer2.
+// TODO: Replace MediaSession wtih MediaSession2 once MediaSession2 is submitted.
 /**
- * Displays a video file.  VideoView2 class is a View class which is wrapping MediaPlayer2 so that
- * developers can easily implement a video rendering application.
+ * @hide
+ * Displays a video file.  VideoView2 class is a View class which is wrapping {@link MediaPlayer2}
+ * so that developers can easily implement a video rendering application.
  *
  * <p>
  * <em> Data sources that VideoView2 supports : </em>
- * VideoView2 can play video files and audio-only fiels as
+ * VideoView2 can play video files and audio-only files as
  * well. It can load from various sources such as resources or content providers. The supported
- * media file formats are the same as MediaPlayer2.
+ * media file formats are the same as {@link MediaPlayer2}.
  *
  * <p>
  * <em> View type can be selected : </em>
@@ -76,8 +84,8 @@ import java.util.Map;
  * If a developer wants to attach a customed MediaControlView2, then set enableControlView attribute
  * to false and assign the customed media control widget using {@link #setMediaControlView2}.
  * <li> VideoView2 is integrated with MediaPlayer2 while VideoView is integrated with MediaPlayer.
- * <li> VideoView2 is integrated with MediaSession2 and so it responses with media key events.
- * A VideoView2 keeps a MediaSession2 instance internally and connects it to a corresponding
+ * <li> VideoView2 is integrated with MediaSession and so it responses with media key events.
+ * A VideoView2 keeps a MediaSession instance internally and connects it to a corresponding
  * MediaControlView2 instance.
  * </p>
  * </ul>
@@ -96,10 +104,8 @@ import java.util.Map;
  * does not restore the current play state, play position, selected tracks. Applications should save
  * and restore these on their own in {@link android.app.Activity#onSaveInstanceState} and
  * {@link android.app.Activity#onRestoreInstanceState}.
- *
- * @hide
  */
-public class VideoView2 extends FrameLayout {
+public class VideoView2 extends ViewGroupHelper<VideoView2Provider> {
     /** @hide */
     @IntDef({
             VIEW_TYPE_TEXTUREVIEW,
@@ -108,10 +114,19 @@ public class VideoView2 extends FrameLayout {
     @Retention(RetentionPolicy.SOURCE)
     public @interface ViewType {}
 
+    /**
+     * Indicates video is rendering on SurfaceView.
+     *
+     * @see #setViewType
+     */
     public static final int VIEW_TYPE_SURFACEVIEW = 1;
-    public static final int VIEW_TYPE_TEXTUREVIEW = 2;
 
-    private final VideoView2Provider mProvider;
+    /**
+     * Indicates video is rendering on TextureView.
+     *
+     * @see #setViewType
+     */
+    public static final int VIEW_TYPE_TEXTUREVIEW = 2;
 
     public VideoView2(@NonNull Context context) {
         this(context, null);
@@ -128,17 +143,12 @@ public class VideoView2 extends FrameLayout {
     public VideoView2(
             @NonNull Context context, @Nullable AttributeSet attrs,
             int defStyleAttr, int defStyleRes) {
-        super(context, attrs, defStyleAttr, defStyleRes);
-
-        mProvider = ApiLoader.getProvider(context).createVideoView2(this, new SuperProvider(),
-                attrs, defStyleAttr, defStyleRes);
-    }
-
-    /**
-     * @hide
-     */
-    public VideoView2Provider getProvider() {
-        return mProvider;
+        super((instance, superProvider, privateProvider) ->
+                ApiLoader.getProvider().createVideoView2(
+                        (VideoView2) instance, superProvider, privateProvider,
+                        attrs, defStyleAttr, defStyleRes),
+                context, attrs, defStyleAttr, defStyleRes);
+        mProvider.initialize(attrs, defStyleAttr, defStyleRes);
     }
 
     /**
@@ -146,9 +156,10 @@ public class VideoView2 extends FrameLayout {
      * instance if any.
      *
      * @param mediaControlView a media control view2 instance.
+     * @param intervalMs a time interval in milliseconds until VideoView2 hides MediaControlView2.
      */
-    public void setMediaControlView2(MediaControlView2 mediaControlView) {
-        mProvider.setMediaControlView2_impl(mediaControlView);
+    public void setMediaControlView2(MediaControlView2 mediaControlView, long intervalMs) {
+        mProvider.setMediaControlView2_impl(mediaControlView, intervalMs);
     }
 
     /**
@@ -160,91 +171,71 @@ public class VideoView2 extends FrameLayout {
     }
 
     /**
-     * Starts playback with the media contents specified by {@link #setVideoURI} and
-     * {@link #setVideoPath}.
-     * If it has been paused, this method will resume playback from the current position.
+     * Sets MediaMetadata2 instance. It will replace the previously assigned MediaMetadata2 instance
+     * if any.
+     *
+     * @param metadata a MediaMetadata2 instance.
+     * @hide
      */
-    public void start() {
-        mProvider.start_impl();
+    public void setMediaMetadata(MediaMetadata2 metadata) {
+        mProvider.setMediaMetadata_impl(metadata);
     }
 
     /**
-     * Pauses playback.
+     * Returns MediaMetadata2 instance which is retrieved from MediaPlayer2 inside VideoView2 by
+     * default or by {@link #setMediaMetadata} method.
+     * @hide
      */
-    public void pause() {
-        mProvider.pause_impl();
+    public MediaMetadata2 getMediaMetadata() {
+        // TODO: add to Javadoc whether this value can be null or not when integrating with
+        // MediaSession2.
+        return mProvider.getMediaMetadata_impl();
     }
 
     /**
-     * Gets the duration of the media content specified by #setVideoURI and #setVideoPath
-     * in milliseconds.
+     * Returns MediaController instance which is connected with MediaSession that VideoView2 is
+     * using. This method should be called when VideoView2 is attached to window, or it throws
+     * IllegalStateException, since internal MediaSession instance is not available until
+     * this view is attached to window. Please check {@link android.view.View#isAttachedToWindow}
+     * before calling this method.
+     *
+     * @throws IllegalStateException if interal MediaSession is not created yet.
+     * @hide  TODO: remove
      */
-    public int getDuration() {
-        return mProvider.getDuration_impl();
+    public MediaController getMediaController() {
+        return mProvider.getMediaController_impl();
     }
 
     /**
-     * Gets current playback position in milliseconds.
+     * Returns {@link android.media.SessionToken2} so that developers create their own
+     * {@link android.media.MediaController2} instance. This method should be called when VideoView2
+     * is attached to window, or it throws IllegalStateException.
+     *
+     * @throws IllegalStateException if interal MediaSession is not created yet.
      */
-    public int getCurrentPosition() {
-        return mProvider.getCurrentPosition_impl();
-    }
-
-    // TODO: mention about key-frame related behavior.
-    /**
-     * Moves the media by specified time position.
-     * @param msec the offset in milliseconds from the start to seek to.
-     */
-    public void seekTo(int msec) {
-        mProvider.seekTo_impl(msec);
+    public SessionToken2 getMediaSessionToken() {
+        return mProvider.getMediaSessionToken_impl();
     }
 
     /**
-     * Says if the media is currently playing.
-     * @return true if the media is playing, false if it is not (eg. paused or stopped).
+     * Shows or hides closed caption or subtitles if there is any.
+     * The first subtitle track will be chosen if there multiple subtitle tracks exist.
+     * Default behavior of VideoView2 is not showing subtitle.
+     * @param enable shows closed caption or subtitles if this value is true, or hides.
      */
-    public boolean isPlaying() {
-        return mProvider.isPlaying_impl();
-    }
-
-    // TODO: check what will return if it is a local media.
-    /**
-     * Gets the percentage (0-100) of the content that has been buffered or played so far.
-     */
-    public int getBufferPercentage() {
-        return mProvider.getBufferPercentage_impl();
+    public void setSubtitleEnabled(boolean enable) {
+        mProvider.setSubtitleEnabled_impl(enable);
     }
 
     /**
-     * Returns the audio session ID.
+     * Returns true if showing subtitle feature is enabled or returns false.
+     * Although there is no subtitle track or closed caption, it can return true, if the feature
+     * has been enabled by {@link #setSubtitleEnabled}.
      */
-    public int getAudioSessionId() {
-        return mProvider.getAudioSessionId_impl();
+    public boolean isSubtitleEnabled() {
+        return mProvider.isSubtitleEnabled_impl();
     }
 
-    /**
-     * Starts rendering closed caption or subtitles if there is any. The first subtitle track will
-     * be chosen by default if there multiple subtitle tracks exist.
-     */
-    public void showSubtitle() {
-        mProvider.showSubtitle_impl();
-    }
-
-    /**
-     * Stops showing closed captions or subtitles.
-     */
-    public void hideSubtitle() {
-        mProvider.hideSubtitle_impl();
-    }
-
-    /**
-     * Sets full screen mode.
-     */
-    public void setFullScreen(boolean fullScreen) {
-        mProvider.setFullScreen_impl(fullScreen);
-    }
-
-    // TODO: This should be revised after integration with MediaPlayer2.
     /**
      * Sets playback speed.
      *
@@ -254,18 +245,9 @@ public class VideoView2 extends FrameLayout {
      * be reset to the normal speed 1.0f.
      * @param speed the playback speed. It should be positive.
      */
+    // TODO: Support this via MediaController2.
     public void setSpeed(float speed) {
         mProvider.setSpeed_impl(speed);
-    }
-
-    /**
-     * Returns current speed setting.
-     *
-     * If setSpeed() has never been called, returns the default value 1.0f.
-     * @return current speed setting
-     */
-    public float getSpeed() {
-        return mProvider.getSpeed_impl();
     }
 
     /**
@@ -297,24 +279,11 @@ public class VideoView2 extends FrameLayout {
     }
 
     /**
-     * Sets a remote player for handling playback of the selected route from MediaControlView2.
-     * If this is not called, MediaCotrolView2 will not show the route button.
-     *
-     * @param routeCategories        the list of media control categories in
-     *                               {@link android.support.v7.media.MediaControlIntent}
-     * @param player                 the player to handle the selected route. If null, a default
-     *                               route player will be used.
-     * @throws IllegalStateException if MediaControlView2 is not set.
-     */
-    public void setRouteAttributes(@NonNull List<String> routeCategories,
-            @Nullable MediaPlayerBase player) {
-        mProvider.setRouteAttributes_impl(routeCategories, player);
-    }
-
-    /**
      * Sets video path.
      *
      * @param path the path of the video.
+     *
+     * @hide TODO remove
      */
     public void setVideoPath(String path) {
         mProvider.setVideoPath_impl(path);
@@ -324,9 +293,11 @@ public class VideoView2 extends FrameLayout {
      * Sets video URI.
      *
      * @param uri the URI of the video.
+     *
+     * @hide TODO remove
      */
-    public void setVideoURI(Uri uri) {
-        mProvider.setVideoURI_impl(uri);
+    public void setVideoUri(Uri uri) {
+        mProvider.setVideoUri_impl(uri);
     }
 
     /**
@@ -338,9 +309,30 @@ public class VideoView2 extends FrameLayout {
      *                changed with key/value pairs through the headers parameter with
      *                "android-allow-cross-domain-redirect" as the key and "0" or "1" as the value
      *                to disallow or allow cross domain redirection.
+     *
+     * @hide TODO remove
      */
-    public void setVideoURI(Uri uri, Map<String, String> headers) {
-        mProvider.setVideoURI_impl(uri, headers);
+    public void setVideoUri(Uri uri, Map<String, String> headers) {
+        mProvider.setVideoUri_impl(uri, headers);
+    }
+
+    /**
+     * Sets {@link MediaItem2} object to render using VideoView2. Alternative way to set media
+     * object to VideoView2 is {@link #setDataSource}.
+     * @param mediaItem the MediaItem2 to play
+     * @see #setDataSource
+     */
+    public void setMediaItem(@NonNull MediaItem2 mediaItem) {
+        mProvider.setMediaItem_impl(mediaItem);
+    }
+
+    /**
+     * Sets {@link DataSourceDesc} object to render using VideoView2.
+     * @param dataSource the {@link DataSourceDesc} object to play.
+     * @see #setMediaItem
+     */
+    public void setDataSource(@NonNull DataSourceDesc dataSource) {
+        mProvider.setDataSource_impl(dataSource);
     }
 
     /**
@@ -367,236 +359,89 @@ public class VideoView2 extends FrameLayout {
     }
 
     /**
-     * Stops playback and release all the resources. This should be called whenever a VideoView2
-     * instance is no longer to be used.
-     */
-    public void stopPlayback() {
-        mProvider.stopPlayback_impl();
-    }
-
-    /**
-     * Registers a callback to be invoked when the media file is loaded and ready to go.
+     * Sets custom actions which will be shown as custom buttons in {@link MediaControlView2}.
      *
-     * @param l the callback that will be run.
+     * @param actionList A list of {@link PlaybackState.CustomAction}. The return value of
+     *                   {@link PlaybackState.CustomAction#getIcon()} will be used to draw buttons
+     *                   in {@link MediaControlView2}.
+     * @param executor executor to run callbacks on.
+     * @param listener A listener to be called when a custom button is clicked.
+     * @hide  TODO remove
      */
-    public void setOnPreparedListener(OnPreparedListener l) {
-        mProvider.setOnPreparedListener_impl(l);
-    }
-
-    /**
-     * Registers a callback to be invoked when the end of a media file has been reached during
-     * playback.
-     *
-     * @param l the callback that will be run.
-     */
-    public void setOnCompletionListener(OnCompletionListener l) {
-        mProvider.setOnCompletionListener_impl(l);
-    }
-
-    /**
-     * Registers a callback to be invoked when an error occurs during playback or setup.  If no
-     * listener is specified, or if the listener returned false, VideoView2 will inform the user of
-     * any errors.
-     *
-     * @param l The callback that will be run
-     */
-    public void setOnErrorListener(OnErrorListener l) {
-        mProvider.setOnErrorListener_impl(l);
-    }
-
-    /**
-     * Registers a callback to be invoked when an informational event occurs during playback or
-     * setup.
-     *
-     * @param l The callback that will be run
-     */
-    public void setOnInfoListener(OnInfoListener l) {
-        mProvider.setOnInfoListener_impl(l);
+    public void setCustomActions(List<PlaybackState.CustomAction> actionList,
+            Executor executor, OnCustomActionListener listener) {
+        mProvider.setCustomActions_impl(actionList, executor, listener);
     }
 
     /**
      * Registers a callback to be invoked when a view type change is done.
      * {@see #setViewType(int)}
      * @param l The callback that will be run
+     * @hide
      */
+    @VisibleForTesting
     public void setOnViewTypeChangedListener(OnViewTypeChangedListener l) {
         mProvider.setOnViewTypeChangedListener_impl(l);
     }
 
     /**
      * Registers a callback to be invoked when the fullscreen mode should be changed.
+     * @param l The callback that will be run
+     * @hide  TODO remove
      */
-    public void setFullScreenChangedListener(OnFullScreenChangedListener l) {
-        mProvider.setFullScreenChangedListener_impl(l);
+    public void setFullScreenRequestListener(OnFullScreenRequestListener l) {
+        mProvider.setFullScreenRequestListener_impl(l);
     }
 
     /**
-     * Interface definition of a callback to be invoked when the viw type has been changed.
+     * Interface definition of a callback to be invoked when the view type has been changed.
+     *
+     * @hide
      */
+    @VisibleForTesting
     public interface OnViewTypeChangedListener {
         /**
          * Called when the view type has been changed.
          * @see #setViewType(int)
+         * @param view the View whose view type is changed
          * @param viewType
          * <ul>
          * <li>{@link #VIEW_TYPE_SURFACEVIEW}
          * <li>{@link #VIEW_TYPE_TEXTUREVIEW}
          * </ul>
          */
-        void onViewTypeChanged(@ViewType int viewType);
-    }
-
-    /**
-     * Interface definition of a callback to be invoked when the media source is ready for playback.
-     */
-    public interface OnPreparedListener {
-        /**
-         * Called when the media file is ready for playback.
-         */
-        void onPrepared();
-    }
-
-    /**
-     * Interface definition for a callback to be invoked when playback of a media source has
-     * completed.
-     */
-    public interface OnCompletionListener {
-        /**
-         * Called when the end of a media source is reached during playback.
-         */
-        void onCompletion();
-    }
-
-    /**
-     * Interface definition of a callback to be invoked when there has been an error during an
-     * asynchronous operation.
-     */
-    public interface OnErrorListener {
-        // TODO: Redefine error codes.
-        /**
-         * Called to indicate an error.
-         * @param what the type of error that has occurred
-         * @param extra an extra code, specific to the error.
-         * @return true if the method handled the error, false if it didn't.
-         * @see MediaPlayer#OnErrorListener
-         */
-        boolean onError(int what, int extra);
-    }
-
-    /**
-     * Interface definition of a callback to be invoked to communicate some info and/or warning
-     * about the media or its playback.
-     */
-    public interface OnInfoListener {
-        /**
-         * Called to indicate an info or a warning.
-         * @param what the type of info or warning.
-         * @param extra an extra code, specific to the info.
-         *
-         * @see MediaPlayer#OnInfoListener
-         */
-        void onInfo(int what, int extra);
+        void onViewTypeChanged(View view, @ViewType int viewType);
     }
 
     /**
      * Interface definition of a callback to be invoked to inform the fullscreen mode is changed.
+     * Application should handle the fullscreen mode accordingly.
+     * @hide  TODO remove
      */
-    public interface OnFullScreenChangedListener {
+    public interface OnFullScreenRequestListener {
         /**
          * Called to indicate a fullscreen mode change.
          */
-        void onFullScreenChanged(boolean fullScreen);
+        void onFullScreenRequest(View view, boolean fullScreen);
+    }
+
+    /**
+     * Interface definition of a callback to be invoked to inform that a custom action is performed.
+     * @hide  TODO remove
+     */
+    public interface OnCustomActionListener {
+        /**
+         * Called to indicate that a custom action is performed.
+         *
+         * @param action The action that was originally sent in the
+         *               {@link PlaybackState.CustomAction}.
+         * @param extras Optional extras.
+         */
+        void onCustomAction(String action, Bundle extras);
     }
 
     @Override
-    protected void onAttachedToWindow() {
-        mProvider.onAttachedToWindow_impl();
-    }
-
-    @Override
-    protected void onDetachedFromWindow() {
-        mProvider.onDetachedFromWindow_impl();
-    }
-
-    @Override
-    public CharSequence getAccessibilityClassName() {
-        return mProvider.getAccessibilityClassName_impl();
-    }
-
-    @Override
-    public boolean onTouchEvent(MotionEvent ev) {
-        return mProvider.onTouchEvent_impl(ev);
-    }
-
-    @Override
-    public boolean onTrackballEvent(MotionEvent ev) {
-        return mProvider.onTrackballEvent_impl(ev);
-    }
-
-    @Override
-    public boolean onKeyDown(int keyCode, KeyEvent event) {
-        return mProvider.onKeyDown_impl(keyCode, event);
-    }
-
-    @Override
-    public void onFinishInflate() {
-        mProvider.onFinishInflate_impl();
-    }
-
-    @Override
-    public boolean dispatchKeyEvent(KeyEvent event) {
-        return mProvider.dispatchKeyEvent_impl(event);
-    }
-
-    @Override
-    public void setEnabled(boolean enabled) {
-        mProvider.setEnabled_impl(enabled);
-    }
-
-    private class SuperProvider implements ViewProvider {
-        @Override
-        public void onAttachedToWindow_impl() {
-            VideoView2.super.onAttachedToWindow();
-        }
-
-        @Override
-        public void onDetachedFromWindow_impl() {
-            VideoView2.super.onDetachedFromWindow();
-        }
-
-        @Override
-        public CharSequence getAccessibilityClassName_impl() {
-            return VideoView2.super.getAccessibilityClassName();
-        }
-
-        @Override
-        public boolean onTouchEvent_impl(MotionEvent ev) {
-            return VideoView2.super.onTouchEvent(ev);
-        }
-
-        @Override
-        public boolean onTrackballEvent_impl(MotionEvent ev) {
-            return VideoView2.super.onTrackballEvent(ev);
-        }
-
-        @Override
-        public boolean onKeyDown_impl(int keyCode, KeyEvent event) {
-            return VideoView2.super.onKeyDown(keyCode, event);
-        }
-
-        @Override
-        public void onFinishInflate_impl() {
-            VideoView2.super.onFinishInflate();
-        }
-
-        @Override
-        public boolean dispatchKeyEvent_impl(KeyEvent event) {
-            return VideoView2.super.dispatchKeyEvent(event);
-        }
-
-        @Override
-        public void setEnabled_impl(boolean enabled) {
-            VideoView2.super.setEnabled(enabled);
-        }
+    protected void onLayout(boolean changed, int l, int t, int r, int b) {
+        mProvider.onLayout_impl(changed, l, t, r, b);
     }
 }

@@ -46,7 +46,7 @@ import android.util.TimedRemoteCaller;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.os.TransferPipe;
-import com.android.internal.print.DualDumpOutputStream;
+import com.android.internal.util.dump.DualDumpOutputStream;
 
 import libcore.io.IoUtils;
 
@@ -596,6 +596,7 @@ final class RemotePrintSpooler {
         }
     }
 
+    @GuardedBy("mLock")
     private void bindLocked() throws TimeoutException, InterruptedException {
         while (mIsBinding) {
             mLock.wait();

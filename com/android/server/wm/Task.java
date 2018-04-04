@@ -26,13 +26,13 @@ import static com.android.server.EventLogTags.WM_TASK_REMOVED;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_STACK;
 import static com.android.server.wm.WindowManagerDebugConfig.TAG_WITH_CLASS_NAME;
 import static com.android.server.wm.WindowManagerDebugConfig.TAG_WM;
-import static com.android.server.wm.proto.TaskProto.APP_WINDOW_TOKENS;
-import static com.android.server.wm.proto.TaskProto.BOUNDS;
-import static com.android.server.wm.proto.TaskProto.DEFER_REMOVAL;
-import static com.android.server.wm.proto.TaskProto.FILLS_PARENT;
-import static com.android.server.wm.proto.TaskProto.ID;
-import static com.android.server.wm.proto.TaskProto.TEMP_INSET_BOUNDS;
-import static com.android.server.wm.proto.TaskProto.WINDOW_CONTAINER;
+import static com.android.server.wm.TaskProto.APP_WINDOW_TOKENS;
+import static com.android.server.wm.TaskProto.BOUNDS;
+import static com.android.server.wm.TaskProto.DEFER_REMOVAL;
+import static com.android.server.wm.TaskProto.FILLS_PARENT;
+import static com.android.server.wm.TaskProto.ID;
+import static com.android.server.wm.TaskProto.TEMP_INSET_BOUNDS;
+import static com.android.server.wm.TaskProto.WINDOW_CONTAINER;
 
 import android.annotation.CallSuper;
 import android.app.ActivityManager.TaskDescription;
@@ -95,6 +95,9 @@ class Task extends WindowContainer<AppWindowToken> {
 
     private Dimmer mDimmer = new Dimmer(this);
     private final Rect mTmpDimBoundsRect = new Rect();
+
+    /** @see #setCanAffectSystemUiFlags */
+    private boolean mCanAffectSystemUiFlags = true;
 
     Task(int taskId, TaskStack stack, int userId, WindowManagerService service, int resizeMode,
             boolean supportsPictureInPicture, TaskDescription taskDescription,
@@ -462,8 +465,8 @@ class Task extends WindowContainer<AppWindowToken> {
                 } else {
                     mStack.getBounds(mTmpRect);
                     mTmpRect.intersect(getBounds());
+                    out.set(mTmpRect);
                 }
-                out.set(mTmpRect);
             } else {
                 out.set(getBounds());
             }
@@ -627,6 +630,25 @@ class Task extends WindowContainer<AppWindowToken> {
         callback.accept(this);
     }
 
+    /**
+     * @param canAffectSystemUiFlags If false, all windows in this task can not affect SystemUI
+     *                               flags. See {@link WindowState#canAffectSystemUiFlags()}.
+     */
+    void setCanAffectSystemUiFlags(boolean canAffectSystemUiFlags) {
+        mCanAffectSystemUiFlags = canAffectSystemUiFlags;
+    }
+
+    /**
+     * @see #setCanAffectSystemUiFlags
+     */
+    boolean canAffectSystemUiFlags() {
+        return mCanAffectSystemUiFlags;
+    }
+
+    void dontAnimateDimExit() {
+        mDimmer.dontAnimateExit();
+    }
+
     @Override
     public String toString() {
         return "{taskId=" + mTaskId + " appTokens=" + mChildren + " mdr=" + mDeferRemoval + "}";
@@ -640,6 +662,7 @@ class Task extends WindowContainer<AppWindowToken> {
         mPreserveNonFloatingState = false;
     }
 
+    @Override
     Dimmer getDimmer() {
         return mDimmer;
     }
@@ -686,11 +709,12 @@ class Task extends WindowContainer<AppWindowToken> {
         pw.println(doublePrefix + "mTempInsetBounds=" + mTempInsetBounds.toShortString());
 
         final String triplePrefix = doublePrefix + "  ";
+        final String quadruplePrefix = triplePrefix + "  ";
 
         for (int i = mChildren.size() - 1; i >= 0; i--) {
             final AppWindowToken wtoken = mChildren.get(i);
             pw.println(triplePrefix + "Activity #" + i + " " + wtoken);
-            wtoken.dump(pw, triplePrefix, dumpAll);
+            wtoken.dump(pw, quadruplePrefix, dumpAll);
         }
     }
 

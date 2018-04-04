@@ -22,6 +22,8 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.hardware.wifi.V1_0.NanStatusType;
 import android.hardware.wifi.V1_2.NanDataPathChannelInfo;
+import android.location.LocationManager;
+import android.net.wifi.WifiManager;
 import android.net.wifi.aware.Characteristics;
 import android.net.wifi.aware.ConfigRequest;
 import android.net.wifi.aware.IWifiAwareDiscoverySessionCallback;
@@ -39,6 +41,7 @@ import android.os.RemoteException;
 import android.os.ShellCommand;
 import android.os.SystemClock;
 import android.os.UserHandle;
+import android.text.TextUtils;
 import android.util.ArrayMap;
 import android.util.Log;
 import android.util.Pair;
@@ -49,6 +52,7 @@ import com.android.internal.util.MessageUtils;
 import com.android.internal.util.State;
 import com.android.internal.util.StateMachine;
 import com.android.internal.util.WakeupMessage;
+import com.android.server.wifi.util.WifiPermissionsUtil;
 import com.android.server.wifi.util.WifiPermissionsWrapper;
 
 import libcore.util.HexEncoding;
@@ -72,6 +76,7 @@ import java.util.Map;
 public class WifiAwareStateManager implements WifiAwareShellCommand.DelegatedShellCommand {
     private static final String TAG = "WifiAwareStateManager";
     private static final boolean VDBG = false; // STOPSHIP if true
+    private static final boolean VVDBG = false; // STOPSHIP if true - for detailed state machine
     /* package */ boolean mDbg = false;
 
     @VisibleForTesting
@@ -211,6 +216,8 @@ public class WifiAwareStateManager implements WifiAwareShellCommand.DelegatedShe
     private WifiAwareStateMachine mSm;
     public WifiAwareDataPathStateManager mDataPathMgr;
     private PowerManager mPowerManager;
+    private LocationManager mLocationManager;
+    private WifiManager mWifiManager;
 
     private final SparseArray<WifiAwareClientState> mClients = new SparseArray<>();
     private ConfigRequest mCurrentAwareConfiguration = null;
@@ -313,6 +320,25 @@ public class WifiAwareStateManager implements WifiAwareShellCommand.DelegatedShe
                 pw_out.println(j.toString());
                 return 0;
             }
+            case "allow_ndp_any": {
+                String flag = parentShell.getNextArgRequired();
+                if (VDBG) Log.v(TAG, "onCommand: flag='" + flag + "'");
+                if (mDataPathMgr == null) {
+                    pw_err.println("Null Aware data-path manager - can't configure");
+                    return -1;
+                }
+                if (TextUtils.equals("true", flag)) {
+                    mDataPathMgr.mAllowNdpResponderFromAnyOverride = true;
+                } else  if (TextUtils.equals("false", flag)) {
+                    mDataPathMgr.mAllowNdpResponderFromAnyOverride = false;
+                } else {
+                    pw_err.println(
+                            "Unknown configuration flag for 'allow_ndp_any' - true|false expected"
+                                    + " -- '"
+                                    + flag + "'");
+                    return -1;
+                }
+            }
             default:
                 pw_err.println("Unknown 'wifiaware state_mgr <cmd>'");
         }
@@ -323,6 +349,9 @@ public class WifiAwareStateManager implements WifiAwareShellCommand.DelegatedShe
     @Override
     public void onReset() {
         mSettableParameters.put(PARAM_ON_IDLE_DISABLE_AWARE, PARAM_ON_IDLE_DISABLE_AWARE_DEFAULT);
+        if (mDataPathMgr != null) {
+            mDataPathMgr.mAllowNdpResponderFromAnyOverride = false;
+        }
     }
 
     @Override
@@ -335,6 +364,9 @@ public class WifiAwareStateManager implements WifiAwareShellCommand.DelegatedShe
         pw.println("    get <name>: gets named parameter value. Names: "
                 + mSettableParameters.keySet());
         pw.println("    get_capabilities: prints out the capabilities as a JSON string");
+        pw.println(
+                "    allow_ndp_any true|false: configure whether Responders can be specified to "
+                        + "accept requests from ANY requestor (null peer spec)");
     }
 
     /**
@@ -344,20 +376,22 @@ public class WifiAwareStateManager implements WifiAwareShellCommand.DelegatedShe
      * @param looper Thread looper on which to run the handler.
      */
     public void start(Context context, Looper looper, WifiAwareMetrics awareMetrics,
-            WifiPermissionsWrapper permissionsWrapper) {
+            WifiPermissionsUtil wifiPermissionsUtil, WifiPermissionsWrapper permissionsWrapper) {
         Log.i(TAG, "start()");
 
         mContext = context;
         mAwareMetrics = awareMetrics;
         mSm = new WifiAwareStateMachine(TAG, looper);
-        mSm.setDbg(VDBG);
+        mSm.setDbg(VVDBG);
         mSm.start();
 
         mDataPathMgr = new WifiAwareDataPathStateManager(this);
         mDataPathMgr.start(mContext, mSm.getHandler().getLooper(), awareMetrics,
-                permissionsWrapper);
+                wifiPermissionsUtil, permissionsWrapper);
 
         mPowerManager = mContext.getSystemService(PowerManager.class);
+        mLocationManager = (LocationManager) mContext.getSystemService(Context.LOCATION_SERVICE);
+        mWifiManager = (WifiManager) mContext.getSystemService(Context.WIFI_SERVICE);
 
         IntentFilter intentFilter = new IntentFilter();
         intentFilter.addAction(Intent.ACTION_SCREEN_ON);
@@ -383,6 +417,35 @@ public class WifiAwareStateManager implements WifiAwareShellCommand.DelegatedShe
                     } else {
                         reconfigure();
                     }
+                }
+            }
+        }, intentFilter);
+
+        intentFilter = new IntentFilter();
+        intentFilter.addAction(LocationManager.MODE_CHANGED_ACTION);
+        mContext.registerReceiver(new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (mDbg) Log.v(TAG, "onReceive: MODE_CHANGED_ACTION: intent=" + intent);
+                if (mLocationManager.isLocationEnabled()) {
+                    enableUsage();
+                } else {
+                    disableUsage();
+                }
+            }
+        }, intentFilter);
+
+        intentFilter = new IntentFilter();
+        intentFilter.addAction(WifiManager.WIFI_STATE_CHANGED_ACTION);
+        mContext.registerReceiver(new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                boolean isEnabled = intent.getIntExtra(WifiManager.EXTRA_WIFI_STATE,
+                        WifiManager.WIFI_STATE_UNKNOWN) == WifiManager.WIFI_STATE_ENABLED;
+                if (isEnabled) {
+                    enableUsage();
+                } else {
+                    disableUsage();
                 }
             }
         }, intentFilter);
@@ -625,7 +688,15 @@ public class WifiAwareStateManager implements WifiAwareShellCommand.DelegatedShe
     public void enableUsage() {
         if (mSettableParameters.get(PARAM_ON_IDLE_DISABLE_AWARE) != 0
                 && mPowerManager.isDeviceIdleMode()) {
-            Log.d(TAG, "enableUsage(): while device is in IDLE mode - ignoring");
+            if (mDbg) Log.d(TAG, "enableUsage(): while device is in IDLE mode - ignoring");
+            return;
+        }
+        if (!mLocationManager.isLocationEnabled()) {
+            if (mDbg) Log.d(TAG, "enableUsage(): while location is disabled - ignoring");
+            return;
+        }
+        if (mWifiManager.getWifiState() != WifiManager.WIFI_STATE_ENABLED) {
+            if (mDbg) Log.d(TAG, "enableUsage(): while Wi-Fi is disabled - ignoring");
             return;
         }
         Message msg = mSm.obtainMessage(MESSAGE_TYPE_COMMAND);
@@ -2585,14 +2656,39 @@ public class WifiAwareStateManager implements WifiAwareShellCommand.DelegatedShe
                 return;
             }
 
+            boolean isRangingEnabled = false;
+            int minRange = -1;
+            int maxRange = -1;
+            if (completedCommand.arg1 == COMMAND_TYPE_PUBLISH) {
+                PublishConfig publishConfig = completedCommand.getData().getParcelable(
+                        MESSAGE_BUNDLE_KEY_CONFIG);
+                isRangingEnabled = publishConfig.mEnableRanging;
+            } else {
+                SubscribeConfig subscribeConfig = completedCommand.getData().getParcelable(
+                        MESSAGE_BUNDLE_KEY_CONFIG);
+                isRangingEnabled =
+                        subscribeConfig.mMinDistanceMmSet || subscribeConfig.mMaxDistanceMmSet;
+                if (subscribeConfig.mMinDistanceMmSet) {
+                    minRange = subscribeConfig.mMinDistanceMm;
+                }
+                if (subscribeConfig.mMaxDistanceMmSet) {
+                    maxRange = subscribeConfig.mMaxDistanceMm;
+                }
+            }
+
             WifiAwareDiscoverySessionState session = new WifiAwareDiscoverySessionState(
-                    mWifiAwareNativeApi, sessionId, pubSubId, callback, isPublish,
+                    mWifiAwareNativeApi, sessionId, pubSubId, callback, isPublish, isRangingEnabled,
                     SystemClock.elapsedRealtime());
             session.mDbg = mDbg;
             client.addSession(session);
 
-            mAwareMetrics.recordDiscoverySession(client.getUid(),
-                    completedCommand.arg1 == COMMAND_TYPE_PUBLISH, mClients);
+            if (isRangingEnabled) {
+                mAwareMetrics.recordDiscoverySessionWithRanging(client.getUid(),
+                        completedCommand.arg1 != COMMAND_TYPE_PUBLISH, minRange, maxRange,
+                        mClients);
+            } else {
+                mAwareMetrics.recordDiscoverySession(client.getUid(), mClients);
+            }
             mAwareMetrics.recordDiscoveryStatus(client.getUid(), NanStatusType.SUCCESS,
                     completedCommand.arg1 == COMMAND_TYPE_PUBLISH);
 
@@ -2886,6 +2982,9 @@ public class WifiAwareStateManager implements WifiAwareShellCommand.DelegatedShe
             return;
         }
 
+        if (data.second.isRangingEnabled()) {
+            mAwareMetrics.recordMatchIndicationForRangeEnabledSubscribe(rangingIndication != 0);
+        }
         data.second.onMatch(requestorInstanceId, peerMac, serviceSpecificInfo, matchFilter,
                 rangingIndication, rangeMm);
     }

@@ -56,7 +56,10 @@ public class MenuInflater_Delegate {
             }
         }
 
-        if (menuItem == null || !menuItem.getClass().getName().startsWith("android.support.")) {
+        String menuItemName = menuItem != null ? menuItem.getClass().getName() : null;
+        if (menuItemName == null ||
+                !menuItemName.startsWith("android.support.") ||
+                !menuItemName.startsWith("androidx.")) {
             // This means that Bridge did not take over the instantiation of some object properly.
             // This is most likely a bug in the LayoutLib code.
             // We suppress this error for AppCompat menus since we do not support them in the menu

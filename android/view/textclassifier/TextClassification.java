@@ -17,11 +17,17 @@
 package android.view.textclassifier;
 
 import android.annotation.FloatRange;
+import android.annotation.IntDef;
 import android.annotation.IntRange;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.app.PendingIntent;
+import android.app.RemoteAction;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
+import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.drawable.BitmapDrawable;
@@ -32,10 +38,15 @@ import android.os.Parcelable;
 import android.util.ArrayMap;
 import android.view.View.OnClickListener;
 import android.view.textclassifier.TextClassifier.EntityType;
+import android.view.textclassifier.TextClassifier.Utils;
 
 import com.android.internal.util.Preconditions;
 
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -70,25 +81,16 @@ import java.util.Map;
  *   view.startActionMode(new ActionMode.Callback() {
  *
  *       public boolean onCreateActionMode(ActionMode mode, Menu menu) {
- *           // Add the "primary" action.
- *           if (thisAppHasPermissionToInvokeIntent(classification.getIntent())) {
- *              menu.add(Menu.NONE, 0, 20, classification.getLabel())
- *                 .setIcon(classification.getIcon())
- *                 .setIntent(classification.getIntent());
- *           }
- *           // Add the "secondary" actions.
- *           for (int i = 0; i < classification.getSecondaryActionsCount(); i++) {
- *               if (thisAppHasPermissionToInvokeIntent(classification.getSecondaryIntent(i))) {
- *                   menu.add(Menu.NONE, i + 1, 20, classification.getSecondaryLabel(i))
- *                      .setIcon(classification.getSecondaryIcon(i))
- *                      .setIntent(classification.getSecondaryIntent(i));
- *               }
+ *           for (int i = 0; i < classification.getActions().size(); ++i) {
+ *              RemoteAction action = classification.getActions().get(i);
+ *              menu.add(Menu.NONE, i, 20, action.getTitle())
+ *                 .setIcon(action.getIcon());
  *           }
  *           return true;
  *       }
  *
  *       public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
- *           context.startActivity(item.getIntent());
+ *           classification.getActions().get(item.getItemId()).getActionIntent().send();
  *           return true;
  *       }
  *
@@ -96,51 +98,51 @@ import java.util.Map;
  *   });
  * }</pre>
  */
-public final class TextClassification {
+public final class TextClassification implements Parcelable {
 
     /**
      * @hide
      */
     static final TextClassification EMPTY = new TextClassification.Builder().build();
 
+    private static final String LOG_TAG = "TextClassification";
     // TODO(toki): investigate a way to derive this based on device properties.
-    private static final int MAX_PRIMARY_ICON_SIZE = 192;
-    private static final int MAX_SECONDARY_ICON_SIZE = 144;
+    private static final int MAX_LEGACY_ICON_SIZE = 192;
+
+    @Retention(RetentionPolicy.SOURCE)
+    @IntDef(value = {IntentType.UNSUPPORTED, IntentType.ACTIVITY, IntentType.SERVICE})
+    private @interface IntentType {
+        int UNSUPPORTED = -1;
+        int ACTIVITY = 0;
+        int SERVICE = 1;
+    }
 
     @NonNull private final String mText;
-    @Nullable private final Drawable mPrimaryIcon;
-    @Nullable private final String mPrimaryLabel;
-    @Nullable private final Intent mPrimaryIntent;
-    @Nullable private final OnClickListener mPrimaryOnClickListener;
-    @NonNull private final List<Drawable> mSecondaryIcons;
-    @NonNull private final List<String> mSecondaryLabels;
-    @NonNull private final List<Intent> mSecondaryIntents;
+    @Nullable private final Drawable mLegacyIcon;
+    @Nullable private final String mLegacyLabel;
+    @Nullable private final Intent mLegacyIntent;
+    @Nullable private final OnClickListener mLegacyOnClickListener;
+    @NonNull private final List<RemoteAction> mActions;
     @NonNull private final EntityConfidence mEntityConfidence;
-    @NonNull private final String mSignature;
+    @Nullable private final String mId;
 
     private TextClassification(
             @Nullable String text,
-            @Nullable Drawable primaryIcon,
-            @Nullable String primaryLabel,
-            @Nullable Intent primaryIntent,
-            @Nullable OnClickListener primaryOnClickListener,
-            @NonNull List<Drawable> secondaryIcons,
-            @NonNull List<String> secondaryLabels,
-            @NonNull List<Intent> secondaryIntents,
+            @Nullable Drawable legacyIcon,
+            @Nullable String legacyLabel,
+            @Nullable Intent legacyIntent,
+            @Nullable OnClickListener legacyOnClickListener,
+            @NonNull List<RemoteAction> actions,
             @NonNull Map<String, Float> entityConfidence,
-            @NonNull String signature) {
-        Preconditions.checkArgument(secondaryLabels.size() == secondaryIntents.size());
-        Preconditions.checkArgument(secondaryIcons.size() == secondaryIntents.size());
+            @Nullable String id) {
         mText = text;
-        mPrimaryIcon = primaryIcon;
-        mPrimaryLabel = primaryLabel;
-        mPrimaryIntent = primaryIntent;
-        mPrimaryOnClickListener = primaryOnClickListener;
-        mSecondaryIcons = secondaryIcons;
-        mSecondaryLabels = secondaryLabels;
-        mSecondaryIntents = secondaryIntents;
+        mLegacyIcon = legacyIcon;
+        mLegacyLabel = legacyLabel;
+        mLegacyIntent = legacyIntent;
+        mLegacyOnClickListener = legacyOnClickListener;
+        mActions = Collections.unmodifiableList(actions);
         mEntityConfidence = new EntityConfidence(entityConfidence);
-        mSignature = signature;
+        mId = id;
     }
 
     /**
@@ -182,181 +184,143 @@ public final class TextClassification {
     }
 
     /**
-     * Returns the number of <i>secondary</i> actions that are available to act on the classified
-     * text.
-     *
-     * <p><strong>Note: </strong> that there may or may not be a <i>primary</i> action.
-     *
-     * @see #getSecondaryIntent(int)
-     * @see #getSecondaryLabel(int)
-     * @see #getSecondaryIcon(int)
+     * Returns a list of actions that may be performed on the text. The list is ordered based on
+     * the likelihood that a user will use the action, with the most likely action appearing first.
      */
-    @IntRange(from = 0)
-    public int getSecondaryActionsCount() {
-        return mSecondaryIntents.size();
+    public List<RemoteAction> getActions() {
+        return mActions;
     }
 
     /**
-     * Returns one of the <i>secondary</i> icons that maybe rendered on a widget used to act on the
-     * classified text.
+     * Returns an icon that may be rendered on a widget used to act on the classified text.
      *
-     * @param index Index of the action to get the icon for.
-     * @throws IndexOutOfBoundsException if the specified index is out of range.
-     * @see #getSecondaryActionsCount() for the number of actions available.
-     * @see #getSecondaryIntent(int)
-     * @see #getSecondaryLabel(int)
-     * @see #getIcon()
+     * @deprecated Use {@link #getActions()} instead.
      */
-    @Nullable
-    public Drawable getSecondaryIcon(int index) {
-        return mSecondaryIcons.get(index);
-    }
-
-    /**
-     * Returns an icon for the <i>primary</i> intent that may be rendered on a widget used to act
-     * on the classified text.
-     *
-     * @see #getSecondaryIcon(int)
-     */
+    @Deprecated
     @Nullable
     public Drawable getIcon() {
-        return mPrimaryIcon;
+        return mLegacyIcon;
     }
 
     /**
-     * Returns one of the <i>secondary</i> labels that may be rendered on a widget used to act on
-     * the classified text.
+     * Returns a label that may be rendered on a widget used to act on the classified text.
      *
-     * @param index Index of the action to get the label for.
-     * @throws IndexOutOfBoundsException if the specified index is out of range.
-     * @see #getSecondaryActionsCount()
-     * @see #getSecondaryIntent(int)
-     * @see #getSecondaryIcon(int)
-     * @see #getLabel()
+     * @deprecated Use {@link #getActions()} instead.
      */
-    @Nullable
-    public CharSequence getSecondaryLabel(int index) {
-        return mSecondaryLabels.get(index);
-    }
-
-    /**
-     * Returns a label for the <i>primary</i> intent that may be rendered on a widget used to act
-     * on the classified text.
-     *
-     * @see #getSecondaryLabel(int)
-     */
+    @Deprecated
     @Nullable
     public CharSequence getLabel() {
-        return mPrimaryLabel;
+        return mLegacyLabel;
     }
 
     /**
-     * Returns one of the <i>secondary</i> intents that may be fired to act on the classified text.
+     * Returns an intent that may be fired to act on the classified text.
      *
-     * @param index Index of the action to get the intent for.
-     * @throws IndexOutOfBoundsException if the specified index is out of range.
-     * @see #getSecondaryActionsCount()
-     * @see #getSecondaryLabel(int)
-     * @see #getSecondaryIcon(int)
-     * @see #getIntent()
+     * @deprecated Use {@link #getActions()} instead.
      */
-    @Nullable
-    public Intent getSecondaryIntent(int index) {
-        return mSecondaryIntents.get(index);
-    }
-
-    /**
-     * Returns the <i>primary</i> intent that may be fired to act on the classified text.
-     *
-     * @see #getSecondaryIntent(int)
-     */
+    @Deprecated
     @Nullable
     public Intent getIntent() {
-        return mPrimaryIntent;
+        return mLegacyIntent;
     }
 
     /**
-     * Returns the <i>primary</i> OnClickListener that may be triggered to act on the classified
-     * text. This field is not parcelable and will be null for all objects read from a parcel.
-     * Instead, call Context#startActivity(Intent) with the result of #getSecondaryIntent(int).
-     * Note that this may fail if the activity doesn't have permission to send the intent.
+     * Returns the OnClickListener that may be triggered to act on the classified text. This field
+     * is not parcelable and will be null for all objects read from a parcel. Instead, call
+     * Context#startActivity(Intent) with the result of #getSecondaryIntent(int). Note that this may
+     * fail if the activity doesn't have permission to send the intent.
+     *
+     * @deprecated Use {@link #getActions()} instead.
      */
     @Nullable
     public OnClickListener getOnClickListener() {
-        return mPrimaryOnClickListener;
+        return mLegacyOnClickListener;
     }
 
     /**
-     * Returns the signature for this object.
-     * The TextClassifier that generates this object may use it as a way to internally identify
-     * this object.
+     * Returns the id, if one exists, for this object.
      */
-    @NonNull
-    public String getSignature() {
-        return mSignature;
+    @Nullable
+    public String getId() {
+        return mId;
     }
 
     @Override
     public String toString() {
-        return String.format(Locale.US, "TextClassification {"
-                        + "text=%s, entities=%s, "
-                        + "primaryLabel=%s, secondaryLabels=%s, "
-                        + "primaryIntent=%s, secondaryIntents=%s, "
-                        + "signature=%s}",
-                mText, mEntityConfidence,
-                mPrimaryLabel, mSecondaryLabels,
-                mPrimaryIntent, mSecondaryIntents,
-                mSignature);
-    }
-
-    /** Helper for parceling via #ParcelableWrapper. */
-    private void writeToParcel(Parcel dest, int flags) {
-        dest.writeString(mText);
-        final Bitmap primaryIconBitmap = drawableToBitmap(mPrimaryIcon, MAX_PRIMARY_ICON_SIZE);
-        dest.writeInt(primaryIconBitmap != null ? 1 : 0);
-        if (primaryIconBitmap != null) {
-            primaryIconBitmap.writeToParcel(dest, flags);
-        }
-        dest.writeString(mPrimaryLabel);
-        dest.writeInt(mPrimaryIntent != null ? 1 : 0);
-        if (mPrimaryIntent != null) {
-            mPrimaryIntent.writeToParcel(dest, flags);
-        }
-        // mPrimaryOnClickListener is not parcelable.
-        dest.writeTypedList(drawablesToBitmaps(mSecondaryIcons, MAX_SECONDARY_ICON_SIZE));
-        dest.writeStringList(mSecondaryLabels);
-        dest.writeTypedList(mSecondaryIntents);
-        mEntityConfidence.writeToParcel(dest, flags);
-        dest.writeString(mSignature);
-    }
-
-    /** Helper for unparceling via #ParcelableWrapper. */
-    private TextClassification(Parcel in) {
-        mText = in.readString();
-        mPrimaryIcon = in.readInt() == 0
-                ? null : new BitmapDrawable(null, Bitmap.CREATOR.createFromParcel(in));
-        mPrimaryLabel = in.readString();
-        mPrimaryIntent = in.readInt() == 0 ? null : Intent.CREATOR.createFromParcel(in);
-        mPrimaryOnClickListener = null;  // not parcelable
-        mSecondaryIcons = bitmapsToDrawables(in.createTypedArrayList(Bitmap.CREATOR));
-        mSecondaryLabels = in.createStringArrayList();
-        mSecondaryIntents = in.createTypedArrayList(Intent.CREATOR);
-        mEntityConfidence = EntityConfidence.CREATOR.createFromParcel(in);
-        mSignature = in.readString();
+        return String.format(Locale.US,
+                "TextClassification {text=%s, entities=%s, actions=%s, id=%s}",
+                mText, mEntityConfidence, mActions, mId);
     }
 
     /**
-     * Creates an OnClickListener that starts an activity with the specified intent.
+     * Creates an OnClickListener that triggers the specified PendingIntent.
+     *
+     * @hide
+     */
+    public static OnClickListener createIntentOnClickListener(@NonNull final PendingIntent intent) {
+        Preconditions.checkNotNull(intent);
+        return v -> {
+            try {
+                intent.send();
+            } catch (PendingIntent.CanceledException e) {
+                Log.e(LOG_TAG, "Error sending PendingIntent", e);
+            }
+        };
+    }
+
+    /**
+     * Creates a PendingIntent for the specified intent.
+     * Returns null if the intent is not supported for the specified context.
      *
      * @throws IllegalArgumentException if context or intent is null
      * @hide
      */
-    @NonNull
-    public static OnClickListener createStartActivityOnClickListener(
+    @Nullable
+    public static PendingIntent createPendingIntent(
             @NonNull final Context context, @NonNull final Intent intent) {
+        switch (getIntentType(intent, context)) {
+            case IntentType.ACTIVITY:
+                return PendingIntent.getActivity(context, 0, intent, 0);
+            case IntentType.SERVICE:
+                return PendingIntent.getService(context, 0, intent, 0);
+            default:
+                return null;
+        }
+    }
+
+    @IntentType
+    private static int getIntentType(@NonNull Intent intent, @NonNull Context context) {
         Preconditions.checkArgument(context != null);
         Preconditions.checkArgument(intent != null);
-        return v -> context.startActivity(intent);
+
+        final ResolveInfo activityRI = context.getPackageManager().resolveActivity(intent, 0);
+        if (activityRI != null) {
+            if (context.getPackageName().equals(activityRI.activityInfo.packageName)) {
+                return IntentType.ACTIVITY;
+            }
+            final boolean exported = activityRI.activityInfo.exported;
+            if (exported && hasPermission(context, activityRI.activityInfo.permission)) {
+                return IntentType.ACTIVITY;
+            }
+        }
+
+        final ResolveInfo serviceRI = context.getPackageManager().resolveService(intent, 0);
+        if (serviceRI != null) {
+            if (context.getPackageName().equals(serviceRI.serviceInfo.packageName)) {
+                return IntentType.SERVICE;
+            }
+            final boolean exported = serviceRI.serviceInfo.exported;
+            if (exported && hasPermission(context, serviceRI.serviceInfo.permission)) {
+                return IntentType.SERVICE;
+            }
+        }
+
+        return IntentType.UNSUPPORTED;
+    }
+
+    private static boolean hasPermission(@NonNull Context context, @NonNull String permission) {
+        return permission == null
+                || context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED;
     }
 
     /**
@@ -395,33 +359,6 @@ public final class TextClassification {
     }
 
     /**
-     * Returns a list of drawables converted to Bitmaps
-     *
-     * @param drawables The drawables to convert.
-     * @param maxDims The maximum edge length of the resulting bitmaps (in pixels).
-     */
-    private static List<Bitmap> drawablesToBitmaps(List<Drawable> drawables, int maxDims) {
-        final List<Bitmap> bitmaps = new ArrayList<>(drawables.size());
-        for (Drawable drawable : drawables) {
-            bitmaps.add(drawableToBitmap(drawable, maxDims));
-        }
-        return bitmaps;
-    }
-
-    /** Returns a list of drawable wrappers for a list of bitmaps. */
-    private static List<Drawable> bitmapsToDrawables(List<Bitmap> bitmaps) {
-        final List<Drawable> drawables = new ArrayList<>(bitmaps.size());
-        for (Bitmap bitmap : bitmaps) {
-            if (bitmap != null) {
-                drawables.add(new BitmapDrawable(null, bitmap));
-            } else {
-                drawables.add(null);
-            }
-        }
-        return drawables;
-    }
-
-    /**
      * Builder for building {@link TextClassification} objects.
      *
      * <p>e.g.
@@ -431,28 +368,26 @@ public final class TextClassification {
      *          .setText(classifiedText)
      *          .setEntityType(TextClassifier.TYPE_EMAIL, 0.9)
      *          .setEntityType(TextClassifier.TYPE_OTHER, 0.1)
-     *          .setPrimaryAction(intent, label, icon)
-     *          .addSecondaryAction(intent1, label1, icon1)
-     *          .addSecondaryAction(intent2, label2, icon2)
+     *          .addAction(remoteAction1)
+     *          .addAction(remoteAction2)
      *          .build();
      * }</pre>
      */
     public static final class Builder {
 
         @NonNull private String mText;
-        @NonNull private final List<Drawable> mSecondaryIcons = new ArrayList<>();
-        @NonNull private final List<String> mSecondaryLabels = new ArrayList<>();
-        @NonNull private final List<Intent> mSecondaryIntents = new ArrayList<>();
+        @NonNull private List<RemoteAction> mActions = new ArrayList<>();
         @NonNull private final Map<String, Float> mEntityConfidence = new ArrayMap<>();
-        @Nullable Drawable mPrimaryIcon;
-        @Nullable String mPrimaryLabel;
-        @Nullable Intent mPrimaryIntent;
-        @Nullable OnClickListener mPrimaryOnClickListener;
-        @NonNull private String mSignature = "";
+        @Nullable Drawable mLegacyIcon;
+        @Nullable String mLegacyLabel;
+        @Nullable Intent mLegacyIntent;
+        @Nullable OnClickListener mLegacyOnClickListener;
+        @Nullable private String mId;
 
         /**
          * Sets the classified text.
          */
+        @NonNull
         public Builder setText(@Nullable String text) {
             mText = text;
             return this;
@@ -467,6 +402,7 @@ public final class TextClassification {
          *      0 implies the entity does not exist for the classified text.
          *      Values greater than 1 are clamped to 1.
          */
+        @NonNull
         public Builder setEntityType(
                 @NonNull @EntityType String type,
                 @FloatRange(from = 0.0, to = 1.0) float confidenceScore) {
@@ -475,60 +411,27 @@ public final class TextClassification {
         }
 
         /**
-         * Adds an <i>secondary</i> action that may be performed on the classified text.
-         * Secondary actions are in addition to the <i>primary</i> action which may or may not
-         * exist.
-         *
-         * <p>The label and icon are used for rendering of widgets that offer the intent.
-         * Actions should be added in order of priority.
-         *
-         * <p><stong>Note: </stong> If all input parameters are set to null, this method will be a
-         * no-op.
-         *
-         * @see #setPrimaryAction(Intent, String, Drawable)
+         * Adds an action that may be performed on the classified text. Actions should be added in
+         * order of likelihood that the user will use them, with the most likely action being added
+         * first.
          */
-        public Builder addSecondaryAction(
-                @Nullable Intent intent, @Nullable String label, @Nullable Drawable icon) {
-            if (intent != null || label != null || icon != null) {
-                mSecondaryIntents.add(intent);
-                mSecondaryLabels.add(label);
-                mSecondaryIcons.add(icon);
-            }
+        @NonNull
+        public Builder addAction(@NonNull RemoteAction action) {
+            Preconditions.checkArgument(action != null);
+            mActions.add(action);
             return this;
-        }
-
-        /**
-         * Removes all the <i>secondary</i> actions.
-         */
-        public Builder clearSecondaryActions() {
-            mSecondaryIntents.clear();
-            mSecondaryLabels.clear();
-            mSecondaryIcons.clear();
-            return this;
-        }
-
-        /**
-         * Sets the <i>primary</i> action that may be performed on the classified text. This is
-         * equivalent to calling {@code setIntent(intent).setLabel(label).setIcon(icon)}.
-         *
-         * <p><strong>Note: </strong>If all input parameters are null, there will be no
-         * <i>primary</i> action but there may still be <i>secondary</i> actions.
-         *
-         * @see #addSecondaryAction(Intent, String, Drawable)
-         */
-        public Builder setPrimaryAction(
-                @Nullable Intent intent, @Nullable String label, @Nullable Drawable icon) {
-            return setIntent(intent).setLabel(label).setIcon(icon);
         }
 
         /**
          * Sets the icon for the <i>primary</i> action that may be rendered on a widget used to act
          * on the classified text.
          *
-         * @see #setPrimaryAction(Intent, String, Drawable)
+         * @deprecated Use {@link #addAction(RemoteAction)} instead.
          */
+        @Deprecated
+        @NonNull
         public Builder setIcon(@Nullable Drawable icon) {
-            mPrimaryIcon = icon;
+            mLegacyIcon = icon;
             return this;
         }
 
@@ -536,10 +439,12 @@ public final class TextClassification {
          * Sets the label for the <i>primary</i> action that may be rendered on a widget used to
          * act on the classified text.
          *
-         * @see #setPrimaryAction(Intent, String, Drawable)
+         * @deprecated Use {@link #addAction(RemoteAction)} instead.
          */
+        @Deprecated
+        @NonNull
         public Builder setLabel(@Nullable String label) {
-            mPrimaryLabel = label;
+            mLegacyLabel = label;
             return this;
         }
 
@@ -547,10 +452,12 @@ public final class TextClassification {
          * Sets the intent for the <i>primary</i> action that may be fired to act on the classified
          * text.
          *
-         * @see #setPrimaryAction(Intent, String, Drawable)
+         * @deprecated Use {@link #addAction(RemoteAction)} instead.
          */
+        @Deprecated
+        @NonNull
         public Builder setIntent(@Nullable Intent intent) {
-            mPrimaryIntent = intent;
+            mLegacyIntent = intent;
             return this;
         }
 
@@ -558,51 +465,82 @@ public final class TextClassification {
          * Sets the OnClickListener for the <i>primary</i> action that may be triggered to act on
          * the classified text. This field is not parcelable and will always be null when the
          * object is read from a parcel.
+         *
+         * @deprecated Use {@link #addAction(RemoteAction)} instead.
          */
+        @Deprecated
+        @NonNull
         public Builder setOnClickListener(@Nullable OnClickListener onClickListener) {
-            mPrimaryOnClickListener = onClickListener;
+            mLegacyOnClickListener = onClickListener;
             return this;
         }
 
         /**
-         * Sets a signature for the TextClassification object.
-         * The TextClassifier that generates the TextClassification object may use it as a way to
-         * internally identify the TextClassification object.
+         * Sets an id for the TextClassification object.
          */
-        public Builder setSignature(@NonNull String signature) {
-            mSignature = Preconditions.checkNotNull(signature);
+        @NonNull
+        public Builder setId(@Nullable String id) {
+            mId = id;
             return this;
         }
 
         /**
          * Builds and returns a {@link TextClassification} object.
          */
+        @NonNull
         public TextClassification build() {
-            return new TextClassification(
-                    mText,
-                    mPrimaryIcon, mPrimaryLabel, mPrimaryIntent, mPrimaryOnClickListener,
-                    mSecondaryIcons, mSecondaryLabels, mSecondaryIntents,
-                    mEntityConfidence, mSignature);
+            return new TextClassification(mText, mLegacyIcon, mLegacyLabel, mLegacyIntent,
+                    mLegacyOnClickListener, mActions, mEntityConfidence, mId);
         }
     }
 
     /**
-     * Optional input parameters for generating TextClassification.
+     * A request object for generating TextClassification.
      */
-    public static final class Options implements Parcelable {
+    public static final class Request implements Parcelable {
 
-        private @Nullable LocaleList mDefaultLocales;
+        private final CharSequence mText;
+        private final int mStartIndex;
+        private final int mEndIndex;
+        @Nullable private final LocaleList mDefaultLocales;
+        @Nullable private final ZonedDateTime mReferenceTime;
 
-        public Options() {}
+        private Request(
+                CharSequence text,
+                int startIndex,
+                int endIndex,
+                LocaleList defaultLocales,
+                ZonedDateTime referenceTime) {
+            mText = text;
+            mStartIndex = startIndex;
+            mEndIndex = endIndex;
+            mDefaultLocales = defaultLocales;
+            mReferenceTime = referenceTime;
+        }
 
         /**
-         * @param defaultLocales ordered list of locale preferences that may be used to disambiguate
-         *      the provided text. If no locale preferences exist, set this to null or an empty
-         *      locale list.
+         * Returns the text providing context for the text to classify (which is specified
+         *      by the sub sequence starting at startIndex and ending at endIndex)
          */
-        public Options setDefaultLocales(@Nullable LocaleList defaultLocales) {
-            mDefaultLocales = defaultLocales;
-            return this;
+        @NonNull
+        public CharSequence getText() {
+            return mText;
+        }
+
+        /**
+         * Returns start index of the text to classify.
+         */
+        @IntRange(from = 0)
+        public int getStartIndex() {
+            return mStartIndex;
+        }
+
+        /**
+         * Returns end index of the text to classify.
+         */
+        @IntRange(from = 0)
+        public int getEndIndex() {
+            return mEndIndex;
         }
 
         /**
@@ -614,6 +552,78 @@ public final class TextClassification {
             return mDefaultLocales;
         }
 
+        /**
+         * @return reference time based on which relative dates (e.g. "tomorrow") should be
+         *      interpreted.
+         */
+        @Nullable
+        public ZonedDateTime getReferenceTime() {
+            return mReferenceTime;
+        }
+
+        /**
+         * A builder for building TextClassification requests.
+         */
+        public static final class Builder {
+
+            private final CharSequence mText;
+            private final int mStartIndex;
+            private final int mEndIndex;
+
+            @Nullable private LocaleList mDefaultLocales;
+            @Nullable private ZonedDateTime mReferenceTime;
+
+            /**
+             * @param text text providing context for the text to classify (which is specified
+             *      by the sub sequence starting at startIndex and ending at endIndex)
+             * @param startIndex start index of the text to classify
+             * @param endIndex end index of the text to classify
+             */
+            public Builder(
+                    @NonNull CharSequence text,
+                    @IntRange(from = 0) int startIndex,
+                    @IntRange(from = 0) int endIndex) {
+                Utils.checkArgument(text, startIndex, endIndex);
+                mText = text;
+                mStartIndex = startIndex;
+                mEndIndex = endIndex;
+            }
+
+            /**
+             * @param defaultLocales ordered list of locale preferences that may be used to
+             *      disambiguate the provided text. If no locale preferences exist, set this to null
+             *      or an empty locale list.
+             *
+             * @return this builder
+             */
+            @NonNull
+            public Builder setDefaultLocales(@Nullable LocaleList defaultLocales) {
+                mDefaultLocales = defaultLocales;
+                return this;
+            }
+
+            /**
+             * @param referenceTime reference time based on which relative dates (e.g. "tomorrow"
+             *      should be interpreted. This should usually be the time when the text was
+             *      originally composed. If no reference time is set, now is used.
+             *
+             * @return this builder
+             */
+            @NonNull
+            public Builder setReferenceTime(@Nullable ZonedDateTime referenceTime) {
+                mReferenceTime = referenceTime;
+                return this;
+            }
+
+            /**
+             * Builds and returns the request object.
+             */
+            @NonNull
+            public Request build() {
+                return new Request(mText, mStartIndex, mEndIndex, mDefaultLocales, mReferenceTime);
+            }
+        }
+
         @Override
         public int describeContents() {
             return 0;
@@ -621,72 +631,94 @@ public final class TextClassification {
 
         @Override
         public void writeToParcel(Parcel dest, int flags) {
+            dest.writeString(mText.toString());
+            dest.writeInt(mStartIndex);
+            dest.writeInt(mEndIndex);
             dest.writeInt(mDefaultLocales != null ? 1 : 0);
             if (mDefaultLocales != null) {
                 mDefaultLocales.writeToParcel(dest, flags);
             }
+            dest.writeInt(mReferenceTime != null ? 1 : 0);
+            if (mReferenceTime != null) {
+                dest.writeString(mReferenceTime.toString());
+            }
         }
 
-        public static final Parcelable.Creator<Options> CREATOR =
-                new Parcelable.Creator<Options>() {
+        public static final Parcelable.Creator<Request> CREATOR =
+                new Parcelable.Creator<Request>() {
                     @Override
-                    public Options createFromParcel(Parcel in) {
-                        return new Options(in);
+                    public Request createFromParcel(Parcel in) {
+                        return new Request(in);
                     }
 
                     @Override
-                    public Options[] newArray(int size) {
-                        return new Options[size];
+                    public Request[] newArray(int size) {
+                        return new Request[size];
                     }
                 };
 
-        private Options(Parcel in) {
-            if (in.readInt() > 0) {
-                mDefaultLocales = LocaleList.CREATOR.createFromParcel(in);
-            }
+        private Request(Parcel in) {
+            mText = in.readString();
+            mStartIndex = in.readInt();
+            mEndIndex = in.readInt();
+            mDefaultLocales = in.readInt() == 0 ? null : LocaleList.CREATOR.createFromParcel(in);
+            mReferenceTime = in.readInt() == 0 ? null : ZonedDateTime.parse(in.readString());
         }
     }
 
-    /**
-     * Parcelable wrapper for TextClassification objects.
-     * @hide
-     */
-    public static final class ParcelableWrapper implements Parcelable {
+    @Override
+    public int describeContents() {
+        return 0;
+    }
 
-        @NonNull private TextClassification mTextClassification;
-
-        public ParcelableWrapper(@NonNull TextClassification textClassification) {
-            Preconditions.checkNotNull(textClassification);
-            mTextClassification = textClassification;
+    @Override
+    public void writeToParcel(Parcel dest, int flags) {
+        dest.writeString(mText);
+        final Bitmap legacyIconBitmap = drawableToBitmap(mLegacyIcon, MAX_LEGACY_ICON_SIZE);
+        dest.writeInt(legacyIconBitmap != null ? 1 : 0);
+        if (legacyIconBitmap != null) {
+            legacyIconBitmap.writeToParcel(dest, flags);
         }
-
-        @NonNull
-        public TextClassification getTextClassification() {
-            return mTextClassification;
+        dest.writeString(mLegacyLabel);
+        dest.writeInt(mLegacyIntent != null ? 1 : 0);
+        if (mLegacyIntent != null) {
+            mLegacyIntent.writeToParcel(dest, flags);
         }
+        // mOnClickListener is not parcelable.
+        dest.writeTypedList(mActions);
+        mEntityConfidence.writeToParcel(dest, flags);
+        dest.writeString(mId);
+    }
 
-        @Override
-        public int describeContents() {
-            return 0;
+    public static final Parcelable.Creator<TextClassification> CREATOR =
+            new Parcelable.Creator<TextClassification>() {
+                @Override
+                public TextClassification createFromParcel(Parcel in) {
+                    return new TextClassification(in);
+                }
+
+                @Override
+                public TextClassification[] newArray(int size) {
+                    return new TextClassification[size];
+                }
+            };
+
+    private TextClassification(Parcel in) {
+        mText = in.readString();
+        mLegacyIcon = in.readInt() == 0
+                ? null
+                : new BitmapDrawable(Resources.getSystem(), Bitmap.CREATOR.createFromParcel(in));
+        mLegacyLabel = in.readString();
+        if (in.readInt() == 0) {
+            mLegacyIntent = null;
+        } else {
+            mLegacyIntent = Intent.CREATOR.createFromParcel(in);
+            mLegacyIntent.removeFlags(
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
         }
-
-        @Override
-        public void writeToParcel(Parcel dest, int flags) {
-            mTextClassification.writeToParcel(dest, flags);
-        }
-
-        public static final Parcelable.Creator<ParcelableWrapper> CREATOR =
-                new Parcelable.Creator<ParcelableWrapper>() {
-                    @Override
-                    public ParcelableWrapper createFromParcel(Parcel in) {
-                        return new ParcelableWrapper(new TextClassification(in));
-                    }
-
-                    @Override
-                    public ParcelableWrapper[] newArray(int size) {
-                        return new ParcelableWrapper[size];
-                    }
-                };
-
+        mLegacyOnClickListener = null;  // not parcelable
+        mActions = in.createTypedArrayList(RemoteAction.CREATOR);
+        mEntityConfidence = EntityConfidence.CREATOR.createFromParcel(in);
+        mId = in.readString();
     }
 }

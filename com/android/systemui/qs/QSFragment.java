@@ -25,6 +25,7 @@ import android.support.annotation.VisibleForTesting;
 import android.util.Log;
 import android.view.ContextThemeWrapper;
 import android.view.LayoutInflater;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.View.OnClickListener;
 import android.view.ViewGroup;
@@ -68,7 +69,7 @@ public class QSFragment extends Fragment implements QS {
     @Override
     public View onCreateView(LayoutInflater inflater, @Nullable ViewGroup container,
             Bundle savedInstanceState) {
-        inflater =inflater.cloneInContext(new ContextThemeWrapper(getContext(), R.style.qs_theme));
+        inflater = inflater.cloneInContext(new ContextThemeWrapper(getContext(), R.style.qs_theme));
         return inflater.inflate(R.layout.qs_panel, container, false);
     }
 
@@ -207,6 +208,11 @@ public class QSFragment extends Fragment implements QS {
     }
 
     @Override
+    public boolean onInterceptTouchEvent(MotionEvent event) {
+        return isCustomizing();
+    }
+
+    @Override
     public void setHeaderClickable(boolean clickable) {
         if (DEBUG) Log.d(TAG, "setHeaderClickable " + clickable);
 
@@ -266,30 +272,43 @@ public class QSFragment extends Fragment implements QS {
         mContainer.setExpansion(expansion);
         final float translationScaleY = expansion - 1;
         if (!mHeaderAnimating) {
-            int height = mHeader.getHeight();
-            getView().setTranslationY(mKeyguardShowing ? (translationScaleY * height)
-                    : headerTranslation);
+            getView().setTranslationY(
+                    mKeyguardShowing
+                            ? translationScaleY * mHeader.getHeight()
+                            : headerTranslation);
         }
         if (expansion == mLastQSExpansion) {
             return;
         }
         mLastQSExpansion = expansion;
-        mHeader.setExpansion(mKeyguardShowing ? 1 : expansion);
-        mFooter.setExpansion(mKeyguardShowing ? 1 : expansion);
+
+        boolean fullyExpanded = expansion == 1;
         int heightDiff = mQSPanel.getBottom() - mHeader.getBottom() + mHeader.getPaddingBottom()
                 + mFooter.getHeight();
+        float panelTranslationY = translationScaleY * heightDiff;
+
+        // Let the views animate their contents correctly by giving them the necessary context.
+        mHeader.setExpansion(mKeyguardShowing, expansion, panelTranslationY);
+        mFooter.setExpansion(mKeyguardShowing ? 1 : expansion);
+        mQSPanel.getQsTileRevealController().setExpansion(expansion);
+        mQSPanel.getTileLayout().setExpansion(expansion);
         mQSPanel.setTranslationY(translationScaleY * heightDiff);
-        mQSDetail.setFullyExpanded(expansion == 1);
+        mQSDetail.setFullyExpanded(fullyExpanded);
+
+        if (fullyExpanded) {
+            // Always draw within the bounds of the view when fully expanded.
+            mQSPanel.setClipBounds(null);
+        } else {
+            // Set bounds on the QS panel so it doesn't run over the header when animating.
+            mQsBounds.top = (int) -mQSPanel.getTranslationY();
+            mQsBounds.right = mQSPanel.getWidth();
+            mQsBounds.bottom = mQSPanel.getHeight();
+            mQSPanel.setClipBounds(mQsBounds);
+        }
 
         if (mQSAnimator != null) {
             mQSAnimator.setPosition(expansion);
         }
-
-        // Set bounds on the QS panel so it doesn't run over the header.
-        mQsBounds.top = (int) -mQSPanel.getTranslationY();
-        mQsBounds.right = mQSPanel.getWidth();
-        mQsBounds.bottom = mQSPanel.getHeight();
-        mQSPanel.setClipBounds(mQsBounds);
     }
 
     @Override
@@ -341,7 +360,6 @@ public class QSFragment extends Fragment implements QS {
         // The customize state changed, so our height changed.
         mContainer.updateExpansion();
         mQSPanel.setVisibility(!mQSCustomizer.isCustomizing() ? View.VISIBLE : View.INVISIBLE);
-        mHeader.setVisibility(!mQSCustomizer.isCustomizing() ? View.VISIBLE : View.INVISIBLE);
         mFooter.setVisibility(!mQSCustomizer.isCustomizing() ? View.VISIBLE : View.INVISIBLE);
         // Let the panel know the position changed and it needs to update where notifications
         // and whatnot are.

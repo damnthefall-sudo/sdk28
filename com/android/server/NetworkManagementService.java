@@ -1789,6 +1789,8 @@ public class NetworkManagementService extends INetworkManagementService.Stub
     @Override
     public void setAllowOnlyVpnForUids(boolean add, UidRange[] uidRanges)
             throws ServiceSpecificException {
+        mContext.enforceCallingOrSelfPermission(NETWORK_STACK, TAG);
+
         try {
             mNetdService.networkRejectNonSecureVpn(add, uidRanges);
         } catch (ServiceSpecificException e) {
@@ -1867,10 +1869,10 @@ public class NetworkManagementService extends INetworkManagementService.Stub
     }
 
     @Override
-    public NetworkStats getNetworkStatsUidDetail(int uid) {
+    public NetworkStats getNetworkStatsUidDetail(int uid, String[] ifaces) {
         mContext.enforceCallingOrSelfPermission(CONNECTIVITY_INTERNAL, TAG);
         try {
-            return mStatsFactory.readNetworkStatsDetail(uid, null, TAG_ALL, null);
+            return mStatsFactory.readNetworkStatsDetail(uid, ifaces, TAG_ALL, null);
         } catch (IOException e) {
             throw new IllegalStateException(e);
         }
@@ -1942,13 +1944,13 @@ public class NetworkManagementService extends INetworkManagementService.Stub
 
     @Override
     public void setDnsConfigurationForNetwork(int netId, String[] servers, String[] domains,
-                    int[] params, boolean useTls, String tlsHostname) {
+                    int[] params, String tlsHostname, String[] tlsServers) {
         mContext.enforceCallingOrSelfPermission(CONNECTIVITY_INTERNAL, TAG);
 
         final String[] tlsFingerprints = new String[0];
         try {
             mNetdService.setResolverConfiguration(
-                    netId, servers, domains, params, useTls, tlsHostname, tlsFingerprints);
+                    netId, servers, domains, params, tlsHostname, tlsServers, tlsFingerprints);
         } catch (RemoteException e) {
             throw new RuntimeException(e);
         }

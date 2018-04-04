@@ -470,6 +470,11 @@ public final class Canvas_Delegate extends BaseCanvas_Delegate {
         return sFinalizer;
     }
 
+    @LayoutlibDelegate
+    /*package*/ static void nSetCompatibilityVersion(int apiLevel) {
+        // Unsupported by layoutlib, do nothing
+    }
+
     private Canvas_Delegate(Bitmap_Delegate bitmap) {
         super(bitmap);
     }

@@ -17,6 +17,8 @@
 package com.android.server.am;
 
 import android.annotation.UiThread;
+import android.app.ActivityManager;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.res.Configuration;
 import android.os.Build;
@@ -39,6 +41,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 
 /**
@@ -50,6 +53,7 @@ class AppWarnings {
 
     public static final int FLAG_HIDE_DISPLAY_SIZE = 0x01;
     public static final int FLAG_HIDE_COMPILE_SDK = 0x02;
+    public static final int FLAG_HIDE_DEPRECATED_SDK = 0x04;
 
     private final HashMap<String, Integer> mPackageFlags = new HashMap<>();
 
@@ -61,6 +65,16 @@ class AppWarnings {
 
     private UnsupportedDisplaySizeDialog mUnsupportedDisplaySizeDialog;
     private UnsupportedCompileSdkDialog mUnsupportedCompileSdkDialog;
+    private DeprecatedTargetSdkVersionDialog mDeprecatedTargetSdkVersionDialog;
+
+    /** @see android.app.ActivityManager#alwaysShowUnsupportedCompileSdkWarning */
+    private HashSet<ComponentName> mAlwaysShowUnsupportedCompileSdkWarningActivities =
+            new HashSet<>();
+
+    /** @see android.app.ActivityManager#alwaysShowUnsupportedCompileSdkWarning */
+    void alwaysShowUnsupportedCompileSdkWarning(ComponentName activity) {
+        mAlwaysShowUnsupportedCompileSdkWarningActivities.add(activity);
+    }
 
     /**
      * Creates a new warning dialog manager.
@@ -79,7 +93,7 @@ class AppWarnings {
         mUiContext = uiContext;
         mAmsHandler = new ConfigHandler(amsHandler.getLooper());
         mUiHandler = new UiHandler(uiHandler.getLooper());
-        mConfigFile = new AtomicFile(new File(systemDir, CONFIG_FILE_NAME));
+        mConfigFile = new AtomicFile(new File(systemDir, CONFIG_FILE_NAME), "warnings-config");
 
         readConfigFromFileAmsThread();
     }
@@ -108,6 +122,13 @@ class AppWarnings {
             return;
         }
 
+        if (ActivityManager.isRunningInTestHarness()
+                && !mAlwaysShowUnsupportedCompileSdkWarningActivities.contains(r.realActivity)) {
+            // Don't show warning if we are running in a test harness and we don't have to always
+            // show for this activity.
+            return;
+        }
+
         // If the application was built against an pre-release SDK that's older than the current
         // platform OR if the current platform is pre-release and older than the SDK against which
         // the application was built OR both are pre-release with the same SDK_INT but different
@@ -126,6 +147,17 @@ class AppWarnings {
     }
 
     /**
+     * Shows the "deprecated target sdk" warning, if necessary.
+     *
+     * @param r activity record for which the warning may be displayed
+     */
+    public void showDeprecatedTargetDialogIfNeeded(ActivityRecord r) {
+        if (r.appInfo.targetSdkVersion < Build.VERSION.MIN_SUPPORTED_TARGET_SDK_INT) {
+            mUiHandler.showDeprecatedTargetDialog(r);
+        }
+    }
+
+    /**
      * Called when an activity is being started.
      *
      * @param r record for the activity being started
@@ -133,6 +165,7 @@ class AppWarnings {
     public void onStartActivity(ActivityRecord r) {
         showUnsupportedCompileSdkDialogIfNeeded(r);
         showUnsupportedDisplaySizeDialogIfNeeded(r);
+        showDeprecatedTargetDialogIfNeeded(r);
     }
 
     /**
@@ -237,6 +270,27 @@ class AppWarnings {
     }
 
     /**
+     * Shows the "deprecated target sdk version" warning for the given application.
+     * <p>
+     * <strong>Note:</strong> Must be called on the UI thread.
+     *
+     * @param ar record for the activity that triggered the warning
+     */
+    @UiThread
+    private void showDeprecatedTargetSdkDialogUiThread(ActivityRecord ar) {
+        if (mDeprecatedTargetSdkVersionDialog != null) {
+            mDeprecatedTargetSdkVersionDialog.dismiss();
+            mDeprecatedTargetSdkVersionDialog = null;
+        }
+        if (ar != null && !hasPackageFlag(
+                ar.packageName, FLAG_HIDE_DEPRECATED_SDK)) {
+            mDeprecatedTargetSdkVersionDialog = new DeprecatedTargetSdkVersionDialog(
+                    AppWarnings.this, mUiContext, ar.info.applicationInfo);
+            mDeprecatedTargetSdkVersionDialog.show();
+        }
+    }
+
+    /**
      * Dismisses all warnings for the given package.
      * <p>
      * <strong>Note:</strong> Must be called on the UI thread.
@@ -258,6 +312,13 @@ class AppWarnings {
                 mUnsupportedCompileSdkDialog.getPackageName()))) {
             mUnsupportedCompileSdkDialog.dismiss();
             mUnsupportedCompileSdkDialog = null;
+        }
+
+        // Hides the "deprecated target sdk version" dialog if necessary.
+        if (mDeprecatedTargetSdkVersionDialog != null && (name == null || name.equals(
+                mDeprecatedTargetSdkVersionDialog.getPackageName()))) {
+            mDeprecatedTargetSdkVersionDialog.dismiss();
+            mDeprecatedTargetSdkVersionDialog = null;
         }
     }
 
@@ -282,7 +343,7 @@ class AppWarnings {
     void setPackageFlag(String name, int flag, boolean enabled) {
         synchronized (mPackageFlags) {
             final int curFlags = getPackageFlags(name);
-            final int newFlags = enabled ? (curFlags & ~flag) : (curFlags | flag);
+            final int newFlags = enabled ? (curFlags | flag) : (curFlags & ~flag);
             if (curFlags != newFlags) {
                 if (newFlags != 0) {
                     mPackageFlags.put(name, newFlags);
@@ -311,6 +372,7 @@ class AppWarnings {
         private static final int MSG_HIDE_UNSUPPORTED_DISPLAY_SIZE_DIALOG = 2;
         private static final int MSG_SHOW_UNSUPPORTED_COMPILE_SDK_DIALOG = 3;
         private static final int MSG_HIDE_DIALOGS_FOR_PACKAGE = 4;
+        private static final int MSG_SHOW_DEPRECATED_TARGET_SDK_DIALOG = 5;
 
         public UiHandler(Looper looper) {
             super(looper, null, true);
@@ -334,6 +396,10 @@ class AppWarnings {
                     final String name = (String) msg.obj;
                     hideDialogsForPackageUiThread(name);
                 } break;
+                case MSG_SHOW_DEPRECATED_TARGET_SDK_DIALOG: {
+                    final ActivityRecord ar = (ActivityRecord) msg.obj;
+                    showDeprecatedTargetSdkDialogUiThread(ar);
+                } break;
             }
         }
 
@@ -350,6 +416,11 @@ class AppWarnings {
         public void showUnsupportedCompileSdkDialog(ActivityRecord r) {
             removeMessages(MSG_SHOW_UNSUPPORTED_COMPILE_SDK_DIALOG);
             obtainMessage(MSG_SHOW_UNSUPPORTED_COMPILE_SDK_DIALOG, r).sendToTarget();
+        }
+
+        public void showDeprecatedTargetDialog(ActivityRecord r) {
+            removeMessages(MSG_SHOW_DEPRECATED_TARGET_SDK_DIALOG);
+            obtainMessage(MSG_SHOW_DEPRECATED_TARGET_SDK_DIALOG, r).sendToTarget();
         }
 
         public void hideDialogsForPackage(String name) {

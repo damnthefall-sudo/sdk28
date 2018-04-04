@@ -25,8 +25,8 @@ import static com.android.server.wm.WindowManagerDebugConfig.SHOW_LIGHT_TRANSACT
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_VISIBILITY;
 import static com.android.server.wm.WindowManagerDebugConfig.TAG_WITH_CLASS_NAME;
 import static com.android.server.wm.WindowManagerDebugConfig.TAG_WM;
-import static com.android.server.wm.proto.WindowSurfaceControllerProto.LAYER;
-import static com.android.server.wm.proto.WindowSurfaceControllerProto.SHOWN;
+import static com.android.server.wm.WindowSurfaceControllerProto.LAYER;
+import static com.android.server.wm.WindowSurfaceControllerProto.SHOWN;
 
 import android.graphics.Point;
 import android.graphics.PointF;
@@ -86,6 +86,8 @@ class WindowSurfaceController {
     private final int mWindowType;
     private final Session mWindowSession;
 
+    private final SurfaceControl.Transaction mTmpTransaction = new SurfaceControl.Transaction();
+
     public WindowSurfaceController(SurfaceSession s, String name, int w, int h, int format,
             int flags, WindowStateAnimator animator, int windowType, int ownerUid) {
         mAnimator = animator;
@@ -110,20 +112,7 @@ class WindowSurfaceController {
                 .setMetadata(windowType, ownerUid);
         mSurfaceControl = b.build();
         Trace.traceEnd(TRACE_TAG_WINDOW_MANAGER);
-
-        if (mService.mRoot.mSurfaceTraceEnabled) {
-            installRemoteTrace(mService.mRoot.mSurfaceTraceFd.getFileDescriptor());
-        }
     }
-
-    void installRemoteTrace(FileDescriptor fd) {
-        mSurfaceControl = new RemoteSurfaceTrace(fd, mSurfaceControl, mAnimator.mWin);
-    }
-
-    void removeRemoteTrace() {
-        mSurfaceControl = new SurfaceControl(mSurfaceControl);
-    }
-
 
     private void logSurface(String msg, RuntimeException where) {
         String str = "  SURFACE " + msg + ": " + title;
@@ -148,27 +137,29 @@ class WindowSurfaceController {
         }
     }
 
-    void hideInTransaction(String reason) {
+    void hide(SurfaceControl.Transaction transaction, String reason) {
         if (SHOW_TRANSACTIONS) logSurface("HIDE ( " + reason + " )", null);
         mHiddenForOtherReasons = true;
 
         mAnimator.destroyPreservedSurfaceLocked();
-        updateVisibility();
+        if (mSurfaceShown) {
+            hideSurface(transaction);
+        }
     }
 
-    private void hideSurface() {
+    private void hideSurface(SurfaceControl.Transaction transaction) {
         if (mSurfaceControl == null) {
             return;
         }
         setShown(false);
         try {
-            mSurfaceControl.hide();
+            transaction.hide(mSurfaceControl);
         } catch (RuntimeException e) {
             Slog.w(TAG, "Exception hiding surface in " + this);
         }
     }
 
-    void destroyInTransaction() {
+    void destroyNotInTransaction() {
         if (SHOW_TRANSACTIONS || SHOW_SURFACE_ALLOC) {
             Slog.i(TAG, "Destroying surface " + this + " called by " + Debug.getCallers(8));
         }
@@ -251,6 +242,11 @@ class WindowSurfaceController {
     }
 
     void setPositionInTransaction(float left, float top, boolean recoveringMemory) {
+        setPosition(null, left, top, recoveringMemory);
+    }
+
+    void setPosition(SurfaceControl.Transaction t, float left, float top,
+            boolean recoveringMemory) {
         final boolean surfaceMoved = mSurfaceX != left || mSurfaceY != top;
         if (surfaceMoved) {
             mSurfaceX = left;
@@ -260,7 +256,11 @@ class WindowSurfaceController {
                 if (SHOW_TRANSACTIONS) logSurface(
                         "POS (setPositionInTransaction) @ (" + left + "," + top + ")", null);
 
-                mSurfaceControl.setPosition(left, top);
+                if (t == null) {
+                    mSurfaceControl.setPosition(left, top);
+                } else {
+                    t.setPosition(mSurfaceControl, left, top);
+                }
             } catch (RuntimeException e) {
                 Slog.w(TAG, "Error positioning surface of " + this
                         + " pos=(" + left + "," + top + ")", e);
@@ -277,6 +277,11 @@ class WindowSurfaceController {
 
     void setMatrixInTransaction(float dsdx, float dtdx, float dtdy, float dsdy,
             boolean recoveringMemory) {
+        setMatrix(null, dsdx, dtdx, dtdy, dsdy, false);
+    }
+
+    void setMatrix(SurfaceControl.Transaction t, float dsdx, float dtdx,
+            float dtdy, float dsdy, boolean recoveringMemory) {
         final boolean matrixChanged = mLastDsdx != dsdx || mLastDtdx != dtdx ||
                                       mLastDtdy != dtdy || mLastDsdy != dsdy;
         if (!matrixChanged) {
@@ -291,8 +296,11 @@ class WindowSurfaceController {
         try {
             if (SHOW_TRANSACTIONS) logSurface(
                     "MATRIX [" + dsdx + "," + dtdx + "," + dtdy + "," + dsdy + "]", null);
-            mSurfaceControl.setMatrix(
-                    dsdx, dtdx, dtdy, dsdy);
+            if (t == null) {
+                mSurfaceControl.setMatrix(dsdx, dtdx, dtdy, dsdy);
+            } else {
+                t.setMatrix(mSurfaceControl, dsdx, dtdx, dtdy, dsdy);
+            }
         } catch (RuntimeException e) {
             // If something goes wrong with the surface (such
             // as running out of memory), don't take down the
@@ -421,7 +429,8 @@ class WindowSurfaceController {
     private boolean updateVisibility() {
         if (mHiddenForCrop || mHiddenForOtherReasons) {
             if (mSurfaceShown) {
-                hideSurface();
+                hideSurface(mTmpTransaction);
+                SurfaceControl.mergeToGlobalTransaction(mTmpTransaction);
             }
             return false;
         } else {

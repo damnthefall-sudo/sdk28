@@ -19,6 +19,7 @@ package android.app.backup;
 import android.annotation.Nullable;
 import android.annotation.RequiresPermission;
 import android.annotation.SystemApi;
+import android.annotation.TestApi;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -252,6 +253,8 @@ public class BackupManager {
     }
 
     /**
+     * @deprecated Since Android P app can no longer request restoring of its backup.
+     *
      * Restore the calling application from backup.  The data will be restored from the
      * current backup dataset if the application has stored data there, or from
      * the dataset used during the last full device setup operation if the current
@@ -269,6 +272,7 @@ public class BackupManager {
      *
      * @return Zero on success; nonzero on error.
      */
+    @Deprecated
     public int requestRestore(RestoreObserver observer) {
         return requestRestore(observer, null);
     }
@@ -276,6 +280,8 @@ public class BackupManager {
     // system APIs start here
 
     /**
+     * @deprecated Since Android P app can no longer request restoring of its backup.
+     *
      * Restore the calling application from backup.  The data will be restored from the
      * current backup dataset if the application has stored data there, or from
      * the dataset used during the last full device setup operation if the current
@@ -298,28 +304,12 @@ public class BackupManager {
      *
      * @hide
      */
+    @Deprecated
     @SystemApi
     public int requestRestore(RestoreObserver observer, BackupManagerMonitor monitor) {
-        int result = -1;
-        checkServiceBinder();
-        if (sService != null) {
-            RestoreSession session = null;
-            try {
-                IRestoreSession binder = sService.beginRestoreSession(mContext.getPackageName(),
-                    null);
-                if (binder != null) {
-                    session = new RestoreSession(mContext, binder);
-                    result = session.restorePackage(mContext.getPackageName(), observer, monitor);
-                }
-            } catch (RemoteException e) {
-                Log.e(TAG, "restoreSelf() unable to contact service");
-            } finally {
-                if (session != null) {
-                    session.endRestoreSession();
-                }
-            }
-        }
-        return result;
+        Log.w(TAG, "requestRestore(): Since Android P app can no longer request restoring"
+                + " of its backup.");
+        return -1;
     }
 
     /**
@@ -724,6 +714,92 @@ public class BackupManager {
                 Log.e(TAG, "cancelBackups() couldn't connect.");
             }
         }
+    }
+
+    /**
+     * Returns an {@link Intent} for the specified transport's configuration UI.
+     * This value is set by {@link #updateTransportAttributes(ComponentName, String, Intent, String,
+     * Intent, String)}.
+     * @param transportName The name of the registered transport.
+     * @hide
+     */
+    @SystemApi
+    @TestApi
+    @RequiresPermission(android.Manifest.permission.BACKUP)
+    public Intent getConfigurationIntent(String transportName) {
+        if (sService != null) {
+            try {
+                return sService.getConfigurationIntent(transportName);
+            } catch (RemoteException e) {
+                Log.e(TAG, "getConfigurationIntent() couldn't connect");
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Returns a {@link String} describing where the specified transport is sending data.
+     * This value is set by {@link #updateTransportAttributes(ComponentName, String, Intent, String,
+     * Intent, String)}.
+     * @param transportName The name of the registered transport.
+     * @hide
+     */
+    @SystemApi
+    @TestApi
+    @RequiresPermission(android.Manifest.permission.BACKUP)
+    public String getDestinationString(String transportName) {
+        if (sService != null) {
+            try {
+                return sService.getDestinationString(transportName);
+            } catch (RemoteException e) {
+                Log.e(TAG, "getDestinationString() couldn't connect");
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Returns an {@link Intent} for the specified transport's data management UI.
+     * This value is set by {@link #updateTransportAttributes(ComponentName, String, Intent, String,
+     * Intent, String)}.
+     * @param transportName The name of the registered transport.
+     * @hide
+     */
+    @SystemApi
+    @TestApi
+    @RequiresPermission(android.Manifest.permission.BACKUP)
+    public Intent getDataManagementIntent(String transportName) {
+        if (sService != null) {
+            try {
+                return sService.getDataManagementIntent(transportName);
+            } catch (RemoteException e) {
+                Log.e(TAG, "getDataManagementIntent() couldn't connect");
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Returns a {@link String} describing what the specified transport's data management intent is
+     * used for.
+     * This value is set by {@link #updateTransportAttributes(ComponentName, String, Intent, String,
+     * Intent, String)}.
+     *
+     * @param transportName The name of the registered transport.
+     * @hide
+     */
+    @SystemApi
+    @TestApi
+    @RequiresPermission(android.Manifest.permission.BACKUP)
+    public String getDataManagementLabel(String transportName) {
+        if (sService != null) {
+            try {
+                return sService.getDataManagementLabel(transportName);
+            } catch (RemoteException e) {
+                Log.e(TAG, "getDataManagementLabel() couldn't connect");
+            }
+        }
+        return null;
     }
 
     /*

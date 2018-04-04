@@ -16,9 +16,14 @@
 package com.android.server.stats;
 
 import android.annotation.Nullable;
+import android.app.ActivityManagerInternal;
 import android.app.AlarmManager;
 import android.app.PendingIntent;
+import android.app.ProcessMemoryState;
 import android.app.StatsManager;
+import android.bluetooth.BluetoothActivityEnergyInfo;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.UidTraffic;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -30,11 +35,11 @@ import android.content.pm.UserInfo;
 import android.net.NetworkStats;
 import android.net.wifi.IWifiManager;
 import android.net.wifi.WifiActivityEnergyInfo;
-import android.os.StatsDimensionsValue;
 import android.os.BatteryStatsInternal;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.FileUtils;
 import android.os.IBinder;
 import android.os.IStatsCompanionService;
 import android.os.IStatsManager;
@@ -43,6 +48,7 @@ import android.os.Process;
 import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.os.StatFs;
+import android.os.StatsDimensionsValue;
 import android.os.StatsLogEventWrapper;
 import android.os.SynchronousResultReceiver;
 import android.os.SystemClock;
@@ -56,15 +62,28 @@ import android.util.StatsLog;
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.net.NetworkStatsFactory;
 import com.android.internal.os.KernelCpuSpeedReader;
+import com.android.internal.os.KernelUidCpuTimeReader;
+import com.android.internal.os.KernelUidCpuClusterTimeReader;
+import com.android.internal.os.KernelUidCpuActiveTimeReader;
+import com.android.internal.os.KernelUidCpuFreqTimeReader;
 import com.android.internal.os.KernelWakelockReader;
 import com.android.internal.os.KernelWakelockStats;
 import com.android.internal.os.PowerProfile;
+import com.android.internal.util.DumpUtils;
 import com.android.server.LocalServices;
 import com.android.server.SystemService;
 
+import java.io.File;
+import java.io.FileDescriptor;
+import java.io.IOException;
+import java.io.PrintWriter;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 /**
@@ -78,16 +97,17 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
      * How long to wait on an individual subsystem to return its stats.
      */
     private static final long EXTERNAL_STATS_SYNC_TIMEOUT_MILLIS = 2000;
+    private static final long MILLIS_IN_A_DAY = TimeUnit.DAYS.toMillis(1);
 
     public static final String RESULT_RECEIVER_CONTROLLER_KEY = "controller_activity";
+    public static final String CONFIG_DIR = "/data/misc/stats-service";
 
     static final String TAG = "StatsCompanionService";
-    static final boolean DEBUG = true;
+    static final boolean DEBUG = false;
 
-    public static final String ACTION_TRIGGER_COLLECTION =
-        "com.android.server.stats.action.TRIGGER_COLLECTION";
-
+    public static final int CODE_DATA_BROADCAST = 1;
     public static final int CODE_SUBSCRIBER_BROADCAST = 1;
+    public static final int DEATH_THRESHOLD = 10;
 
     private final Context mContext;
     private final AlarmManager mAlarmManager;
@@ -97,19 +117,32 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
 
     private final PendingIntent mAnomalyAlarmIntent;
     private final PendingIntent mPullingAlarmIntent;
+    private final PendingIntent mPeriodicAlarmIntent;
     private final BroadcastReceiver mAppUpdateReceiver;
     private final BroadcastReceiver mUserUpdateReceiver;
     private final ShutdownEventReceiver mShutdownEventReceiver;
     private final KernelWakelockReader mKernelWakelockReader = new KernelWakelockReader();
     private final KernelWakelockStats mTmpWakelockStats = new KernelWakelockStats();
-    private final KernelCpuSpeedReader[] mKernelCpuSpeedReaders;
     private IWifiManager mWifiManager = null;
     private TelephonyManager mTelephony = null;
     private final StatFs mStatFsData = new StatFs(Environment.getDataDirectory().getAbsolutePath());
     private final StatFs mStatFsSystem =
-        new StatFs(Environment.getRootDirectory().getAbsolutePath());
+            new StatFs(Environment.getRootDirectory().getAbsolutePath());
     private final StatFs mStatFsTemp =
-        new StatFs(Environment.getDownloadCacheDirectory().getAbsolutePath());
+            new StatFs(Environment.getDownloadCacheDirectory().getAbsolutePath());
+    @GuardedBy("sStatsdLock")
+    private final HashSet<Long> mDeathTimeMillis = new HashSet<>();
+    @GuardedBy("sStatsdLock")
+    private final HashMap<Long, String> mDeletedFiles = new HashMap<>();
+
+    private KernelUidCpuTimeReader mKernelUidCpuTimeReader = new KernelUidCpuTimeReader();
+    private KernelCpuSpeedReader[] mKernelCpuSpeedReaders;
+    private KernelUidCpuFreqTimeReader mKernelUidCpuFreqTimeReader =
+            new KernelUidCpuFreqTimeReader();
+    private KernelUidCpuActiveTimeReader mKernelUidCpuActiveTimeReader =
+            new KernelUidCpuActiveTimeReader();
+    private KernelUidCpuClusterTimeReader mKernelUidCpuClusterTimeReader =
+            new KernelUidCpuClusterTimeReader();
 
     public StatsCompanionService(Context context) {
         super();
@@ -119,7 +152,9 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
         mAnomalyAlarmIntent = PendingIntent.getBroadcast(mContext, 0,
                 new Intent(mContext, AnomalyAlarmReceiver.class), 0);
         mPullingAlarmIntent = PendingIntent.getBroadcast(
-            mContext, 0, new Intent(mContext, PullingAlarmReceiver.class), 0);
+                mContext, 0, new Intent(mContext, PullingAlarmReceiver.class), 0);
+        mPeriodicAlarmIntent = PendingIntent.getBroadcast(
+                mContext, 0, new Intent(mContext, PeriodicAlarmReceiver.class), 0);
         mAppUpdateReceiver = new AppUpdateReceiver();
         mUserUpdateReceiver = new BroadcastReceiver() {
             @Override
@@ -127,7 +162,7 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
                 synchronized (sStatsdLock) {
                     sStatsd = fetchStatsdService();
                     if (sStatsd == null) {
-                        Slog.w(TAG, "Could not access statsd");
+                        Slog.w(TAG, "Could not access statsd for UserUpdateReceiver");
                         return;
                     }
                     try {
@@ -136,13 +171,13 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
                         informAllUidsLocked(context);
                     } catch (RemoteException e) {
                         Slog.e(TAG, "Failed to inform statsd latest update of all apps", e);
-                        forgetEverything();
+                        forgetEverythingLocked();
                     }
                 }
             }
         };
         mShutdownEventReceiver = new ShutdownEventReceiver();
-        Slog.w(TAG, "Registered receiver for ACTION_PACKAGE_REPLACE AND ADDED.");
+        if (DEBUG) Slog.d(TAG, "Registered receiver for ACTION_PACKAGE_REPLACED and ADDED.");
         PowerProfile powerProfile = new PowerProfile(context);
         final int numClusters = powerProfile.getNumCpuClusters();
         mKernelCpuSpeedReaders = new KernelCpuSpeedReader[numClusters];
@@ -150,23 +185,34 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
         for (int i = 0; i < numClusters; i++) {
             final int numSpeedSteps = powerProfile.getNumSpeedStepsInCpuCluster(i);
             mKernelCpuSpeedReaders[i] = new KernelCpuSpeedReader(firstCpuOfCluster,
-                            numSpeedSteps);
+                    numSpeedSteps);
             firstCpuOfCluster += powerProfile.getNumCoresInCpuCluster(i);
         }
+        // use default throttling in
+        // frameworks/base/core/java/com/android/internal/os/KernelCpuProcReader
+        mKernelUidCpuFreqTimeReader.setThrottleInterval(0);
+        long[] freqs = mKernelUidCpuFreqTimeReader.readFreqs(powerProfile);
+        mKernelUidCpuClusterTimeReader.setThrottleInterval(0);
+        mKernelUidCpuActiveTimeReader.setThrottleInterval(0);
     }
 
     @Override
-    public void sendBroadcast(String pkg, String cls) {
-        // TODO: Use a pending intent, and enfoceCallingPermission.
-        mContext.sendBroadcastAsUser(new Intent(ACTION_TRIGGER_COLLECTION).setClassName(pkg, cls),
-                UserHandle.SYSTEM);
+    public void sendDataBroadcast(IBinder intentSenderBinder) {
+        enforceCallingPermission();
+        IntentSender intentSender = new IntentSender(intentSenderBinder);
+        Intent intent = new Intent();
+        try {
+            intentSender.sendIntent(mContext, CODE_DATA_BROADCAST, intent, null, null);
+        } catch (IntentSender.SendIntentException e) {
+            Slog.w(TAG, "Unable to send using IntentSender");
+        }
     }
 
     @Override
     public void sendSubscriberBroadcast(IBinder intentSenderBinder, long configUid, long configKey,
                                         long subscriptionId, long subscriptionRuleId,
+                                        String[] cookies,
                                         StatsDimensionsValue dimensionsValue) {
-        if (DEBUG) Slog.d(TAG, "Statsd requested to sendSubscriberBroadcast.");
         enforceCallingPermission();
         IntentSender intentSender = new IntentSender(intentSenderBinder);
         Intent intent = new Intent()
@@ -175,16 +221,23 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
                 .putExtra(StatsManager.EXTRA_STATS_SUBSCRIPTION_ID, subscriptionId)
                 .putExtra(StatsManager.EXTRA_STATS_SUBSCRIPTION_RULE_ID, subscriptionRuleId)
                 .putExtra(StatsManager.EXTRA_STATS_DIMENSIONS_VALUE, dimensionsValue);
+
+        ArrayList<String> cookieList = new ArrayList<>(cookies.length);
+        for (String cookie : cookies) { cookieList.add(cookie); }
+        intent.putStringArrayListExtra(
+                StatsManager.EXTRA_STATS_BROADCAST_SUBSCRIBER_COOKIES, cookieList);
+
+        if (DEBUG) {
+            Slog.d(TAG, String.format(
+                    "Statsd sendSubscriberBroadcast with params {%d %d %d %d %s %s}",
+                    configUid, configKey, subscriptionId, subscriptionRuleId,
+                    Arrays.toString(cookies), dimensionsValue));
+        }
         try {
             intentSender.sendIntent(mContext, CODE_SUBSCRIBER_BROADCAST, intent, null, null);
         } catch (IntentSender.SendIntentException e) {
             Slog.w(TAG, "Unable to send using IntentSender from uid " + configUid
                     + "; presumably it had been cancelled.");
-            if (DEBUG) {
-                Slog.d(TAG, String.format("SubscriberBroadcast params {%d %d %d %d %s}",
-                        configUid, configKey, subscriptionId,
-                        subscriptionRuleId, dimensionsValue));
-            }
         }
     }
 
@@ -205,17 +258,18 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
     }
 
     // Assumes that sStatsdLock is held.
+    @GuardedBy("sStatsdLock")
     private final void informAllUidsLocked(Context context) throws RemoteException {
         UserManager um = (UserManager) context.getSystemService(Context.USER_SERVICE);
         PackageManager pm = context.getPackageManager();
         final List<UserInfo> users = um.getUsers(true);
         if (DEBUG) {
-            Slog.w(TAG, "Iterating over " + users.size() + " profiles.");
+            Slog.d(TAG, "Iterating over " + users.size() + " profiles.");
         }
 
-        List<Integer> uids = new ArrayList();
-        List<Long> versions = new ArrayList();
-        List<String> apps = new ArrayList();
+        List<Integer> uids = new ArrayList<>();
+        List<Long> versions = new ArrayList<>();
+        List<String> apps = new ArrayList<>();
 
         // Add in all the apps for every user/profile.
         for (UserInfo profile : users) {
@@ -231,11 +285,11 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
         sStatsd.informAllUidData(toIntArray(uids), toLongArray(versions), apps.toArray(new
                 String[apps.size()]));
         if (DEBUG) {
-            Slog.w(TAG, "Sent data for " + uids.size() + " apps");
+            Slog.d(TAG, "Sent data for " + uids.size() + " apps");
         }
     }
 
-    public final static class AppUpdateReceiver extends BroadcastReceiver {
+    private final static class AppUpdateReceiver extends BroadcastReceiver {
         @Override
         public void onReceive(Context context, Intent intent) {
             /**
@@ -247,7 +301,7 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
                     && intent.getBooleanExtra(Intent.EXTRA_REPLACING, false)) {
                 return; // Keep only replacing or normal add and remove.
             }
-            Slog.i(TAG, "StatsCompanionService noticed an app was updated.");
+            if (DEBUG) Slog.d(TAG, "StatsCompanionService noticed an app was updated.");
             synchronized (sStatsdLock) {
                 if (sStatsd == null) {
                     Slog.w(TAG, "Could not access statsd to inform it of an app update");
@@ -283,7 +337,8 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
     public final static class AnomalyAlarmReceiver extends BroadcastReceiver {
         @Override
         public void onReceive(Context context, Intent intent) {
-            Slog.i(TAG, "StatsCompanionService believes an anomaly has occurred.");
+            Slog.i(TAG, "StatsCompanionService believes an anomaly has occurred at time "
+                    + System.currentTimeMillis() + "ms.");
             synchronized (sStatsdLock) {
                 if (sStatsd == null) {
                     Slog.w(TAG, "Could not access statsd to inform it of anomaly alarm firing");
@@ -301,24 +356,44 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
     }
 
     public final static class PullingAlarmReceiver extends BroadcastReceiver {
-      @Override
-      public void onReceive(Context context, Intent intent) {
-        if (DEBUG)
-          Slog.d(TAG, "Time to poll something.");
-        synchronized (sStatsdLock) {
-          if (sStatsd == null) {
-            Slog.w(TAG, "Could not access statsd to inform it of pulling alarm firing.");
-            return;
-          }
-          try {
-            // Two-way call to statsd to retain AlarmManager wakelock
-            sStatsd.informPollAlarmFired();
-          } catch (RemoteException e) {
-            Slog.w(TAG, "Failed to inform statsd of pulling alarm firing.", e);
-          }
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (DEBUG)
+                Slog.d(TAG, "Time to poll something.");
+            synchronized (sStatsdLock) {
+                if (sStatsd == null) {
+                    Slog.w(TAG, "Could not access statsd to inform it of pulling alarm firing.");
+                    return;
+                }
+                try {
+                    // Two-way call to statsd to retain AlarmManager wakelock
+                    sStatsd.informPollAlarmFired();
+                } catch (RemoteException e) {
+                    Slog.w(TAG, "Failed to inform statsd of pulling alarm firing.", e);
+                }
+            }
         }
-        // AlarmManager releases its own wakelock here.
-      }
+    }
+
+    public final static class PeriodicAlarmReceiver extends BroadcastReceiver {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (DEBUG)
+                Slog.d(TAG, "Time to poll something.");
+            synchronized (sStatsdLock) {
+                if (sStatsd == null) {
+                    Slog.w(TAG, "Could not access statsd to inform it of periodic alarm firing.");
+                    return;
+                }
+                try {
+                    // Two-way call to statsd to retain AlarmManager wakelock
+                    sStatsd.informAlarmForSubscriberTriggeringFired();
+                } catch (RemoteException e) {
+                    Slog.w(TAG, "Failed to inform statsd of periodic alarm firing.", e);
+                }
+            }
+            // AlarmManager releases its own wakelock here.
+        }
     }
 
     public final static class ShutdownEventReceiver extends BroadcastReceiver {
@@ -328,9 +403,11 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
              * Skip immediately if intent is not relevant to device shutdown.
              */
             if (!intent.getAction().equals(Intent.ACTION_REBOOT)
-                    && !intent.getAction().equals(Intent.ACTION_SHUTDOWN)) {
+                    && !(intent.getAction().equals(Intent.ACTION_SHUTDOWN)
+                    && (intent.getFlags() & Intent.FLAG_RECEIVER_FOREGROUND) != 0)) {
                 return;
             }
+
             Slog.i(TAG, "StatsCompanionService noticed a shutdown.");
             synchronized (sStatsdLock) {
                 if (sStatsd == null) {
@@ -352,10 +429,11 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
         if (DEBUG) Slog.d(TAG, "Setting anomaly alarm for " + timestampMs);
         final long callingToken = Binder.clearCallingIdentity();
         try {
-            // using RTC, not RTC_WAKEUP, so if device is asleep, will only fire when it awakens.
+            // using ELAPSED_REALTIME, not ELAPSED_REALTIME_WAKEUP, so if device is asleep, will
+            // only fire when it awakens.
             // This alarm is inexact, leaving its exactness completely up to the OS optimizations.
             // AlarmManager will automatically cancel any previous mAnomalyAlarmIntent alarm.
-            mAlarmManager.set(AlarmManager.RTC, timestampMs, mAnomalyAlarmIntent);
+            mAlarmManager.setExact(AlarmManager.ELAPSED_REALTIME, timestampMs, mAnomalyAlarmIntent);
         } finally {
             Binder.restoreCallingIdentity(callingToken);
         }
@@ -374,23 +452,52 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
     }
 
     @Override // Binder call
-    public void setPullingAlarms(long timestampMs, long intervalMs) {
+    public void setAlarmForSubscriberTriggering(long timestampMs) {
+        enforceCallingPermission();
+        if (DEBUG)
+            Slog.d(TAG, "Setting periodic alarm at " + timestampMs);
+        final long callingToken = Binder.clearCallingIdentity();
+        try {
+            // using ELAPSED_REALTIME, not ELAPSED_REALTIME_WAKEUP, so if device is asleep, will
+            // only fire when it awakens.
+            // This alarm is inexact, leaving its exactness completely up to the OS optimizations.
+            mAlarmManager.set(AlarmManager.ELAPSED_REALTIME, timestampMs, mPeriodicAlarmIntent);
+        } finally {
+            Binder.restoreCallingIdentity(callingToken);
+        }
+    }
+
+    @Override // Binder call
+    public void cancelAlarmForSubscriberTriggering() {
+        enforceCallingPermission();
+        if (DEBUG)
+            Slog.d(TAG, "Cancelling periodic alarm");
+        final long callingToken = Binder.clearCallingIdentity();
+        try {
+            mAlarmManager.cancel(mPeriodicAlarmIntent);
+        } finally {
+            Binder.restoreCallingIdentity(callingToken);
+        }
+    }
+
+    @Override // Binder call
+    public void setPullingAlarm(long nextPullTimeMs) {
       enforceCallingPermission();
       if (DEBUG)
-        Slog.d(TAG, "Setting pulling alarm for " + timestampMs + " every " + intervalMs + "ms");
+        Slog.d(TAG,
+            "Setting pulling alarm in about " + (nextPullTimeMs - SystemClock.elapsedRealtime()));
       final long callingToken = Binder.clearCallingIdentity();
       try {
-        // using RTC, not RTC_WAKEUP, so if device is asleep, will only fire when it awakens.
-        // This alarm is inexact, leaving its exactness completely up to the OS optimizations.
-        // TODO: totally inexact means that stats per bucket could be quite off. Is this okay?
-        mAlarmManager.setRepeating(AlarmManager.RTC, timestampMs, intervalMs, mPullingAlarmIntent);
+        // using ELAPSED_REALTIME, not ELAPSED_REALTIME_WAKEUP, so if device is asleep, will
+        // only fire when it awakens.
+        mAlarmManager.setExact(AlarmManager.ELAPSED_REALTIME, nextPullTimeMs, mPullingAlarmIntent);
       } finally {
         Binder.restoreCallingIdentity(callingToken);
       }
     }
 
     @Override // Binder call
-    public void cancelPullingAlarms() {
+    public void cancelPullingAlarm() {
       enforceCallingPermission();
       if (DEBUG)
         Slog.d(TAG, "Cancelling pulling alarm");
@@ -402,13 +509,14 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
       }
     }
 
-    private StatsLogEventWrapper[] addNetworkStats(int tag, NetworkStats stats, boolean withFGBG) {
-        List<StatsLogEventWrapper> ret = new ArrayList<>();
+    private void addNetworkStats(
+            int tag, List<StatsLogEventWrapper> ret, NetworkStats stats, boolean withFGBG) {
         int size = stats.size();
+        long elapsedNanos = SystemClock.elapsedRealtimeNanos();
         NetworkStats.Entry entry = new NetworkStats.Entry(); // For recycling
         for (int j = 0; j < size; j++) {
             stats.getValues(j, entry);
-            StatsLogEventWrapper e = new StatsLogEventWrapper(tag, withFGBG ? 6 : 5);
+            StatsLogEventWrapper e = new StatsLogEventWrapper(elapsedNanos, tag, withFGBG ? 6 : 5);
             e.writeInt(entry.uid);
             if (withFGBG) {
                 e.writeInt(entry.set);
@@ -419,7 +527,6 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
             e.writeLong(entry.txPackets);
             ret.add(e);
         }
-        return ret.toArray(new StatsLogEventWrapper[ret.size()]);
     }
 
     /**
@@ -485,220 +592,383 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
         return null;
     }
 
+    private void pullKernelWakelock(int tagId, List<StatsLogEventWrapper> pulledData) {
+        final KernelWakelockStats wakelockStats =
+                mKernelWakelockReader.readKernelWakelockStats(mTmpWakelockStats);
+        long elapsedNanos = SystemClock.elapsedRealtimeNanos();
+        for (Map.Entry<String, KernelWakelockStats.Entry> ent : wakelockStats.entrySet()) {
+            String name = ent.getKey();
+            KernelWakelockStats.Entry kws = ent.getValue();
+            StatsLogEventWrapper e = new StatsLogEventWrapper(elapsedNanos, tagId, 4);
+            e.writeString(name);
+            e.writeInt(kws.mCount);
+            e.writeInt(kws.mVersion);
+            e.writeLong(kws.mTotalTime);
+            pulledData.add(e);
+        }
+    }
+
+    private void pullWifiBytesTransfer(int tagId, List<StatsLogEventWrapper> pulledData) {
+        long token = Binder.clearCallingIdentity();
+        try {
+            // TODO: Consider caching the following call to get BatteryStatsInternal.
+            BatteryStatsInternal bs = LocalServices.getService(BatteryStatsInternal.class);
+            String[] ifaces = bs.getWifiIfaces();
+            if (ifaces.length == 0) {
+                return;
+            }
+            NetworkStatsFactory nsf = new NetworkStatsFactory();
+            // Combine all the metrics per Uid into one record.
+            NetworkStats stats =
+                    nsf.readNetworkStatsDetail(NetworkStats.UID_ALL, ifaces, NetworkStats.TAG_NONE, null)
+                            .groupedByUid();
+            addNetworkStats(tagId, pulledData, stats, false);
+        } catch (java.io.IOException e) {
+            Slog.e(TAG, "Pulling netstats for wifi bytes has error", e);
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
+    }
+
+    private void pullWifiBytesTransferByFgBg(int tagId, List<StatsLogEventWrapper> pulledData) {
+        long token = Binder.clearCallingIdentity();
+        try {
+            BatteryStatsInternal bs = LocalServices.getService(BatteryStatsInternal.class);
+            String[] ifaces = bs.getWifiIfaces();
+            if (ifaces.length == 0) {
+                return;
+            }
+            NetworkStatsFactory nsf = new NetworkStatsFactory();
+            NetworkStats stats = rollupNetworkStatsByFGBG(
+                    nsf.readNetworkStatsDetail(NetworkStats.UID_ALL, ifaces, NetworkStats.TAG_NONE, null));
+            addNetworkStats(tagId, pulledData, stats, true);
+        } catch (java.io.IOException e) {
+            Slog.e(TAG, "Pulling netstats for wifi bytes w/ fg/bg has error", e);
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
+    }
+
+    private void pullMobileBytesTransfer(int tagId, List<StatsLogEventWrapper> pulledData) {
+        long token = Binder.clearCallingIdentity();
+        try {
+            BatteryStatsInternal bs = LocalServices.getService(BatteryStatsInternal.class);
+            String[] ifaces = bs.getMobileIfaces();
+            if (ifaces.length == 0) {
+                return;
+            }
+            NetworkStatsFactory nsf = new NetworkStatsFactory();
+            // Combine all the metrics per Uid into one record.
+            NetworkStats stats =
+                    nsf.readNetworkStatsDetail(NetworkStats.UID_ALL, ifaces, NetworkStats.TAG_NONE, null)
+                            .groupedByUid();
+            addNetworkStats(tagId, pulledData, stats, false);
+        } catch (java.io.IOException e) {
+            Slog.e(TAG, "Pulling netstats for mobile bytes has error", e);
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
+    }
+
+    private void pullBluetoothBytesTransfer(int tagId, List<StatsLogEventWrapper> pulledData) {
+        BluetoothActivityEnergyInfo info = pullBluetoothData();
+        long elapsedNanos = SystemClock.elapsedRealtimeNanos();
+        if (info.getUidTraffic() != null) {
+            for (UidTraffic traffic : info.getUidTraffic()) {
+                StatsLogEventWrapper e = new StatsLogEventWrapper(elapsedNanos, tagId, 3);
+                e.writeInt(traffic.getUid());
+                e.writeLong(traffic.getRxBytes());
+                e.writeLong(traffic.getTxBytes());
+                pulledData.add(e);
+            }
+        }
+    }
+
+    private void pullMobileBytesTransferByFgBg(int tagId, List<StatsLogEventWrapper> pulledData) {
+        long token = Binder.clearCallingIdentity();
+        try {
+            BatteryStatsInternal bs = LocalServices.getService(BatteryStatsInternal.class);
+            String[] ifaces = bs.getMobileIfaces();
+            if (ifaces.length == 0) {
+                return;
+            }
+            NetworkStatsFactory nsf = new NetworkStatsFactory();
+            NetworkStats stats = rollupNetworkStatsByFGBG(
+                    nsf.readNetworkStatsDetail(NetworkStats.UID_ALL, ifaces, NetworkStats.TAG_NONE, null));
+            addNetworkStats(tagId, pulledData, stats, true);
+        } catch (java.io.IOException e) {
+            Slog.e(TAG, "Pulling netstats for mobile bytes w/ fg/bg has error", e);
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
+    }
+
+    private void pullCpuTimePerFreq(int tagId, List<StatsLogEventWrapper> pulledData) {
+        long elapsedNanos = SystemClock.elapsedRealtimeNanos();
+        for (int cluster = 0; cluster < mKernelCpuSpeedReaders.length; cluster++) {
+            long[] clusterTimeMs = mKernelCpuSpeedReaders[cluster].readAbsolute();
+            if (clusterTimeMs != null) {
+                for (int speed = clusterTimeMs.length - 1; speed >= 0; --speed) {
+                    StatsLogEventWrapper e = new StatsLogEventWrapper(elapsedNanos, tagId, 3);
+                    e.writeInt(cluster);
+                    e.writeInt(speed);
+                    e.writeLong(clusterTimeMs[speed]);
+                    pulledData.add(e);
+                }
+            }
+        }
+    }
+
+    private void pullKernelUidCpuTime(int tagId, List<StatsLogEventWrapper> pulledData) {
+        long elapsedNanos = SystemClock.elapsedRealtimeNanos();
+        mKernelUidCpuTimeReader.readAbsolute((uid, userTimeUs, systemTimeUs) -> {
+            StatsLogEventWrapper e = new StatsLogEventWrapper(elapsedNanos, tagId, 3);
+            e.writeInt(uid);
+            e.writeLong(userTimeUs);
+            e.writeLong(systemTimeUs);
+            pulledData.add(e);
+        });
+    }
+
+    private void pullKernelUidCpuFreqTime(int tagId, List<StatsLogEventWrapper> pulledData) {
+        long elapsedNanos = SystemClock.elapsedRealtimeNanos();
+        mKernelUidCpuFreqTimeReader.readAbsolute((uid, cpuFreqTimeMs) -> {
+            for (int freqIndex = 0; freqIndex < cpuFreqTimeMs.length; ++freqIndex) {
+                if(cpuFreqTimeMs[freqIndex] != 0) {
+                    StatsLogEventWrapper e = new StatsLogEventWrapper(elapsedNanos, tagId, 3);
+                    e.writeInt(uid);
+                    e.writeInt(freqIndex);
+                    e.writeLong(cpuFreqTimeMs[freqIndex]);
+                    pulledData.add(e);
+                }
+            }
+        });
+    }
+
+    private void pullKernelUidCpuClusterTime(int tagId, List<StatsLogEventWrapper> pulledData) {
+        long elapsedNanos = SystemClock.elapsedRealtimeNanos();
+        mKernelUidCpuClusterTimeReader.readAbsolute((uid, cpuClusterTimesMs) -> {
+            for (int i = 0; i < cpuClusterTimesMs.length; i++) {
+                StatsLogEventWrapper e = new StatsLogEventWrapper(elapsedNanos, tagId, 3);
+                e.writeInt(uid);
+                e.writeInt(i);
+                e.writeLong(cpuClusterTimesMs[i]);
+                pulledData.add(e);
+            }
+        });
+    }
+
+    private void pullKernelUidCpuActiveTime(int tagId, List<StatsLogEventWrapper> pulledData) {
+        long elapsedNanos = SystemClock.elapsedRealtimeNanos();
+        mKernelUidCpuActiveTimeReader.readAbsolute((uid, cpuActiveTimesMs) -> {
+            StatsLogEventWrapper e = new StatsLogEventWrapper(elapsedNanos, tagId, 2);
+            e.writeInt(uid);
+            e.writeLong((long)cpuActiveTimesMs);
+            pulledData.add(e);
+        });
+    }
+
+    private void pullWifiActivityInfo(int tagId, List<StatsLogEventWrapper> pulledData) {
+        long token = Binder.clearCallingIdentity();
+        if (mWifiManager == null) {
+            mWifiManager =
+                    IWifiManager.Stub.asInterface(ServiceManager.getService(Context.WIFI_SERVICE));
+        }
+        if (mWifiManager != null) {
+            try {
+                SynchronousResultReceiver wifiReceiver = new SynchronousResultReceiver("wifi");
+                mWifiManager.requestActivityInfo(wifiReceiver);
+                final WifiActivityEnergyInfo wifiInfo = awaitControllerInfo(wifiReceiver);
+                StatsLogEventWrapper e = new StatsLogEventWrapper(SystemClock.elapsedRealtimeNanos(), tagId, 6);
+                e.writeLong(wifiInfo.getTimeStamp());
+                e.writeInt(wifiInfo.getStackState());
+                e.writeLong(wifiInfo.getControllerTxTimeMillis());
+                e.writeLong(wifiInfo.getControllerRxTimeMillis());
+                e.writeLong(wifiInfo.getControllerIdleTimeMillis());
+                e.writeLong(wifiInfo.getControllerEnergyUsed());
+                pulledData.add(e);
+            } catch (RemoteException e) {
+                Slog.e(TAG, "Pulling wifiManager for wifi controller activity energy info has error", e);
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+    }
+
+    private void pullModemActivityInfo(int tagId, List<StatsLogEventWrapper> pulledData) {
+        long token = Binder.clearCallingIdentity();
+        if (mTelephony == null) {
+            mTelephony = TelephonyManager.from(mContext);
+        }
+        if (mTelephony != null) {
+            SynchronousResultReceiver modemReceiver = new SynchronousResultReceiver("telephony");
+            mTelephony.requestModemActivityInfo(modemReceiver);
+            final ModemActivityInfo modemInfo = awaitControllerInfo(modemReceiver);
+            StatsLogEventWrapper e = new StatsLogEventWrapper(SystemClock.elapsedRealtimeNanos(), tagId, 6);
+            e.writeLong(modemInfo.getTimestamp());
+            e.writeLong(modemInfo.getSleepTimeMillis());
+            e.writeLong(modemInfo.getIdleTimeMillis());
+            e.writeLong(modemInfo.getTxTimeMillis()[0]);
+            e.writeLong(modemInfo.getTxTimeMillis()[1]);
+            e.writeLong(modemInfo.getTxTimeMillis()[2]);
+            e.writeLong(modemInfo.getTxTimeMillis()[3]);
+            e.writeLong(modemInfo.getTxTimeMillis()[4]);
+            e.writeLong(modemInfo.getRxTimeMillis());
+            e.writeLong(modemInfo.getEnergyUsed());
+            pulledData.add(e);
+        }
+    }
+
+    private void pullBluetoothActivityInfo(int tagId, List<StatsLogEventWrapper> pulledData) {
+        BluetoothActivityEnergyInfo info = pullBluetoothData();
+        StatsLogEventWrapper e = new StatsLogEventWrapper(SystemClock.elapsedRealtimeNanos(), tagId, 6);
+        e.writeLong(info.getTimeStamp());
+        e.writeInt(info.getBluetoothStackState());
+        e.writeLong(info.getControllerTxTimeMillis());
+        e.writeLong(info.getControllerRxTimeMillis());
+        e.writeLong(info.getControllerIdleTimeMillis());
+        e.writeLong(info.getControllerEnergyUsed());
+        pulledData.add(e);
+    }
+
+    private synchronized BluetoothActivityEnergyInfo pullBluetoothData() {
+        final BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
+        if (adapter != null) {
+            SynchronousResultReceiver bluetoothReceiver = new SynchronousResultReceiver("bluetooth");
+            adapter.requestControllerActivityEnergyInfo(bluetoothReceiver);
+            return awaitControllerInfo(bluetoothReceiver);
+        } else {
+            Slog.e(TAG, "Failed to get bluetooth adapter!");
+            return null;
+        }
+    }
+
+    private void pullSystemElapsedRealtime(int tagId, List<StatsLogEventWrapper> pulledData) {
+        StatsLogEventWrapper e = new StatsLogEventWrapper(SystemClock.elapsedRealtimeNanos(), tagId, 1);
+        e.writeLong(SystemClock.elapsedRealtime());
+        pulledData.add(e);
+    }
+
+    private void pullDiskSpace(int tagId, List<StatsLogEventWrapper> pulledData) {
+        StatsLogEventWrapper e = new StatsLogEventWrapper(SystemClock.elapsedRealtimeNanos(), tagId, 3);
+        e.writeLong(mStatFsData.getAvailableBytes());
+        e.writeLong(mStatFsSystem.getAvailableBytes());
+        e.writeLong(mStatFsTemp.getAvailableBytes());
+        pulledData.add(e);
+    }
+
+    private void pullSystemUpTime(int tagId, List<StatsLogEventWrapper> pulledData) {
+        StatsLogEventWrapper e = new StatsLogEventWrapper(SystemClock.elapsedRealtimeNanos(), tagId, 1);
+        e.writeLong(SystemClock.uptimeMillis());
+        pulledData.add(e);
+    }
+
+    private void pullProcessMemoryState(int tagId, List<StatsLogEventWrapper> pulledData) {
+        List<ProcessMemoryState> processMemoryStates =
+                LocalServices.getService(ActivityManagerInternal.class)
+                        .getMemoryStateForProcesses();
+        long elapsedNanos = SystemClock.elapsedRealtimeNanos();
+        for (ProcessMemoryState processMemoryState : processMemoryStates) {
+            StatsLogEventWrapper e = new StatsLogEventWrapper(elapsedNanos, tagId, 8 /* fields */);
+            e.writeInt(processMemoryState.uid);
+            e.writeString(processMemoryState.processName);
+            e.writeInt(processMemoryState.oomScore);
+            e.writeLong(processMemoryState.pgfault);
+            e.writeLong(processMemoryState.pgmajfault);
+            e.writeLong(processMemoryState.rssInBytes);
+            e.writeLong(processMemoryState.cacheInBytes);
+            e.writeLong(processMemoryState.swapInBytes);
+            pulledData.add(e);
+        }
+    }
+
     /**
-     *
-     * Pulls wifi controller activity energy info from WiFiManager
+     * Pulls various data.
      */
     @Override // Binder call
     public StatsLogEventWrapper[] pullData(int tagId) {
         enforceCallingPermission();
         if (DEBUG)
             Slog.d(TAG, "Pulling " + tagId);
-
+        List<StatsLogEventWrapper> ret = new ArrayList<>();
         switch (tagId) {
             case StatsLog.WIFI_BYTES_TRANSFER: {
-                long token = Binder.clearCallingIdentity();
-                try {
-                    // TODO: Consider caching the following call to get BatteryStatsInternal.
-                    BatteryStatsInternal bs = LocalServices.getService(BatteryStatsInternal.class);
-                    String[] ifaces = bs.getWifiIfaces();
-                    if (ifaces.length == 0) {
-                        return null;
-                    }
-                    NetworkStatsFactory nsf = new NetworkStatsFactory();
-                    // Combine all the metrics per Uid into one record.
-                    NetworkStats stats = nsf.readNetworkStatsDetail(NetworkStats.UID_ALL, ifaces,
-                            NetworkStats.TAG_NONE, null).groupedByUid();
-                    return addNetworkStats(tagId, stats, false);
-                } catch (java.io.IOException e) {
-                    Slog.e(TAG, "Pulling netstats for wifi bytes has error", e);
-                } finally {
-                    Binder.restoreCallingIdentity(token);
-                }
+                pullWifiBytesTransfer(tagId, ret);
                 break;
             }
             case StatsLog.MOBILE_BYTES_TRANSFER: {
-                long token = Binder.clearCallingIdentity();
-                try {
-                    BatteryStatsInternal bs = LocalServices.getService(BatteryStatsInternal.class);
-                    String[] ifaces = bs.getMobileIfaces();
-                    if (ifaces.length == 0) {
-                        return null;
-                    }
-                    NetworkStatsFactory nsf = new NetworkStatsFactory();
-                    // Combine all the metrics per Uid into one record.
-                    NetworkStats stats = nsf.readNetworkStatsDetail(NetworkStats.UID_ALL, ifaces,
-                        NetworkStats.TAG_NONE, null).groupedByUid();
-                    return addNetworkStats(tagId, stats, false);
-                } catch (java.io.IOException e) {
-                    Slog.e(TAG, "Pulling netstats for mobile bytes has error", e);
-                } finally {
-                    Binder.restoreCallingIdentity(token);
-                }
+                pullMobileBytesTransfer(tagId, ret);
                 break;
             }
             case StatsLog.WIFI_BYTES_TRANSFER_BY_FG_BG: {
-                long token = Binder.clearCallingIdentity();
-                try {
-                    BatteryStatsInternal bs = LocalServices.getService(BatteryStatsInternal.class);
-                    String[] ifaces = bs.getWifiIfaces();
-                    if (ifaces.length == 0) {
-                        return null;
-                    }
-                    NetworkStatsFactory nsf = new NetworkStatsFactory();
-                    NetworkStats stats = rollupNetworkStatsByFGBG(
-                            nsf.readNetworkStatsDetail(NetworkStats.UID_ALL, ifaces,
-                            NetworkStats.TAG_NONE, null));
-                    return addNetworkStats(tagId, stats, true);
-                } catch (java.io.IOException e) {
-                    Slog.e(TAG, "Pulling netstats for wifi bytes w/ fg/bg has error", e);
-                } finally {
-                    Binder.restoreCallingIdentity(token);
-                }
+                pullWifiBytesTransferByFgBg(tagId, ret);
                 break;
             }
             case StatsLog.MOBILE_BYTES_TRANSFER_BY_FG_BG: {
-                long token = Binder.clearCallingIdentity();
-                try {
-                    BatteryStatsInternal bs = LocalServices.getService(BatteryStatsInternal.class);
-                    String[] ifaces = bs.getMobileIfaces();
-                    if (ifaces.length == 0) {
-                        return null;
-                    }
-                    NetworkStatsFactory nsf = new NetworkStatsFactory();
-                    NetworkStats stats = rollupNetworkStatsByFGBG(
-                            nsf.readNetworkStatsDetail(NetworkStats.UID_ALL, ifaces,
-                            NetworkStats.TAG_NONE, null));
-                    return addNetworkStats(tagId, stats, true);
-                } catch (java.io.IOException e) {
-                    Slog.e(TAG, "Pulling netstats for mobile bytes w/ fg/bg has error", e);
-                } finally {
-                    Binder.restoreCallingIdentity(token);
-                }
+                pullMobileBytesTransferByFgBg(tagId, ret);
+                break;
+            }
+            case StatsLog.BLUETOOTH_BYTES_TRANSFER: {
+                pullBluetoothBytesTransfer(tagId, ret);
                 break;
             }
             case StatsLog.KERNEL_WAKELOCK: {
-                final KernelWakelockStats wakelockStats =
-                        mKernelWakelockReader.readKernelWakelockStats(mTmpWakelockStats);
-                List<StatsLogEventWrapper> ret = new ArrayList();
-                for (Map.Entry<String, KernelWakelockStats.Entry> ent : wakelockStats.entrySet()) {
-                    String name = ent.getKey();
-                    KernelWakelockStats.Entry kws = ent.getValue();
-                    StatsLogEventWrapper e = new StatsLogEventWrapper(tagId, 4);
-                    e.writeString(name);
-                    e.writeInt(kws.mCount);
-                    e.writeInt(kws.mVersion);
-                    e.writeLong(kws.mTotalTime);
-                    ret.add(e);
-                }
-                return ret.toArray(new StatsLogEventWrapper[ret.size()]);
+                pullKernelWakelock(tagId, ret);
+                break;
             }
             case StatsLog.CPU_TIME_PER_FREQ: {
-                List<StatsLogEventWrapper> ret = new ArrayList();
-                for (int cluster = 0; cluster < mKernelCpuSpeedReaders.length; cluster++) {
-                    long[] clusterTimeMs = mKernelCpuSpeedReaders[cluster].readAbsolute();
-                    if (clusterTimeMs != null) {
-                        for (int speed = clusterTimeMs.length - 1; speed >= 0; --speed) {
-                            StatsLogEventWrapper e = new StatsLogEventWrapper(tagId, 3);
-                            e.writeInt(cluster);
-                            e.writeInt(speed);
-                            e.writeLong(clusterTimeMs[speed]);
-                            ret.add(e);
-                        }
-                    }
-                }
-                return ret.toArray(new StatsLogEventWrapper[ret.size()]);
+                pullCpuTimePerFreq(tagId, ret);
+                break;
             }
-            case StatsLog.WIFI_ACTIVITY_ENERGY_INFO: {
-                List<StatsLogEventWrapper> ret = new ArrayList();
-                long token = Binder.clearCallingIdentity();
-                if (mWifiManager == null) {
-                    mWifiManager = IWifiManager.Stub.asInterface(ServiceManager.getService(
-                            Context.WIFI_SERVICE));
-                }
-                if (mWifiManager != null) {
-                    try {
-                        SynchronousResultReceiver wifiReceiver = new SynchronousResultReceiver("wifi");
-                        mWifiManager.requestActivityInfo(wifiReceiver);
-                        final WifiActivityEnergyInfo wifiInfo = awaitControllerInfo(wifiReceiver);
-                        StatsLogEventWrapper e = new StatsLogEventWrapper(tagId, 6);
-                        e.writeLong(wifiInfo.getTimeStamp());
-                        e.writeInt(wifiInfo.getStackState());
-                        e.writeLong(wifiInfo.getControllerTxTimeMillis());
-                        e.writeLong(wifiInfo.getControllerRxTimeMillis());
-                        e.writeLong(wifiInfo.getControllerIdleTimeMillis());
-                        e.writeLong(wifiInfo.getControllerEnergyUsed());
-                        ret.add(e);
-                        return ret.toArray(new StatsLogEventWrapper[ret.size()]);
-                    } catch (RemoteException e) {
-                        Slog.e(TAG, "Pulling wifiManager for wifi controller activity energy info has error", e);
-                    } finally {
-                        Binder.restoreCallingIdentity(token);
-                    }
-                }
+            case StatsLog.CPU_TIME_PER_UID: {
+                pullKernelUidCpuTime(tagId, ret);
+                break;
+            }
+            case StatsLog.CPU_TIME_PER_UID_FREQ: {
+                pullKernelUidCpuFreqTime(tagId, ret);
+                break;
+            }
+            case StatsLog.CPU_CLUSTER_TIME: {
+                pullKernelUidCpuClusterTime(tagId, ret);
+                break;
+            }
+            case StatsLog.CPU_ACTIVE_TIME: {
+                pullKernelUidCpuActiveTime(tagId, ret);
+                break;
+            }
+            case StatsLog.WIFI_ACTIVITY_INFO: {
+                pullWifiActivityInfo(tagId, ret);
                 break;
             }
             case StatsLog.MODEM_ACTIVITY_INFO: {
-                List<StatsLogEventWrapper> ret = new ArrayList();
-                long token = Binder.clearCallingIdentity();
-                if (mTelephony == null) {
-                    mTelephony = TelephonyManager.from(mContext);
-                }
-                if (mTelephony != null) {
-                    SynchronousResultReceiver modemReceiver = new SynchronousResultReceiver("telephony");
-                    mTelephony.requestModemActivityInfo(modemReceiver);
-                    final ModemActivityInfo modemInfo = awaitControllerInfo(modemReceiver);
-                    StatsLogEventWrapper e = new StatsLogEventWrapper(tagId, 6);
-                    e.writeLong(modemInfo.getTimestamp());
-                    e.writeLong(modemInfo.getSleepTimeMillis());
-                    e.writeLong(modemInfo.getIdleTimeMillis());
-                    e.writeLong(modemInfo.getTxTimeMillis()[0]);
-                    e.writeLong(modemInfo.getTxTimeMillis()[1]);
-                    e.writeLong(modemInfo.getTxTimeMillis()[2]);
-                    e.writeLong(modemInfo.getTxTimeMillis()[3]);
-                    e.writeLong(modemInfo.getTxTimeMillis()[4]);
-                    e.writeLong(modemInfo.getRxTimeMillis());
-                    e.writeLong(modemInfo.getEnergyUsed());
-                    ret.add(e);
-                    return ret.toArray(new StatsLogEventWrapper[ret.size()]);
-                }
+                pullModemActivityInfo(tagId, ret);
                 break;
             }
-            case StatsLog.CPU_SUSPEND_TIME: {
-                List<StatsLogEventWrapper> ret = new ArrayList();
-                StatsLogEventWrapper e = new StatsLogEventWrapper(tagId, 1);
-                e.writeLong(SystemClock.elapsedRealtime());
-                ret.add(e);
-                return ret.toArray(new StatsLogEventWrapper[ret.size()]);
-            }
-            case StatsLog.CPU_IDLE_TIME: {
-                List<StatsLogEventWrapper> ret = new ArrayList();
-                StatsLogEventWrapper e = new StatsLogEventWrapper(tagId, 1);
-                e.writeLong(SystemClock.uptimeMillis());
-                ret.add(e);
-                return ret.toArray(new StatsLogEventWrapper[ret.size()]);
-            }
-            case StatsLog.DISK_SPACE: {
-              List<StatsLogEventWrapper> ret = new ArrayList();
-              StatsLogEventWrapper e = new StatsLogEventWrapper(tagId, 3);
-              e.writeLong(mStatFsData.getAvailableBytes());
-              e.writeLong(mStatFsSystem.getAvailableBytes());
-              e.writeLong(mStatFsTemp.getAvailableBytes());
-              ret.add(e);
-              return ret.toArray(new StatsLogEventWrapper[ret.size()]);
+            case StatsLog.BLUETOOTH_ACTIVITY_INFO: {
+                pullBluetoothActivityInfo(tagId, ret);
+                break;
             }
             case StatsLog.SYSTEM_UPTIME: {
-              List<StatsLogEventWrapper> ret = new ArrayList();
-              StatsLogEventWrapper e = new StatsLogEventWrapper(tagId, 1);
-              e.writeLong(SystemClock.uptimeMillis());
-              ret.add(e);
-              return ret.toArray(new StatsLogEventWrapper[ret.size()]);
+                pullSystemUpTime(tagId, ret);
+                break;
+            }
+            case StatsLog.SYSTEM_ELAPSED_REALTIME: {
+                pullSystemElapsedRealtime(tagId, ret);
+                break;
+            }
+            case StatsLog.DISK_SPACE: {
+                pullDiskSpace(tagId, ret);
+                break;
+            }
+            case StatsLog.PROCESS_MEMORY_STATE: {
+                pullProcessMemoryState(tagId, ret);
+                break;
             }
             default:
                 Slog.w(TAG, "No such tagId data as " + tagId);
                 return null;
         }
-        return null;
+        return ret.toArray(new StatsLogEventWrapper[ret.size()]);
     }
 
     @Override // Binder call
@@ -706,18 +976,26 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
         enforceCallingPermission();
         if (DEBUG) Slog.d(TAG, "learned that statsdReady");
         sayHiToStatsd(); // tell statsd that we're ready too and link to it
+        mContext.sendBroadcastAsUser(
+                new Intent(StatsManager.ACTION_STATSD_STARTED)
+                        .addFlags(Intent.FLAG_RECEIVER_INCLUDE_BACKGROUND),
+                UserHandle.SYSTEM,
+                android.Manifest.permission.DUMP);
     }
 
     @Override
     public void triggerUidSnapshot() {
-      enforceCallingPermission();
-      synchronized (sStatsdLock) {
-        try {
-          informAllUidsLocked(mContext);
-        } catch (RemoteException e) {
-          Slog.e(TAG, "Failed to trigger uid snapshot.", e);
+        enforceCallingPermission();
+        synchronized (sStatsdLock) {
+            final long token = Binder.clearCallingIdentity();
+            try {
+                informAllUidsLocked(mContext);
+            } catch (RemoteException e) {
+                Slog.e(TAG, "Failed to trigger uid snapshot.", e);
+            } finally {
+                restoreCallingIdentity(token);
+            }
         }
-      }
     }
 
     private void enforceCallingPermission() {
@@ -783,7 +1061,7 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
             }
             sStatsd = fetchStatsdService();
             if (sStatsd == null) {
-                Slog.w(TAG, "Could not access statsd");
+                Slog.i(TAG, "Could not yet find statsd to tell it that StatsCompanion is alive.");
                 return;
             }
             if (DEBUG) Slog.d(TAG, "Saying hi to statsd");
@@ -794,7 +1072,7 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
                     sStatsd.asBinder().linkToDeath(new StatsdDeathRecipient(), 0);
                 } catch (RemoteException e) {
                     Slog.e(TAG, "linkToDeath(StatsdDeathRecipient) failed", e);
-                    forgetEverything();
+                    forgetEverythingLocked();
                 }
                 // Setup broadcast receiver for updates.
                 IntentFilter filter = new IntentFilter(Intent.ACTION_PACKAGE_REPLACED);
@@ -823,9 +1101,10 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
                 } finally {
                     restoreCallingIdentity(token);
                 }
+                Slog.i(TAG, "Told statsd that StatsCompanionService is alive.");
             } catch (RemoteException e) {
                 Slog.e(TAG, "Failed to inform statsd that statscompanion is ready", e);
-                forgetEverything();
+                forgetEverythingLocked();
             }
         }
     }
@@ -834,18 +1113,60 @@ public class StatsCompanionService extends IStatsCompanionService.Stub {
         @Override
         public void binderDied() {
             Slog.i(TAG, "Statsd is dead - erase all my knowledge.");
-            forgetEverything();
+            synchronized (sStatsdLock) {
+                long now = SystemClock.elapsedRealtime();
+                for (Long timeMillis : mDeathTimeMillis) {
+                    long ageMillis = now - timeMillis;
+                    if (ageMillis > MILLIS_IN_A_DAY) {
+                        mDeathTimeMillis.remove(timeMillis);
+                    }
+                }
+                for (Long timeMillis : mDeletedFiles.keySet()) {
+                    long ageMillis = now - timeMillis;
+                    if (ageMillis > MILLIS_IN_A_DAY * 7) {
+                        mDeletedFiles.remove(timeMillis);
+                    }
+                }
+                mDeathTimeMillis.add(now);
+                if (mDeathTimeMillis.size() >= DEATH_THRESHOLD) {
+                    mDeathTimeMillis.clear();
+                    File[] configs = FileUtils.listFilesOrEmpty(new File(CONFIG_DIR));
+                    if (configs.length > 0) {
+                        String fileName = configs[0].getName();
+                        if (configs[0].delete()) {
+                            mDeletedFiles.put(now, fileName);
+                        }
+                    }
+                }
+                forgetEverythingLocked();
+            }
         }
     }
 
-    private void forgetEverything() {
+    private void forgetEverythingLocked() {
+        sStatsd = null;
+        mContext.unregisterReceiver(mAppUpdateReceiver);
+        mContext.unregisterReceiver(mUserUpdateReceiver);
+        mContext.unregisterReceiver(mShutdownEventReceiver);
+        cancelAnomalyAlarm();
+        cancelPullingAlarm();
+    }
+
+    @Override
+    protected void dump(FileDescriptor fd, PrintWriter writer, String[] args) {
+        if (!DumpUtils.checkDumpPermission(mContext, TAG, writer)) return;
+
         synchronized (sStatsdLock) {
-            sStatsd = null;
-            mContext.unregisterReceiver(mAppUpdateReceiver);
-            mContext.unregisterReceiver(mUserUpdateReceiver);
-            mContext.unregisterReceiver(mShutdownEventReceiver);
-            cancelAnomalyAlarm();
-            cancelPullingAlarms();
+            writer.println("Number of configuration files deleted: " + mDeletedFiles.size());
+            if (mDeletedFiles.size() > 0) {
+                writer.println("  timestamp, deleted file name");
+            }
+            long lastBootMillis =
+                    SystemClock.currentThreadTimeMillis() - SystemClock.elapsedRealtime();
+            for (Long elapsedMillis : mDeletedFiles.keySet()) {
+                long deletionMillis = lastBootMillis + elapsedMillis;
+                writer.println("  " + deletionMillis + ", " + mDeletedFiles.get(elapsedMillis));
+            }
         }
     }
 

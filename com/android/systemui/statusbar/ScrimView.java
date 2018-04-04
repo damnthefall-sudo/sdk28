@@ -321,18 +321,6 @@ public class ScrimView extends View implements ConfigurationController.Configura
         return mViewAlpha;
     }
 
-    public void animateViewAlpha(float alpha, long durationOut, Interpolator interpolator) {
-        if (mAlphaAnimator != null) {
-            mAlphaAnimator.cancel();
-        }
-        mAlphaAnimator = ValueAnimator.ofFloat(getViewAlpha(), alpha);
-        mAlphaAnimator.addUpdateListener(mAlphaUpdateListener);
-        mAlphaAnimator.addListener(mClearAnimatorListener);
-        mAlphaAnimator.setInterpolator(interpolator);
-        mAlphaAnimator.setDuration(durationOut);
-        mAlphaAnimator.start();
-    }
-
     public void setExcludedArea(Rect area) {
         if (area == null) {
             mHasExcludedArea = false;

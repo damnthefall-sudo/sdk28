@@ -106,14 +106,17 @@ public final class GsmSMSDispatcher extends SMSDispatcher {
     }
 
     @Override
-    protected boolean shouldBlockSms() {
-        return SMSDispatcherUtil.shouldBlockSms(isCdmaMo(), mPhone);
+    protected boolean shouldBlockSmsForEcbm() {
+        // There is no such thing as ECBM for GSM. This only applies to CDMA.
+        return false;
     }
 
     @Override
     protected SmsMessageBase.SubmitPduBase getSubmitPdu(String scAddr, String destAddr,
-            String message, boolean statusReportRequested, SmsHeader smsHeader) {
-        return SMSDispatcherUtil.getSubmitPduGsm(scAddr, destAddr, message, statusReportRequested);
+            String message, boolean statusReportRequested, SmsHeader smsHeader, int priority,
+            int validityPeriod) {
+        return SMSDispatcherUtil.getSubmitPduGsm(scAddr, destAddr, message, statusReportRequested,
+                validityPeriod);
     }
 
     @Override

@@ -18,19 +18,19 @@ package com.android.media;
 
 import static android.content.Context.NOTIFICATION_SERVICE;
 
+import android.app.Notification;
 import android.app.NotificationManager;
+import android.content.Context;
 import android.content.Intent;
-import android.content.pm.PackageManager;
-import android.content.pm.ResolveInfo;
-import android.media.MediaPlayerBase.PlaybackListener;
+import android.media.MediaPlayerBase;
+import android.media.MediaPlayerBase.PlayerEventCallback;
 import android.media.MediaSession2;
 import android.media.MediaSessionService2;
 import android.media.MediaSessionService2.MediaNotification;
-import android.media.PlaybackState2;
-import android.media.session.PlaybackState;
+import android.media.SessionToken2;
+import android.media.SessionToken2.TokenType;
 import android.media.update.MediaSessionService2Provider;
 import android.os.IBinder;
-import android.os.Looper;
 import android.support.annotation.GuardedBy;
 import android.util.Log;
 
@@ -38,10 +38,10 @@ import android.util.Log;
 public class MediaSessionService2Impl implements MediaSessionService2Provider {
 
     private static final String TAG = "MPSessionService"; // to meet 23 char limit in Log tag
-    private static final boolean DEBUG = true; // TODO(jaewan): Change this.
+    private static final boolean DEBUG = true; // TODO(jaewan): Change this. (b/74094611)
 
     private final MediaSessionService2 mInstance;
-    private final PlaybackListener mListener = new SessionServicePlaybackListener();
+    private final PlayerEventCallback mCallback = new SessionServiceEventCallback();
 
     private final Object mLock = new Object();
     @GuardedBy("mLock")
@@ -71,7 +71,7 @@ public class MediaSessionService2Impl implements MediaSessionService2Provider {
     }
 
     @Override
-    public MediaNotification onUpdateNotification_impl(PlaybackState2 state) {
+    public MediaNotification onUpdateNotification_impl() {
         // Provide default notification UI later.
         return null;
     }
@@ -82,58 +82,48 @@ public class MediaSessionService2Impl implements MediaSessionService2Provider {
                 NOTIFICATION_SERVICE);
         mStartSelfIntent = new Intent(mInstance, mInstance.getClass());
 
-        Intent serviceIntent = createServiceIntent();
-        ResolveInfo resolveInfo = mInstance.getPackageManager()
-                .resolveService(serviceIntent, PackageManager.GET_META_DATA);
-        String id;
-        if (resolveInfo == null || resolveInfo.serviceInfo == null) {
-            throw new IllegalArgumentException("service " + mInstance + " doesn't implement"
-                    + serviceIntent.getAction());
-        } else if (resolveInfo.serviceInfo.metaData == null) {
-            if (DEBUG) {
-                Log.d(TAG, "Failed to resolve ID for " + mInstance + ". Using empty id");
-            }
-            id = "";
-        } else {
-            id = resolveInfo.serviceInfo.metaData.getString(
-                    MediaSessionService2.SERVICE_META_DATA, "");
+        SessionToken2 token = new SessionToken2(mInstance, mInstance.getPackageName(),
+                mInstance.getClass().getName());
+        if (token.getType() != getSessionType()) {
+            throw new RuntimeException("Expected session service, but was " + token.getType());
         }
-        mSession = mInstance.onCreateSession(id);
-        if (mSession == null || !id.equals(mSession.getToken().getId())) {
-            throw new RuntimeException("Expected session with id " + id + ", but got " + mSession);
+        mSession = mInstance.onCreateSession(token.getId());
+        if (mSession == null || !token.getId().equals(mSession.getToken().getId())) {
+            throw new RuntimeException("Expected session with id " + token.getId()
+                    + ", but got " + mSession);
         }
         // TODO(jaewan): Uncomment here.
-        // mSession.addPlaybackListener(mListener, mSession.getExecutor());
+        // mSession.registerPlayerEventCallback(mCallback, mSession.getExecutor());
     }
 
-    Intent createServiceIntent() {
-        Intent serviceIntent = new Intent(mInstance, mInstance.getClass());
-        serviceIntent.setAction(MediaSessionService2.SERVICE_INTERFACE);
-        return serviceIntent;
+    @TokenType int getSessionType() {
+        return SessionToken2.TYPE_SESSION_SERVICE;
     }
 
     public IBinder onBind_impl(Intent intent) {
         if (MediaSessionService2.SERVICE_INTERFACE.equals(intent.getAction())) {
-            return mSession.getToken().getSessionBinder().asBinder();
+            return ((MediaSession2Impl) mSession.getProvider()).getSessionStub().asBinder();
         }
         return null;
     }
 
-    private void updateNotification(PlaybackState2 state) {
-        MediaNotification mediaNotification = mInstance.onUpdateNotification(state);
+    private void updateNotification(int playerState) {
+        MediaNotification mediaNotification = mInstance.onUpdateNotification();
         if (mediaNotification == null) {
             return;
         }
-        switch((int) state.getState()) {
-            case PlaybackState.STATE_PLAYING:
+        switch(playerState) {
+            case MediaPlayerBase.PLAYER_STATE_PLAYING:
                 if (!mIsRunningForeground) {
                     mIsRunningForeground = true;
                     mInstance.startForegroundService(mStartSelfIntent);
-                    mInstance.startForeground(mediaNotification.id, mediaNotification.notification);
+                    mInstance.startForeground(mediaNotification.getNotificationId(),
+                            mediaNotification.getNotification());
                     return;
                 }
                 break;
-            case PlaybackState.STATE_STOPPED:
+            case MediaPlayerBase.PLAYER_STATE_IDLE:
+            case MediaPlayerBase.PLAYER_STATE_ERROR:
                 if (mIsRunningForeground) {
                     mIsRunningForeground = false;
                     mInstance.stopForeground(true);
@@ -141,23 +131,39 @@ public class MediaSessionService2Impl implements MediaSessionService2Provider {
                 }
                 break;
         }
-        mNotificationManager.notify(mediaNotification.id, mediaNotification.notification);
+        mNotificationManager.notify(mediaNotification.getNotificationId(),
+                mediaNotification.getNotification());
     }
 
-    private class SessionServicePlaybackListener implements PlaybackListener {
+    private class SessionServiceEventCallback extends PlayerEventCallback {
         @Override
-        public void onPlaybackChanged(PlaybackState2 state) {
-            if (state == null) {
-                Log.w(TAG, "Ignoring null playback state");
-                return;
+        public void onPlayerStateChanged(MediaPlayerBase player, int state) {
+            // TODO: Implement this
+            return;
+        }
+    }
+
+    public static class MediaNotificationImpl implements MediaNotificationProvider {
+        private int mNotificationId;
+        private Notification mNotification;
+
+        public MediaNotificationImpl(MediaNotification instance, int notificationId,
+                Notification notification) {
+            if (notification == null) {
+                throw new IllegalArgumentException("notification shouldn't be null");
             }
-            MediaSession2Impl impl = (MediaSession2Impl) mSession.getProvider();
-            if (impl.getHandler().getLooper() != Looper.myLooper()) {
-                Log.w(TAG, "Ignoring " + state + ". Expected " + impl.getHandler().getLooper()
-                        + " but " + Looper.myLooper());
-                return;
-            }
-            updateNotification(state);
+            mNotificationId = notificationId;
+            mNotification = notification;
+        }
+
+        @Override
+        public int getNotificationId_impl() {
+            return mNotificationId;
+        }
+
+        @Override
+        public Notification getNotification_impl() {
+            return mNotification;
         }
     }
 }

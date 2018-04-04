@@ -23,6 +23,8 @@ import static android.Manifest.permission.WRITE_SECURE_SETTINGS;
 
 import android.Manifest;
 import android.annotation.NonNull;
+import android.annotation.Nullable;
+import android.annotation.RequiresFeature;
 import android.annotation.RequiresPermission;
 import android.annotation.SuppressLint;
 import android.annotation.SystemApi;
@@ -30,6 +32,7 @@ import android.annotation.SystemService;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -38,11 +41,16 @@ import android.os.Message;
 import android.os.Process;
 import android.os.RemoteException;
 import android.os.UserHandle;
+import android.provider.Settings;
+import android.text.TextUtils;
+import android.util.ArraySet;
 import android.util.Log;
 import com.android.internal.location.ProviderProperties;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Set;
 
 /**
  * This class provides access to the system location services.  These
@@ -60,6 +68,7 @@ import java.util.List;
  * location will be obfuscated to a coarse level of accuracy.
  */
 @SystemService(Context.LOCATION_SERVICE)
+@RequiresFeature(PackageManager.FEATURE_LOCATION)
 public class LocationManager {
     private static final String TAG = "LocationManager";
 
@@ -228,10 +237,60 @@ public class LocationManager {
         "android.location.HIGH_POWER_REQUEST_CHANGE";
 
     /**
-     * The value returned by {@link LocationManager#getGnssHardwareModelName()} when the hardware
-     * does not support providing the actual value.
+     * Broadcast intent action for Settings app to inject a footer at the bottom of location
+     * settings.
+     *
+     * <p>This broadcast is used for two things:
+     * <ol>
+     *     <li>For receivers to inject a footer with provided text. This is for use only by apps
+     *         that are included in the system image. </li>
+     *     <li>For receivers to know their footer is injected under location settings.</li>
+     * </ol>
+     *
+     * <p>To inject a footer to location settings, you must declare a broadcast receiver of
+     * {@link LocationManager#SETTINGS_FOOTER_DISPLAYED_ACTION} in the manifest as so:
+     * <pre>
+     *     &lt;receiver android:name="com.example.android.footer.MyFooterInjector"&gt;
+     *         &lt;intent-filter&gt;
+     *             &lt;action android:name="com.android.settings.location.INJECT_FOOTER" /&gt;
+     *         &lt;/intent-filter&gt;
+     *         &lt;meta-data
+     *             android:name="com.android.settings.location.FOOTER_STRING"
+     *             android:resource="@string/my_injected_footer_string" /&gt;
+     *     &lt;/receiver&gt;
+     * </pre>
+     *
+     * <p>On entering location settings, Settings app will send a
+     * {@link #SETTINGS_FOOTER_DISPLAYED_ACTION} broadcast to receivers whose footer is successfully
+     * injected. On leaving location settings, the footer becomes not visible to users. Settings app
+     * will send a {@link #SETTINGS_FOOTER_REMOVED_ACTION} broadcast to those receivers.
+     *
+     * @hide
      */
-    public static final String GNSS_HARDWARE_MODEL_NAME_UNKNOWN = "Model Name Unknown";
+    public static final String SETTINGS_FOOTER_DISPLAYED_ACTION =
+            "com.android.settings.location.DISPLAYED_FOOTER";
+
+    /**
+     * Broadcast intent action when location settings footer is not visible to users.
+     *
+     * <p>See {@link #SETTINGS_FOOTER_DISPLAYED_ACTION} for more detail on how to use.
+     *
+     * @hide
+     */
+    public static final String SETTINGS_FOOTER_REMOVED_ACTION =
+            "com.android.settings.location.REMOVED_FOOTER";
+
+    /**
+     * Metadata name for {@link LocationManager#SETTINGS_FOOTER_DISPLAYED_ACTION} broadcast
+     * receivers to specify a string resource id as location settings footer text. This is for use
+     * only by apps that are included in the system image.
+     *
+     * <p>See {@link #SETTINGS_FOOTER_DISPLAYED_ACTION} for more detail on how to use.
+     *
+     * @hide
+     */
+    public static final String METADATA_SETTINGS_FOOTER_STRING =
+            "com.android.settings.location.FOOTER_STRING";
 
     // Map from LocationListeners to their associated ListenerTransport objects
     private HashMap<LocationListener,ListenerTransport> mListeners =
@@ -1184,18 +1243,46 @@ public class LocationManager {
      *
      * @param enabled true to enable location. false to disable location
      * @param userHandle the user to set
-     * @return true if the value was set, false on database errors
      *
      * @hide
      */
     @SystemApi
     @RequiresPermission(WRITE_SECURE_SETTINGS)
     public void setLocationEnabledForUser(boolean enabled, UserHandle userHandle) {
-        try {
-            mService.setLocationEnabledForUser(enabled, userHandle.getIdentifier());
-        } catch (RemoteException e) {
-            throw e.rethrowFromSystemServer();
+        final List<String> allProvidersList = getAllProviders();
+        // Update all providers on device plus gps and network provider when disabling location.
+        Set<String> allProvidersSet = new ArraySet<>(allProvidersList.size() + 2);
+        allProvidersSet.addAll(allProvidersList);
+        // When disabling location, disable gps and network provider that could have been enabled by
+        // location mode api.
+        if (enabled == false) {
+            allProvidersSet.add(GPS_PROVIDER);
+            allProvidersSet.add(NETWORK_PROVIDER);
         }
+        if (allProvidersSet.isEmpty()) {
+            return;
+        }
+        // to ensure thread safety, we write the provider name with a '+' or '-'
+        // and let the SettingsProvider handle it rather than reading and modifying
+        // the list of enabled providers.
+        final String prefix = enabled ? "+" : "-";
+        StringBuilder locationProvidersAllowed = new StringBuilder();
+        for (String provider : allProvidersSet) {
+            checkProvider(provider);
+            if (provider.equals(PASSIVE_PROVIDER)) {
+                continue;
+            }
+            locationProvidersAllowed.append(prefix);
+            locationProvidersAllowed.append(provider);
+            locationProvidersAllowed.append(",");
+        }
+        // Remove the trailing comma
+        locationProvidersAllowed.setLength(locationProvidersAllowed.length() - 1);
+        Settings.Secure.putStringForUser(
+                mContext.getContentResolver(),
+                Settings.Secure.LOCATION_PROVIDERS_ALLOWED,
+                locationProvidersAllowed.toString(),
+                userHandle.getIdentifier());
     }
 
     /**
@@ -1208,11 +1295,22 @@ public class LocationManager {
      */
     @SystemApi
     public boolean isLocationEnabledForUser(UserHandle userHandle) {
-        try {
-            return mService.isLocationEnabledForUser(userHandle.getIdentifier());
-        } catch (RemoteException e) {
-            throw e.rethrowFromSystemServer();
+        final String allowedProviders = Settings.Secure.getStringForUser(
+                mContext.getContentResolver(), Settings.Secure.LOCATION_PROVIDERS_ALLOWED,
+                userHandle.getIdentifier());
+        if (allowedProviders == null) {
+            return false;
         }
+        final List<String> providerList = Arrays.asList(allowedProviders.split(","));
+        for(String provider : getAllProviders()) {
+            if (provider.equals(PASSIVE_PROVIDER)) {
+                continue;
+            }
+            if (providerList.contains(provider)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -1236,13 +1334,7 @@ public class LocationManager {
      * @throws IllegalArgumentException if provider is null
      */
     public boolean isProviderEnabled(String provider) {
-        checkProvider(provider);
-
-        try {
-            return mService.isProviderEnabled(provider);
-        } catch (RemoteException e) {
-            throw e.rethrowFromSystemServer();
-        }
+        return isProviderEnabledForUser(provider, Process.myUserHandle());
     }
 
     /**
@@ -1270,12 +1362,9 @@ public class LocationManager {
     @SystemApi
     public boolean isProviderEnabledForUser(String provider, UserHandle userHandle) {
         checkProvider(provider);
-
-        try {
-            return mService.isProviderEnabledForUser(provider, userHandle.getIdentifier());
-        } catch (RemoteException e) {
-            throw e.rethrowFromSystemServer();
-        }
+        String allowedProviders = Settings.Secure.getStringForUser(mContext.getContentResolver(),
+                Settings.Secure.LOCATION_PROVIDERS_ALLOWED, userHandle.getIdentifier());
+        return TextUtils.delimitedStringContains(allowedProviders, ',', provider);
     }
 
     /**
@@ -1294,13 +1383,16 @@ public class LocationManager {
     public boolean setProviderEnabledForUser(
             String provider, boolean enabled, UserHandle userHandle) {
         checkProvider(provider);
-
-        try {
-            return mService.setProviderEnabledForUser(
-                    provider, enabled, userHandle.getIdentifier());
-        } catch (RemoteException e) {
-            throw e.rethrowFromSystemServer();
+        // to ensure thread safety, we write the provider name with a '+' or '-'
+        // and let the SettingsProvider handle it rather than reading and modifying
+        // the list of enabled providers.
+        if (enabled) {
+            provider = "+" + provider;
+        } else {
+            provider = "-" + provider;
         }
+        return Settings.Secure.putStringForUser(mContext.getContentResolver(),
+                Settings.Secure.LOCATION_PROVIDERS_ALLOWED, provider, userHandle.getIdentifier());
     }
 
     /**
@@ -2109,7 +2201,9 @@ public class LocationManager {
     /**
      * Returns the model year of the GNSS hardware and software build.
      *
-     * May return 0 if the model year is less than 2016.
+     * <p> More details, such as build date, may be available in {@link #getGnssHardwareModelName()}.
+     *
+     * <p> May return 0 if the model year is less than 2016.
      */
     public int getGnssYearOfHardware() {
         try {
@@ -2123,10 +2217,12 @@ public class LocationManager {
      * Returns the Model Name (including Vendor and Hardware/Software Version) of the GNSS hardware
      * driver.
      *
-     * Will return {@link LocationManager#GNSS_HARDWARE_MODEL_NAME_UNKNOWN} when the GNSS hardware
-     * abstraction layer does not support providing this value.
+     * <p> No device-specific serial number or ID is returned from this API.
+     *
+     * <p> Will return null when the GNSS hardware abstraction layer does not support providing
+     * this value.
      */
-    @NonNull
+    @Nullable
     public String getGnssHardwareModelName() {
         try {
             return mService.getGnssHardwareModelName();

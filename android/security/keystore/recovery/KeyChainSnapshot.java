@@ -18,11 +18,14 @@ package android.security.keystore.recovery;
 
 import android.annotation.NonNull;
 import android.annotation.SystemApi;
+import android.os.BadParcelableException;
 import android.os.Parcel;
 import android.os.Parcelable;
 
 import com.android.internal.util.Preconditions;
 
+import java.security.cert.CertPath;
+import java.security.cert.CertificateException;
 import java.util.List;
 
 /**
@@ -45,6 +48,22 @@ import java.util.List;
  */
 @SystemApi
 public final class KeyChainSnapshot implements Parcelable {
+
+    // IMPORTANT! PLEASE READ!
+    // -----------------------
+    // If you edit this file (e.g., to add new fields), please MAKE SURE to also do the following:
+    // - Update the #writeToParcel(Parcel) method below
+    // - Update the #(Parcel) constructor below
+    // - Update android.security.keystore.recovery.KeyChainSnapshotTest to make sure nobody
+    //     accidentally breaks your fields in the Parcel in the future.
+    // - Update com.android.server.locksettings.recoverablekeystore.serialization
+    //     .KeyChainSnapshotSerializer to correctly serialize your new field
+    // - Update com.android.server.locksettings.recoverablekeystore.serialization
+    //     .KeyChainSnapshotSerializer to correctly deserialize your new field
+    // - Update com.android.server.locksettings.recoverablekeystore.serialization
+    //     .KeychainSnapshotSerializerTest to make sure nobody breaks serialization of your field
+    //     in the future.
+
     private static final int DEFAULT_MAX_ATTEMPTS = 10;
     private static final long DEFAULT_COUNTER_ID = 1L;
 
@@ -52,43 +71,29 @@ public final class KeyChainSnapshot implements Parcelable {
     private int mMaxAttempts = DEFAULT_MAX_ATTEMPTS;
     private long mCounterId = DEFAULT_COUNTER_ID;
     private byte[] mServerParams;
-    private byte[] mPublicKey;
+    private byte[] mPublicKey;  // The raw public key bytes used
+    private RecoveryCertPath mCertPath;  // The cert path including necessary intermediate certs
     private List<KeyChainProtectionParams> mKeyChainProtectionParams;
     private List<WrappedApplicationKey> mEntryRecoveryData;
     private byte[] mEncryptedRecoveryKeyBlob;
 
     /**
-     * @hide
-     * Deprecated, consider using builder.
+     * Use builder to create an instance of the class.
      */
-    public KeyChainSnapshot(
-            int snapshotVersion,
-            @NonNull List<KeyChainProtectionParams> keyChainProtectionParams,
-            @NonNull List<WrappedApplicationKey> wrappedApplicationKeys,
-            @NonNull byte[] encryptedRecoveryKeyBlob) {
-        mSnapshotVersion = snapshotVersion;
-        mKeyChainProtectionParams =
-                Preconditions.checkCollectionElementsNotNull(keyChainProtectionParams,
-                        "KeyChainProtectionParams");
-        mEntryRecoveryData = Preconditions.checkCollectionElementsNotNull(wrappedApplicationKeys,
-                "wrappedApplicationKeys");
-        mEncryptedRecoveryKeyBlob = Preconditions.checkNotNull(encryptedRecoveryKeyBlob);
-    }
-
     private KeyChainSnapshot() {
 
     }
 
     /**
-     * Snapshot version for given account. It is incremented when user secret or list of application
-     * keys changes.
+     * Snapshot version for given recovery agent. It is incremented when user secret or list of
+     * application keys changes.
      */
     public int getSnapshotVersion() {
         return mSnapshotVersion;
     }
 
     /**
-     * Number of user secret guesses allowed during Keychain recovery.
+     * Number of user secret guesses allowed during KeyChain recovery.
      */
     public int getMaxAttempts() {
         return mMaxAttempts;
@@ -111,11 +116,26 @@ public final class KeyChainSnapshot implements Parcelable {
     /**
      * Public key used to encrypt {@code encryptedRecoveryKeyBlob}.
      *
-     * See implementation for binary key format
+     * See implementation for binary key format.
+     *
+     * @deprecated Use {@link #getTrustedHardwareCertPath} instead.
      */
-    // TODO: document key format.
+    @Deprecated
     public @NonNull byte[] getTrustedHardwarePublicKey() {
         return mPublicKey;
+    }
+
+    /**
+     * CertPath containing the public key used to encrypt {@code encryptedRecoveryKeyBlob}.
+     */
+    public @NonNull CertPath getTrustedHardwareCertPath() {
+        try {
+            return mCertPath.getCertPath();
+        } catch (CertificateException e) {
+            // Rethrow an unchecked exception as it should not happen. If such an issue exists,
+            // an exception should have been thrown during service initialization.
+            throw new BadParcelableException(e);
+        }
     }
 
     /**
@@ -159,7 +179,7 @@ public final class KeyChainSnapshot implements Parcelable {
         private KeyChainSnapshot mInstance = new KeyChainSnapshot();
 
         /**
-         * Snapshot version for given account.
+         * Snapshot version for the recovery agent.
          *
          * @param snapshotVersion The snapshot version
          * @return This builder.
@@ -207,21 +227,38 @@ public final class KeyChainSnapshot implements Parcelable {
          *
          * @param publicKey The public key
          * @return This builder.
+         * @deprecated Use {@link #setTrustedHardwareCertPath} instead.
          */
+        @Deprecated
         public Builder setTrustedHardwarePublicKey(byte[] publicKey) {
             mInstance.mPublicKey = publicKey;
             return this;
         }
 
         /**
+         * Sets CertPath used to validate the trusted hardware public key. The CertPath should
+         * contain a certificate of the trusted hardware public key and any necessary intermediate
+         * certificates.
+         *
+         * @param certPath The certificate path
+         * @throws CertificateException if the given certificate path cannot be encoded properly
+         * @return This builder.
+         */
+        public Builder setTrustedHardwareCertPath(@NonNull CertPath certPath)
+                throws CertificateException {
+            mInstance.mCertPath = RecoveryCertPath.createRecoveryCertPath(certPath);
+            return this;
+        }
+
+        /**
          * Sets UI and key derivation parameters
          *
-         * @param recoveryMetadata The UI and key derivation parameters
+         * @param keyChainProtectionParams The UI and key derivation parameters
          * @return This builder.
          */
         public Builder setKeyChainProtectionParams(
-                @NonNull List<KeyChainProtectionParams> recoveryMetadata) {
-            mInstance.mKeyChainProtectionParams = recoveryMetadata;
+                @NonNull List<KeyChainProtectionParams> keyChainProtectionParams) {
+            mInstance.mKeyChainProtectionParams = keyChainProtectionParams;
             return this;
         }
 
@@ -237,7 +274,7 @@ public final class KeyChainSnapshot implements Parcelable {
         }
 
         /**
-         * Sets recovery key blob
+         * Sets recovery key blob.
          *
          * @param encryptedRecoveryKeyBlob The recovery key blob.
          * @return This builder.
@@ -252,16 +289,16 @@ public final class KeyChainSnapshot implements Parcelable {
          * Creates a new {@link KeyChainSnapshot} instance.
          *
          * @return new instance
-         * @throws NullPointerException if some required fields were not set.
+         * @throws NullPointerException if some of the required fields were not set.
          */
         @NonNull public KeyChainSnapshot build() {
             Preconditions.checkCollectionElementsNotNull(mInstance.mKeyChainProtectionParams,
-                    "recoveryMetadata");
+                    "keyChainProtectionParams");
             Preconditions.checkCollectionElementsNotNull(mInstance.mEntryRecoveryData,
                     "entryRecoveryData");
             Preconditions.checkNotNull(mInstance.mEncryptedRecoveryKeyBlob);
             Preconditions.checkNotNull(mInstance.mServerParams);
-            Preconditions.checkNotNull(mInstance.mPublicKey);
+            Preconditions.checkNotNull(mInstance.mCertPath);
             return mInstance;
         }
     }
@@ -276,6 +313,7 @@ public final class KeyChainSnapshot implements Parcelable {
         out.writeLong(mCounterId);
         out.writeByteArray(mServerParams);
         out.writeByteArray(mPublicKey);
+        out.writeTypedObject(mCertPath, /* no flags */ 0);
     }
 
     /**
@@ -290,6 +328,7 @@ public final class KeyChainSnapshot implements Parcelable {
         mCounterId = in.readLong();
         mServerParams = in.createByteArray();
         mPublicKey = in.createByteArray();
+        mCertPath = in.readTypedObject(RecoveryCertPath.CREATOR);
     }
 
     @Override

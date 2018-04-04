@@ -23,10 +23,10 @@ import static android.view.SurfaceControl.Transaction;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_ANIM;
 import static com.android.server.wm.WindowManagerDebugConfig.TAG_WITH_CLASS_NAME;
 import static com.android.server.wm.WindowManagerDebugConfig.TAG_WM;
-import static com.android.server.wm.proto.WindowContainerProto.CONFIGURATION_CONTAINER;
-import static com.android.server.wm.proto.WindowContainerProto.ORIENTATION;
-import static com.android.server.wm.proto.WindowContainerProto.SURFACE_ANIMATOR;
-import static com.android.server.wm.proto.WindowContainerProto.VISIBLE;
+import static com.android.server.wm.WindowContainerProto.CONFIGURATION_CONTAINER;
+import static com.android.server.wm.WindowContainerProto.ORIENTATION;
+import static com.android.server.wm.WindowContainerProto.SURFACE_ANIMATOR;
+import static com.android.server.wm.WindowContainerProto.VISIBLE;
 
 import android.annotation.CallSuper;
 import android.content.res.Configuration;
@@ -100,11 +100,16 @@ class WindowContainer<E extends WindowContainer> extends ConfigurationContainer<
     /** Total number of elements in this subtree, including our own hierarchy element. */
     private int mTreeWeight = 1;
 
+    /**
+     * Indicates whether we are animating and have committed the transaction to reparent our 
+     * surface to the animation leash
+     */
+    private boolean mCommittedReparentToAnimationLeash;
+
     WindowContainer(WindowManagerService service) {
         mService = service;
         mPendingTransaction = service.mTransactionFactory.make();
-        mSurfaceAnimator = new SurfaceAnimator(this, this::onAnimationFinished,
-                service.mAnimator::addAfterPrepareSurfacesRunnable, service);
+        mSurfaceAnimator = new SurfaceAnimator(this, this::onAnimationFinished, service);
     }
 
     @Override
@@ -125,7 +130,7 @@ class WindowContainer<E extends WindowContainer> extends ConfigurationContainer<
     @Override
     public void onConfigurationChanged(Configuration newParentConfig) {
         super.onConfigurationChanged(newParentConfig);
-        updateSurfacePosition(getPendingTransaction());
+        updateSurfacePosition();
         scheduleAnimation();
     }
 
@@ -280,8 +285,16 @@ class WindowContainer<E extends WindowContainer> extends ConfigurationContainer<
         }
 
         if (mSurfaceControl != null) {
-            destroyAfterPendingTransaction(mSurfaceControl);
+            mPendingTransaction.destroy(mSurfaceControl);
+
+            // Merge to parent transaction to ensure the transactions on this WindowContainer are
+            // applied in native even if WindowContainer is removed.
+            if (mParent != null) {
+                mParent.getPendingTransaction().merge(mPendingTransaction);
+            }
+
             mSurfaceControl = null;
+            scheduleAnimation();
         }
 
         if (mParent != null) {
@@ -400,6 +413,10 @@ class WindowContainer<E extends WindowContainer> extends ConfigurationContainer<
                 }
                 break;
             default:
+                // TODO: Removing the child before reinserting requires the caller to provide a
+                //       position that takes into account the removed child (if the index of the
+                //       child < position, then the position should be adjusted). We should consider
+                //       doing this adjustment here and remove any adjustments in the callers.
                 mChildren.remove(child);
                 mChildren.add(position, child);
         }
@@ -461,8 +478,20 @@ class WindowContainer<E extends WindowContainer> extends ConfigurationContainer<
     void onResize() {
         for (int i = mChildren.size() - 1; i >= 0; --i) {
             final WindowContainer wc = mChildren.get(i);
-            wc.onResize();
+            wc.onParentResize();
         }
+    }
+
+    void onParentResize() {
+        // In the case this container has specified its own bounds, a parent resize will not
+        // affect its bounds. Any relevant changes will be propagated through changes to the
+        // Configuration override.
+        if (hasOverrideBounds()) {
+            return;
+        }
+
+        // Default implementation is to treat as resize on self.
+        onResize();
     }
 
     void onMovedByResize() {
@@ -958,7 +987,7 @@ class WindowContainer<E extends WindowContainer> extends ConfigurationContainer<
 
     /**
      * Write to a protocol buffer output stream. Protocol buffer message definition is at
-     * {@link com.android.server.wm.proto.WindowContainerProto}.
+     * {@link com.android.server.wm.WindowContainerProto}.
      *
      * @param proto     Stream to write the WindowContainer object to.
      * @param fieldId   Field Id of the WindowContainer as defined in the parent message.
@@ -1025,9 +1054,21 @@ class WindowContainer<E extends WindowContainer> extends ConfigurationContainer<
      */
     void prepareSurfaces() {
         SurfaceControl.mergeToGlobalTransaction(getPendingTransaction());
+
+        // If a leash has been set when the transaction was committed, then the leash reparent has
+        // been committed.
+        mCommittedReparentToAnimationLeash = mSurfaceAnimator.hasLeash();
         for (int i = 0; i < mChildren.size(); i++) {
             mChildren.get(i).prepareSurfaces();
         }
+    }
+
+    /**
+     * @return true if the reparent to animation leash transaction has been committed, false
+     * otherwise.
+     */
+    boolean hasCommittedReparentToAnimationLeash() {
+        return mCommittedReparentToAnimationLeash;
     }
 
     /**
@@ -1043,19 +1084,6 @@ class WindowContainer<E extends WindowContainer> extends ConfigurationContainer<
     @Override
     public SurfaceControl getSurfaceControl() {
         return mSurfaceControl;
-    }
-
-    /**
-     * Destroy a given surface after executing mPendingTransaction. This is
-     * largely a workaround for destroy not being part of transactions
-     * rather than an intentional design, so please take care when
-     * expanding use.
-     */
-    @Override
-    public void destroyAfterPendingTransaction(SurfaceControl surface) {
-        if (mParent != null) {
-            mParent.destroyAfterPendingTransaction(surface);
-        }
     }
 
     @Override
@@ -1097,12 +1125,15 @@ class WindowContainer<E extends WindowContainer> extends ConfigurationContainer<
     }
 
     /**
+     * @param boosted If true, returns an animation layer that happens above all {@link TaskStack}s
+     *                Otherwise, the layer will be positioned above all animating
+     *                {@link TaskStack}s.
      * @return The layer on which all app animations are happening.
      */
-    SurfaceControl getAppAnimationLayer() {
+    SurfaceControl getAppAnimationLayer(boolean boosted) {
         final WindowContainer parent = getParent();
         if (parent != null) {
-            return parent.getAppAnimationLayer();
+            return parent.getAppAnimationLayer(boosted);
         }
         return null;
     }
@@ -1112,7 +1143,7 @@ class WindowContainer<E extends WindowContainer> extends ConfigurationContainer<
         scheduleAnimation();
     }
 
-    private void reassignLayer(Transaction t) {
+    void reassignLayer(Transaction t) {
         final WindowContainer parent = getParent();
         if (parent != null) {
             parent.assignChildLayers(t);
@@ -1121,11 +1152,13 @@ class WindowContainer<E extends WindowContainer> extends ConfigurationContainer<
 
     @Override
     public void onAnimationLeashCreated(Transaction t, SurfaceControl leash) {
+        mLastLayer = -1;
         reassignLayer(t);
     }
 
     @Override
     public void onAnimationLeashDestroyed(Transaction t) {
+        mLastLayer = -1;
         reassignLayer(t);
     }
 
@@ -1174,7 +1207,7 @@ class WindowContainer<E extends WindowContainer> extends ConfigurationContainer<
         }
     }
 
-    void updateSurfacePosition(SurfaceControl.Transaction transaction) {
+    void updateSurfacePosition() {
         if (mSurfaceControl == null) {
             return;
         }
@@ -1184,12 +1217,8 @@ class WindowContainer<E extends WindowContainer> extends ConfigurationContainer<
             return;
         }
 
-        transaction.setPosition(mSurfaceControl, mTmpPos.x, mTmpPos.y);
+        getPendingTransaction().setPosition(mSurfaceControl, mTmpPos.x, mTmpPos.y);
         mLastSurfacePosition.set(mTmpPos.x, mTmpPos.y);
-
-        for (int i = mChildren.size() - 1; i >= 0; i--) {
-            mChildren.get(i).updateSurfacePosition(transaction);
-        }
     }
 
     void getRelativePosition(Point outPos) {
@@ -1200,5 +1229,12 @@ class WindowContainer<E extends WindowContainer> extends ConfigurationContainer<
             final Rect parentBounds = parent.getBounds();
             outPos.offset(-parentBounds.left, -parentBounds.top);
         }
+    }
+
+    Dimmer getDimmer() {
+        if (mParent == null) {
+            return null;
+        }
+        return mParent.getDimmer();
     }
 }

@@ -21,6 +21,7 @@ import android.database.Cursor;
 import android.os.Handler;
 import android.os.IDeviceIdleController;
 import android.os.ServiceManager;
+import android.telephony.AccessNetworkConstants.TransportType;
 
 import com.android.internal.telephony.cdma.CdmaSubscriptionSourceManager;
 import com.android.internal.telephony.cdma.EriManager;
@@ -28,7 +29,6 @@ import com.android.internal.telephony.dataconnection.DcTracker;
 import com.android.internal.telephony.imsphone.ImsExternalCallTracker;
 import com.android.internal.telephony.imsphone.ImsPhone;
 import com.android.internal.telephony.imsphone.ImsPhoneCallTracker;
-import com.android.internal.telephony.uicc.IccCardProxy;
 import com.android.internal.telephony.uicc.IccCardStatus;
 import com.android.internal.telephony.uicc.UiccCard;
 import com.android.internal.telephony.uicc.UiccProfile;
@@ -76,7 +76,7 @@ public class TelephonyComponentFactory {
     }
 
     public DcTracker makeDcTracker(Phone phone) {
-        return new DcTracker(phone);
+        return new DcTracker(phone, TransportType.WWAN);
     }
 
     public CarrierSignalAgent makeCarrierSignalAgent(Phone phone) {
@@ -97,10 +97,6 @@ public class TelephonyComponentFactory {
 
     public IccSmsInterfaceManager makeIccSmsInterfaceManager(Phone phone) {
         return new IccSmsInterfaceManager(phone);
-    }
-
-    public IccCardProxy makeIccCardProxy(Context context, CommandsInterface ci, int phoneId) {
-        return new IccCardProxy(context, ci, phoneId);
     }
 
     /**

@@ -36,6 +36,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.Message;
+import android.os.PersistableBundle;
 import android.os.Process;
 import android.os.RemoteException;
 import android.os.ServiceManager;
@@ -895,6 +896,7 @@ public class AudioTrack extends PlayerBase
         }
 
         /**
+         * @hide
          * Sets whether this track will play through the offloaded audio path.
          * When set to true, at build time, the audio format will be checked against
          * {@link AudioManager#isOffloadedPlaybackSupported(AudioFormat)} to verify the audio format
@@ -1718,6 +1720,23 @@ public class AudioTrack extends PlayerBase
          return ret;
      }
 
+    /**
+     *  Return Metrics data about the current AudioTrack instance.
+     *
+     * @return a {@link PersistableBundle} containing the set of attributes and values
+     * available for the media being handled by this instance of AudioTrack
+     * The attributes are descibed in {@link MetricsConstants}.
+     *
+     * Additional vendor-specific fields may also be present in
+     * the return value.
+     */
+    public PersistableBundle getMetrics() {
+        PersistableBundle bundle = native_getMetrics();
+        return bundle;
+    }
+
+    private native PersistableBundle native_getMetrics();
+
     //--------------------------------------------------------------------------
     // Initialization / configuration
     //--------------------
@@ -1987,6 +2006,26 @@ public class AudioTrack extends PlayerBase
             return ERROR_BAD_VALUE;
         }
         return native_set_loop(startInFrames, endInFrames, loopCount);
+    }
+
+    /**
+     * Sets the audio presentation.
+     * If the audio presentation is invalid then {@link #ERROR_BAD_VALUE} will be returned.
+     * If a multi-stream decoder (MSD) is not present, or the format does not support
+     * multiple presentations, then {@link #ERROR_INVALID_OPERATION} will be returned.
+     * {@link #ERROR} is returned in case of any other error.
+     * @param presentation see {@link AudioPresentation}. In particular, id should be set.
+     * @return error code or success, see {@link #SUCCESS}, {@link #ERROR},
+     *    {@link #ERROR_BAD_VALUE}, {@link #ERROR_INVALID_OPERATION}
+     * @throws IllegalArgumentException if the audio presentation is null.
+     * @throws IllegalStateException if track is not initialized.
+     */
+    public int setPresentation(@NonNull AudioPresentation presentation) {
+        if (presentation == null) {
+            throw new IllegalArgumentException("audio presentation is null");
+        }
+        return native_setPresentation(presentation.getPresentationId(),
+                presentation.getProgramId());
     }
 
     /**
@@ -2784,6 +2823,7 @@ public class AudioTrack extends PlayerBase
     /*
      * Call BEFORE adding a routing callback handler.
      */
+    @GuardedBy("mRoutingChangeListeners")
     private void testEnableNativeRoutingCallbacksLocked() {
         if (mRoutingChangeListeners.size() == 0) {
             native_enableDeviceCallback();
@@ -2793,6 +2833,7 @@ public class AudioTrack extends PlayerBase
     /*
      * Call AFTER removing a routing callback handler.
      */
+    @GuardedBy("mRoutingChangeListeners")
     private void testDisableNativeRoutingCallbacksLocked() {
         if (mRoutingChangeListeners.size() == 0) {
             native_disableDeviceCallback();
@@ -2939,6 +2980,7 @@ public class AudioTrack extends PlayerBase
     }
 
     /**
+     * @hide
      * Abstract class to receive event notification about the stream playback.
      * See {@link AudioTrack#setStreamEventCallback(Executor, StreamEventCallback)} to register
      * the callback on the given {@link AudioTrack} instance.
@@ -2972,6 +3014,7 @@ public class AudioTrack extends PlayerBase
     private final Object mStreamEventCbLock = new Object();
 
     /**
+     * @hide
      * Sets the callback for the notification of stream events.
      * @param executor {@link Executor} to handle the callbacks
      * @param eventCallback the callback to receive the stream event notifications
@@ -2991,6 +3034,7 @@ public class AudioTrack extends PlayerBase
     }
 
     /**
+     * @hide
      * Unregisters the callback for notification of stream events, previously set
      * by {@link #setStreamEventCallback(Executor, StreamEventCallback)}.
      */
@@ -3227,6 +3271,7 @@ public class AudioTrack extends PlayerBase
             @NonNull VolumeShaper.Operation operation);
 
     private native @Nullable VolumeShaper.State native_getVolumeShaperState(int id);
+    private native final int native_setPresentation(int presentationId, int programId);
 
     //---------------------------------------------------------
     // Utility methods
@@ -3238,5 +3283,47 @@ public class AudioTrack extends PlayerBase
 
     private static void loge(String msg) {
         Log.e(TAG, msg);
+    }
+
+    public final static class MetricsConstants
+    {
+        private MetricsConstants() {}
+
+        /**
+         * Key to extract the Stream Type for this track
+         * from the {@link AudioTrack#getMetrics} return value.
+         * The value is a String.
+         */
+        public static final String STREAMTYPE = "android.media.audiotrack.streamtype";
+
+        /**
+         * Key to extract the Content Type for this track
+         * from the {@link AudioTrack#getMetrics} return value.
+         * The value is a String.
+         */
+        public static final String CONTENTTYPE = "android.media.audiotrack.type";
+
+        /**
+         * Key to extract the Content Type for this track
+         * from the {@link AudioTrack#getMetrics} return value.
+         * The value is a String.
+         */
+        public static final String USAGE = "android.media.audiotrack.usage";
+
+        /**
+         * Key to extract the sample rate for this track in Hz
+         * from the {@link AudioTrack#getMetrics} return value.
+         * The value is an integer.
+         */
+        public static final String SAMPLERATE = "android.media.audiorecord.samplerate";
+
+        /**
+         * Key to extract the channel mask information for this track
+         * from the {@link AudioTrack#getMetrics} return value.
+         *
+         * The value is a Long integer.
+         */
+        public static final String CHANNELMASK = "android.media.audiorecord.channelmask";
+
     }
 }

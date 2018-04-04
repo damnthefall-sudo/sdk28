@@ -112,16 +112,16 @@ import static com.android.server.am.EventLogTags.AM_RELAUNCH_RESUME_ACTIVITY;
 import static com.android.server.am.TaskPersister.DEBUG;
 import static com.android.server.am.TaskPersister.IMAGE_EXTENSION;
 import static com.android.server.am.TaskRecord.INVALID_TASK_ID;
-import static com.android.server.am.proto.ActivityRecordProto.CONFIGURATION_CONTAINER;
-import static com.android.server.am.proto.ActivityRecordProto.FRONT_OF_TASK;
-import static com.android.server.am.proto.ActivityRecordProto.IDENTIFIER;
-import static com.android.server.am.proto.ActivityRecordProto.PROC_ID;
-import static com.android.server.am.proto.ActivityRecordProto.STATE;
-import static com.android.server.am.proto.ActivityRecordProto.VISIBLE;
+import static com.android.server.am.ActivityRecordProto.CONFIGURATION_CONTAINER;
+import static com.android.server.am.ActivityRecordProto.FRONT_OF_TASK;
+import static com.android.server.am.ActivityRecordProto.IDENTIFIER;
+import static com.android.server.am.ActivityRecordProto.PROC_ID;
+import static com.android.server.am.ActivityRecordProto.STATE;
+import static com.android.server.am.ActivityRecordProto.VISIBLE;
 import static com.android.server.policy.WindowManagerPolicy.NAV_BAR_LEFT;
-import static com.android.server.wm.proto.IdentifierProto.HASH_CODE;
-import static com.android.server.wm.proto.IdentifierProto.TITLE;
-import static com.android.server.wm.proto.IdentifierProto.USER_ID;
+import static com.android.server.wm.IdentifierProto.HASH_CODE;
+import static com.android.server.wm.IdentifierProto.TITLE;
+import static com.android.server.wm.IdentifierProto.USER_ID;
 
 import static org.xmlpull.v1.XmlPullParser.END_DOCUMENT;
 import static org.xmlpull.v1.XmlPullParser.END_TAG;
@@ -133,11 +133,16 @@ import android.app.ActivityOptions;
 import android.app.PendingIntent;
 import android.app.PictureInPictureParams;
 import android.app.ResultInfo;
+import android.app.servertransaction.ActivityLifecycleItem;
+import android.app.servertransaction.ActivityRelaunchItem;
+import android.app.servertransaction.ClientTransaction;
+import android.app.servertransaction.ClientTransactionItem;
 import android.app.servertransaction.MoveToDisplayItem;
 import android.app.servertransaction.MultiWindowModeChangeItem;
 import android.app.servertransaction.NewIntentItem;
 import android.app.servertransaction.PauseActivityItem;
 import android.app.servertransaction.PipModeChangeItem;
+import android.app.servertransaction.ResumeActivityItem;
 import android.app.servertransaction.WindowVisibilityItem;
 import android.app.servertransaction.ActivityConfigurationChangeItem;
 import android.content.ComponentName;
@@ -225,11 +230,14 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
     private static final String ATTR_COMPONENTSPECIFIED = "component_specified";
     static final String ACTIVITY_ICON_SUFFIX = "_activity_icon_";
 
+    private static final int MAX_STORED_STATE_TRANSITIONS = 5;
+
     final ActivityManagerService service; // owner
     final IApplicationToken.Stub appToken; // window manager token
     AppWindowContainerController mWindowContainerController;
     final ActivityInfo info; // all about me
-    final ApplicationInfo appInfo; // information about activity's app
+    // TODO: This is duplicated state already contained in info.applicationInfo - remove
+    ApplicationInfo appInfo; // information about activity's app
     final int launchedFromPid; // always the pid who started the activity.
     final int launchedFromUid; // always the uid who started the activity.
     final String launchedFromPackage; // always the package who started the activity.
@@ -283,7 +291,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
     HashSet<ConnectionRecord> connections; // All ConnectionRecord we hold
     UriPermissionOwner uriPermissions; // current special URI access perms.
     ProcessRecord app;      // if non-null, hosting application
-    ActivityState state;    // current state we are in
+    private ActivityState mState;    // current state we are in
     Bundle  icicle;         // last saved activity state
     PersistableBundle persistentState; // last persistently saved activity state
     // TODO: See if this is still needed.
@@ -356,10 +364,32 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
     private boolean mTurnScreenOn;
 
     /**
-     * Temp configs used in {@link #ensureActivityConfigurationLocked(int, boolean)}
+     * Temp configs used in {@link #ensureActivityConfiguration(int, boolean)}
      */
     private final Configuration mTmpConfig = new Configuration();
     private final Rect mTmpBounds = new Rect();
+
+    private final ArrayList<StateTransition> mRecentTransitions = new ArrayList<>();
+
+    // TODO(b/71506345): Remove once issue has been resolved.
+    private static class StateTransition {
+        final long time;
+        final ActivityState prev;
+        final ActivityState state;
+        final String reason;
+
+        StateTransition(ActivityState prev, ActivityState state, String reason) {
+            time = System.currentTimeMillis();
+            this.prev = prev;
+            this.state = state;
+            this.reason = reason;
+        }
+
+        @Override
+        public String toString() {
+            return "[" + prev + "->" + state + ":" + reason + "@" + time + "]";
+        }
+    }
 
     private static String startingWindowStateToString(int state) {
         switch (state) {
@@ -375,7 +405,18 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
     }
 
     String getLifecycleDescription(String reason) {
-        return "packageName=" + packageName + ", state=" + state + ", reason=" + reason;
+        StringBuilder transitionBuilder = new StringBuilder();
+
+        for (int i = 0, size = mRecentTransitions.size(); i < size; ++i) {
+            transitionBuilder.append(mRecentTransitions.get(i));
+            if (i + 1 < size) {
+                transitionBuilder.append(",");
+            }
+        }
+
+        return "name= " + this + ", component=" + intent.getComponent().flattenToShortString()
+                + ", package=" + packageName + ", state=" + mState + ", reason=" + reason
+                + ", time=" + System.currentTimeMillis() + " transitions=" + transitionBuilder;
     }
 
     void dump(PrintWriter pw, String prefix) {
@@ -496,7 +537,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
                 pw.println();
         pw.print(prefix); pw.print("haveState="); pw.print(haveState);
                 pw.print(" icicle="); pw.println(icicle);
-        pw.print(prefix); pw.print("state="); pw.print(state);
+        pw.print(prefix); pw.print("state="); pw.print(mState);
                 pw.print(" stopped="); pw.print(stopped);
                 pw.print(" delayedResume="); pw.print(delayedResume);
                 pw.print(" finishing="); pw.println(finishing);
@@ -565,6 +606,11 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
         }
     }
 
+    void updateApplicationInfo(ApplicationInfo aInfo) {
+        appInfo = aInfo;
+        info.applicationInfo = aInfo;
+    }
+
     private boolean crossesHorizontalSizeThreshold(int firstDp, int secondDp) {
         return crossesSizeThreshold(mHorizontalSizeConfigurations, firstDp, secondDp);
     }
@@ -625,7 +671,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
                     "Reporting activity moved to display" + ", activityRecord=" + this
                             + ", displayId=" + displayId + ", config=" + config);
 
-            service.mLifecycleManager.scheduleTransaction(app.thread, appToken,
+            service.getLifecycleManager().scheduleTransaction(app.thread, appToken,
                     MoveToDisplayItem.obtain(displayId, config));
         } catch (RemoteException e) {
             // If process died, whatever.
@@ -643,7 +689,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
             if (DEBUG_CONFIGURATION) Slog.v(TAG, "Sending new config to " + this + ", config: "
                     + config);
 
-            service.mLifecycleManager.scheduleTransaction(app.thread, appToken,
+            service.getLifecycleManager().scheduleTransaction(app.thread, appToken,
                     ActivityConfigurationChangeItem.obtain(config));
         } catch (RemoteException e) {
             // If process died, whatever.
@@ -670,7 +716,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
 
     private void scheduleMultiWindowModeChanged(Configuration overrideConfig) {
         try {
-            service.mLifecycleManager.scheduleTransaction(app.thread, appToken,
+            service.getLifecycleManager().scheduleTransaction(app.thread, appToken,
                     MultiWindowModeChangeItem.obtain(mLastReportedMultiWindowMode,
                             overrideConfig));
         } catch (Exception e) {
@@ -698,7 +744,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
 
     private void schedulePictureInPictureModeChanged(Configuration overrideConfig) {
         try {
-            service.mLifecycleManager.scheduleTransaction(app.thread, appToken,
+            service.getLifecycleManager().scheduleTransaction(app.thread, appToken,
                     PipModeChangeItem.obtain(mLastReportedPictureInPictureMode,
                             overrideConfig));
         } catch (Exception e) {
@@ -834,7 +880,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
         resultTo = _resultTo;
         resultWho = _resultWho;
         requestCode = _reqCode;
-        state = INITIALIZING;
+        setState(INITIALIZING, "ActivityRecord ctor");
         frontOfTask = false;
         launchFailed = false;
         stopped = false;
@@ -993,6 +1039,11 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
     }
 
     void removeWindowContainer() {
+        // Do not try to remove a window container if we have already removed it.
+        if (mWindowContainerController == null) {
+            return;
+        }
+
         // Resume key dispatching if it is currently paused before we remove the container.
         resumeKeyDispatchingLocked();
 
@@ -1148,6 +1199,9 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
     }
 
     boolean isFocusable() {
+        if (inSplitScreenPrimaryWindowingMode() && mStackSupervisor.mIsDockMinimized) {
+            return false;
+        }
         return getWindowConfiguration().canReceiveKeys() || isAlwaysFocusable();
     }
 
@@ -1252,7 +1306,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
             return false;
         }
 
-        switch (state) {
+        switch (mState) {
             case RESUMED:
                 // When visible, allow entering PiP if the app is not locked.  If it is over the
                 // keyguard, then we will prompt to unlock in the caller before entering PiP.
@@ -1378,13 +1432,13 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
         // - It is currently resumed or paused. i.e. it is currently visible to the user and we want
         //   the user to see the visual effects caused by the intent delivery now.
         // - The device is sleeping and it is the top activity behind the lock screen (b/6700897).
-        if ((state == RESUMED || state == PAUSED
+        if ((mState == RESUMED || mState == PAUSED
                 || isTopActivityWhileSleeping) && app != null && app.thread != null) {
             try {
                 ArrayList<ReferrerIntent> ar = new ArrayList<>(1);
                 ar.add(rintent);
-                service.mLifecycleManager.scheduleTransaction(app.thread, appToken,
-                        NewIntentItem.obtain(ar, state == PAUSED));
+                service.getLifecycleManager().scheduleTransaction(app.thread, appToken,
+                        NewIntentItem.obtain(ar, mState == PAUSED));
                 unsent = false;
             } catch (RemoteException e) {
                 Slog.w(TAG, "Exception thrown sending new intent to " + this, e);
@@ -1495,7 +1549,13 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
                     Slog.e(TAG, "applyOptionsLocked: Unknown animationType=" + animationType);
                     break;
             }
-            pendingOptions = null;
+
+            if (task == null) {
+                clearOptionsLocked(false /* withAbort */);
+            } else {
+                // This will clear the options for all the ActivityRecords for this Task.
+                task.clearAllPendingOptions();
+            }
         }
     }
 
@@ -1504,10 +1564,14 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
     }
 
     void clearOptionsLocked() {
-        if (pendingOptions != null) {
+        clearOptionsLocked(true /* withAbort */);
+    }
+
+    void clearOptionsLocked(boolean withAbort) {
+        if (withAbort && pendingOptions != null) {
             pendingOptions.abort();
-            pendingOptions = null;
         }
+        pendingOptions = null;
     }
 
     ActivityOptions takeOptionsLocked() {
@@ -1566,6 +1630,65 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
         mStackSupervisor.mAppVisibilitiesChangedSinceLastPause = true;
     }
 
+    void setState(ActivityState state, String reason) {
+        if (DEBUG_STATES) Slog.v(TAG_STATES, "State movement: " + this + " from:" + getState()
+                        + " to:" + state + " reason:" + reason);
+
+        if (state == mState) {
+            // No need to do anything if state doesn't change.
+            if (DEBUG_STATES) Slog.v(TAG_STATES, "State unchanged from:" + state);
+            return;
+        }
+
+        final ActivityState prev = mState;
+        mState = state;
+
+        if (mRecentTransitions.size() == MAX_STORED_STATE_TRANSITIONS) {
+            mRecentTransitions.remove(0);
+        }
+
+        mRecentTransitions.add(new StateTransition(prev, state, reason));
+
+        final TaskRecord parent = getTask();
+
+        if (parent != null) {
+            parent.onActivityStateChanged(this, state, reason);
+        }
+    }
+
+    ActivityState getState() {
+        return mState;
+    }
+
+    /**
+     * Returns {@code true} if the Activity is in the specified state.
+     */
+    boolean isState(ActivityState state) {
+        return state == mState;
+    }
+
+    /**
+     * Returns {@code true} if the Activity is in one of the specified states.
+     */
+    boolean isState(ActivityState state1, ActivityState state2) {
+        return state1 == mState || state2 == mState;
+    }
+
+    /**
+     * Returns {@code true} if the Activity is in one of the specified states.
+     */
+    boolean isState(ActivityState state1, ActivityState state2, ActivityState state3) {
+        return state1 == mState || state2 == mState || state3 == mState;
+    }
+
+    /**
+     * Returns {@code true} if the Activity is in one of the specified states.
+     */
+    boolean isState(ActivityState state1, ActivityState state2, ActivityState state3,
+            ActivityState state4) {
+        return state1 == mState || state2 == mState || state3 == mState || state4 == mState;
+    }
+
     void notifyAppResumed(boolean wasStopped) {
         mWindowContainerController.notifyAppResumed(wasStopped);
     }
@@ -1595,9 +1718,9 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
 
     void makeVisibleIfNeeded(ActivityRecord starting) {
         // This activity is not currently visible, but is running. Tell it to become visible.
-        if (state == RESUMED || this == starting) {
+        if (mState == RESUMED || this == starting) {
             if (DEBUG_VISIBILITY) Slog.d(TAG_VISIBILITY,
-                    "Not making visible, r=" + this + " state=" + state + " starting=" + starting);
+                    "Not making visible, r=" + this + " state=" + mState + " starting=" + starting);
             return;
         }
 
@@ -1613,28 +1736,35 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
             setVisible(true);
             sleeping = false;
             app.pendingUiClean = true;
-            service.mLifecycleManager.scheduleTransaction(app.thread, appToken,
+            service.getLifecycleManager().scheduleTransaction(app.thread, appToken,
                     WindowVisibilityItem.obtain(true /* showWindow */));
             // The activity may be waiting for stop, but that is no longer appropriate for it.
             mStackSupervisor.mStoppingActivities.remove(this);
             mStackSupervisor.mGoingToSleepActivities.remove(this);
 
-            // If the activity is stopped or stopping, cycle to the paused state.
-            if (state == STOPPED || state == STOPPING) {
+            // If the activity is stopped or stopping, cycle to the paused state. We avoid doing
+            // this when there is an activity waiting to become translucent as the extra binder
+            // calls will lead to noticeable jank. A later call to
+            // ActivityStack#ensureActivitiesVisibleLocked will bring the activity to the proper
+            // paused state. We also avoid doing this for the activity the stack supervisor
+            // considers the resumed activity, as normal means will bring the activity from STOPPED
+            // to RESUMED. Adding PAUSING in this scenario will lead to double lifecycles.
+            if (isState(STOPPED, STOPPING) && stack.mTranslucentActivityWaiting == null
+                    && mStackSupervisor.getResumedActivityLocked() != this) {
                 // Capture reason before state change
                 final String reason = getLifecycleDescription("makeVisibleIfNeeded");
 
                 // An activity must be in the {@link PAUSING} state for the system to validate
                 // the move to {@link PAUSED}.
-                state = PAUSING;
-                service.mLifecycleManager.scheduleTransaction(app.thread, appToken,
+                setState(PAUSING, "makeVisibleIfNeeded");
+                service.getLifecycleManager().scheduleTransaction(app.thread, appToken,
                         PauseActivityItem.obtain(finishing, false /* userLeaving */,
                                 configChangeFlags, false /* dontReport */)
                                 .setDescription(reason));
             }
         } catch (Exception e) {
             // Just skip on any failure; we'll make it visible when it next restarts.
-            Slog.w(TAG, "Exception thrown making visibile: " + intent.getComponent(), e);
+            Slog.w(TAG, "Exception thrown making visible: " + intent.getComponent(), e);
         }
         handleAlreadyVisible();
     }
@@ -1647,7 +1777,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
             }
         } catch(RemoteException e) {
         }
-        return state == RESUMED;
+        return mState == RESUMED;
     }
 
     static void activityResumedLocked(IBinder token) {
@@ -1695,7 +1825,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
 
         resumeKeyDispatchingLocked();
         final ActivityStack stack = getStack();
-        stack.mNoAnimActivities.clear();
+        mStackSupervisor.mNoAnimActivities.clear();
 
         // Mark the point when the activity is resuming
         // TODO: To be more accurate, the mark should be before the onCreate,
@@ -1721,7 +1851,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
     final void activityStoppedLocked(Bundle newIcicle, PersistableBundle newPersistentState,
             CharSequence description) {
         final ActivityStack stack = getStack();
-        if (state != STOPPING) {
+        if (mState != STOPPING) {
             Slog.i(TAG, "Activity reported stop, but no longer stopping: " + this);
             stack.mHandler.removeMessages(STOP_TIMEOUT_MSG, this);
             return;
@@ -1744,7 +1874,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
             if (DEBUG_STATES) Slog.v(TAG_STATES, "Moving to STOPPED: " + this + " (stop complete)");
             stack.mHandler.removeMessages(STOP_TIMEOUT_MSG, this);
             stopped = true;
-            state = STOPPED;
+            setState(STOPPED, "activityStoppedLocked");
 
             mWindowContainerController.notifyAppStopped();
 
@@ -1894,14 +2024,15 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
     public void onStartingWindowDrawn(long timestamp) {
         synchronized (service) {
             mStackSupervisor.getActivityMetricsLogger().notifyStartingWindowDrawn(
-                    getStackId(), timestamp);
+                    getWindowingMode(), timestamp);
         }
     }
 
     @Override
     public void onWindowsDrawn(long timestamp) {
         synchronized (service) {
-            mStackSupervisor.getActivityMetricsLogger().notifyWindowsDrawn(getStackId(), timestamp);
+            mStackSupervisor.getActivityMetricsLogger().notifyWindowsDrawn(getWindowingMode(),
+                    timestamp);
             if (displayStartTime != 0) {
                 reportLaunchTimeLocked(timestamp);
             }
@@ -1983,7 +2114,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
         if (mStackSupervisor.mActivitiesWaitingForVisibleActivity.contains(this) || stopped) {
             final ActivityStack stack = mStackSupervisor.getFocusedStack();
             // Try to use the one which is closest to top.
-            ActivityRecord r = stack.mResumedActivity;
+            ActivityRecord r = stack.getResumedActivity();
             if (r == null) {
                 r = stack.mPausingActivity;
             }
@@ -2013,8 +2144,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
      * currently pausing, or is resumed.
      */
     public boolean isInterestingToUserLocked() {
-        return visible || nowVisible || state == PAUSING ||
-                state == RESUMED;
+        return visible || nowVisible || mState == PAUSING || mState == RESUMED;
     }
 
     void setSleeping(boolean _sleeping) {
@@ -2076,13 +2206,12 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
     }
 
     final boolean isDestroyable() {
-        if (finishing || app == null || state == DESTROYING
-                || state == DESTROYED) {
+        if (finishing || app == null) {
             // This would be redundant.
             return false;
         }
         final ActivityStack stack = getStack();
-        if (stack == null || this == stack.mResumedActivity || this == stack.mPausingActivity
+        if (stack == null || this == stack.getResumedActivity() || this == stack.mPausingActivity
                 || !haveState || !stopped) {
             // We're not ready for this kind of thing.
             return false;
@@ -2143,7 +2272,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
                 compatInfo, nonLocalizedLabel, labelRes, icon, logo, windowFlags,
                 prev != null ? prev.appToken : null, newTask, taskSwitch, isProcessRunning(),
                 allowTaskSnapshot(),
-                state.ordinal() >= RESUMED.ordinal() && state.ordinal() <= STOPPED.ordinal(),
+                mState.ordinal() >= RESUMED.ordinal() && mState.ordinal() <= STOPPED.ordinal(),
                 fromRecents);
         if (shown) {
             mStartingWindowState = STARTING_WINDOW_SHOWN;
@@ -2297,13 +2426,27 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
         outBounds.offsetTo(left, 0 /* top */);
     }
 
+    boolean ensureActivityConfiguration(int globalChanges, boolean preserveWindow) {
+        return ensureActivityConfiguration(globalChanges, preserveWindow,
+                false /* ignoreStopState */);
+    }
+
     /**
-     * Make sure the given activity matches the current configuration. Returns false if the activity
-     * had to be destroyed.  Returns true if the configuration is the same, or the activity will
-     * remain running as-is for whatever reason. Ensures the HistoryRecord is updated with the
-     * correct configuration and all other bookkeeping is handled.
+     * Make sure the given activity matches the current configuration. Ensures the HistoryRecord
+     * is updated with the correct configuration and all other bookkeeping is handled.
+     *
+     * @param globalChanges The changes to the global configuration.
+     * @param preserveWindow If the activity window should be preserved on screen if the activity
+     *                       is relaunched.
+     * @param ignoreStopState If we should try to relaunch the activity even if it is in the stopped
+     *                        state. This is useful for the case where we know the activity will be
+     *                        visible soon and we want to ensure its configuration before we make it
+     *                        visible.
+     * @return True if the activity was relaunched and false if it wasn't relaunched because we
+     *         can't or the app handles the specific configuration that is changing.
      */
-    boolean ensureActivityConfigurationLocked(int globalChanges, boolean preserveWindow) {
+    boolean ensureActivityConfiguration(int globalChanges, boolean preserveWindow,
+            boolean ignoreStopState) {
         final ActivityStack stack = getStack();
         if (stack.mConfigWillChange) {
             if (DEBUG_SWITCH || DEBUG_CONFIGURATION) Slog.v(TAG_CONFIGURATION,
@@ -2319,8 +2462,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
             return true;
         }
 
-        // Skip updating configuration for activity that are stopping or stopped.
-        if (state == STOPPING || state == STOPPED) {
+        if (!ignoreStopState && (mState == STOPPING || mState == STOPPED)) {
             if (DEBUG_SWITCH || DEBUG_CONFIGURATION) Slog.v(TAG_CONFIGURATION,
                     "Skipping config check stopped or stopping: " + this);
             return true;
@@ -2370,6 +2512,15 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
 
         setLastReportedConfiguration(service.getGlobalConfiguration(), newMergedOverrideConfig);
 
+        if (mState == INITIALIZING) {
+            // No need to relaunch or schedule new config for activity that hasn't been launched
+            // yet. We do, however, return after applying the config to activity record, so that
+            // it will use it for launch transaction.
+            if (DEBUG_SWITCH || DEBUG_CONFIGURATION) Slog.v(TAG_CONFIGURATION,
+                    "Skipping config check for initializing activity: " + this);
+            return true;
+        }
+
         if (changes == 0 && !forceNewConfig) {
             if (DEBUG_SWITCH || DEBUG_CONFIGURATION) Slog.v(TAG_CONFIGURATION,
                     "Configuration no differences in " + this);
@@ -2414,7 +2565,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
                 if (DEBUG_SWITCH || DEBUG_CONFIGURATION) Slog.v(TAG_CONFIGURATION,
                         "Config is destroying non-running " + this);
                 stack.destroyActivityLocked(this, true, "config");
-            } else if (state == PAUSING) {
+            } else if (mState == PAUSING) {
                 // A little annoying: we are waiting for this activity to finish pausing. Let's not
                 // do anything now, but just flag that it needs to be restarted when done pausing.
                 if (DEBUG_SWITCH || DEBUG_CONFIGURATION) Slog.v(TAG_CONFIGURATION,
@@ -2422,7 +2573,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
                 deferRelaunchUntilPaused = true;
                 preserveWindowOnDeferredRelaunch = preserveWindow;
                 return true;
-            } else if (state == RESUMED) {
+            } else if (mState == RESUMED) {
                 // Try to optimize this case: the configuration is changing and we need to restart
                 // the top, resumed activity. Instead of doing the normal handshaking, just say
                 // "restart!".
@@ -2559,12 +2710,24 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
                             + " callers=" + Debug.getCallers(6));
             forceNewConfig = false;
             mStackSupervisor.activityRelaunchingLocked(this);
-            app.thread.scheduleRelaunchActivity(appToken, pendingResults, pendingNewIntents,
-                    configChangeFlags, !andResume,
-                    new Configuration(service.getGlobalConfiguration()),
-                    new Configuration(getMergedOverrideConfiguration()), preserveWindow);
+            final ClientTransactionItem callbackItem = ActivityRelaunchItem.obtain(pendingResults,
+                    pendingNewIntents, configChangeFlags,
+                    new MergedConfiguration(service.getGlobalConfiguration(),
+                            getMergedOverrideConfiguration()),
+                    preserveWindow);
+            final ActivityLifecycleItem lifecycleItem;
+            if (andResume) {
+                lifecycleItem = ResumeActivityItem.obtain(service.isNextTransitionForward());
+            } else {
+                lifecycleItem = PauseActivityItem.obtain()
+                        .setDescription(getLifecycleDescription("relaunchActivityLocked"));
+            }
+            final ClientTransaction transaction = ClientTransaction.obtain(app.thread, appToken);
+            transaction.addCallback(callbackItem);
+            transaction.setLifecycleStateRequest(lifecycleItem);
+            service.getLifecycleManager().scheduleTransaction(transaction);
             // Note: don't need to call pauseIfSleepingLocked() here, because the caller will only
-            // pass in 'andResume' if this activity is currently resumed, which implies we aren't
+            // request resume if this activity is currently resumed, which implies we aren't
             // sleeping.
         } catch (RemoteException e) {
             if (DEBUG_SWITCH || DEBUG_STATES) Slog.i(TAG_SWITCH, "Relaunch failed", e);
@@ -2580,12 +2743,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
             service.showAskCompatModeDialogLocked(this);
         } else {
             service.mHandler.removeMessages(PAUSE_TIMEOUT_MSG, this);
-            state = PAUSED;
-            // if the app is relaunched when it's stopped, and we're not resuming,
-            // put it back into stopped state.
-            if (stopped) {
-                getStack().addToStopping(this, true /* scheduleIdle */, false /* idleDelayed */);
-            }
+            setState(PAUSED, "relaunchActivityLocked");
         }
 
         configChangeFlags = 0;
@@ -2824,7 +2982,7 @@ final class ActivityRecord extends ConfigurationContainer implements AppWindowCo
         final long token = proto.start(fieldId);
         super.writeToProto(proto, CONFIGURATION_CONTAINER, false /* trim */);
         writeIdentifierToProto(proto, IDENTIFIER);
-        proto.write(STATE, state.toString());
+        proto.write(STATE, mState.toString());
         proto.write(VISIBLE, visible);
         proto.write(FRONT_OF_TASK, frontOfTask);
         if (app != null) {

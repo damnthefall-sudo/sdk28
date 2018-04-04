@@ -47,6 +47,8 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
+
 import libcore.io.IoUtils;
 
 /**
@@ -155,7 +157,12 @@ class ZygoteConnection {
 
         if (parsedArgs.preloadPackage != null) {
             handlePreloadPackage(parsedArgs.preloadPackage, parsedArgs.preloadPackageLibs,
-                    parsedArgs.preloadPackageCacheKey);
+                    parsedArgs.preloadPackageLibFileName, parsedArgs.preloadPackageCacheKey);
+            return null;
+        }
+
+        if (parsedArgs.apiBlacklistExemptions != null) {
+            handleApiBlacklistExemptions(parsedArgs.apiBlacklistExemptions);
             return null;
         }
 
@@ -221,8 +228,8 @@ class ZygoteConnection {
 
         pid = Zygote.forkAndSpecialize(parsedArgs.uid, parsedArgs.gid, parsedArgs.gids,
                 parsedArgs.runtimeFlags, rlimits, parsedArgs.mountExternal, parsedArgs.seInfo,
-                parsedArgs.niceName, fdsToClose, fdsToIgnore, parsedArgs.instructionSet,
-                parsedArgs.appDataDir);
+                parsedArgs.niceName, fdsToClose, fdsToIgnore, parsedArgs.startChildZygote,
+                parsedArgs.instructionSet, parsedArgs.appDataDir);
 
         try {
             if (pid == 0) {
@@ -233,7 +240,8 @@ class ZygoteConnection {
                 IoUtils.closeQuietly(serverPipeFd);
                 serverPipeFd = null;
 
-                return handleChildProc(parsedArgs, descriptors, childPipeFd);
+                return handleChildProc(parsedArgs, descriptors, childPipeFd,
+                        parsedArgs.startChildZygote);
             } else {
                 // In the parent. A pid < 0 indicates a failure and will be handled in
                 // handleParentProc.
@@ -277,6 +285,15 @@ class ZygoteConnection {
         }
     }
 
+    private void handleApiBlacklistExemptions(String[] exemptions) {
+        try {
+            ZygoteInit.setApiBlacklistExemptions(exemptions);
+            mSocketOutStream.writeInt(0);
+        } catch (IOException ioe) {
+            throw new IllegalStateException("Error writing to command socket", ioe);
+        }
+    }
+
     protected void preload() {
         ZygoteInit.lazyPreload();
     }
@@ -289,7 +306,8 @@ class ZygoteConnection {
         return mSocketOutStream;
     }
 
-    protected void handlePreloadPackage(String packagePath, String libsPath, String cacheKey) {
+    protected void handlePreloadPackage(String packagePath, String libsPath, String libFileName,
+            String cacheKey) {
         throw new RuntimeException("Zyogte does not support package preloading");
     }
 
@@ -401,10 +419,24 @@ class ZygoteConnection {
         String appDataDir;
 
         /**
-         * Whether to preload a package, with the package path in the remainingArgs.
+         * The APK path of the package to preload, when using --preload-package.
          */
         String preloadPackage;
+
+        /**
+         * The native library path of the package to preload, when using --preload-package.
+         */
         String preloadPackageLibs;
+
+        /**
+         * The filename of the native library to preload, when using --preload-package.
+         */
+        String preloadPackageLibFileName;
+
+        /**
+         * The cache key under which to enter the preloaded package into the classloader cache,
+         * when using --preload-package.
+         */
         String preloadPackageCacheKey;
 
         /**
@@ -413,6 +445,20 @@ class ZygoteConnection {
          * it's started with --enable-lazy-preload).
          */
         boolean preloadDefault;
+
+        /**
+         * Whether this is a request to start a zygote process as a child of this zygote.
+         * Set with --start-child-zygote. The remaining arguments must include the
+         * CHILD_ZYGOTE_SOCKET_NAME_ARG flag to indicate the abstract socket name that
+         * should be used for communication.
+         */
+        boolean startChildZygote;
+
+        /**
+         * Exemptions from API blacklisting. These are sent to the pre-forked zygote at boot time,
+         * or when they change, via --set-api-blacklist-exemptions.
+         */
+        String[] apiBlacklistExemptions;
 
         /**
          * Constructs instance and parses args
@@ -562,9 +608,17 @@ class ZygoteConnection {
                 } else if (arg.equals("--preload-package")) {
                     preloadPackage = args[++curArg];
                     preloadPackageLibs = args[++curArg];
+                    preloadPackageLibFileName = args[++curArg];
                     preloadPackageCacheKey = args[++curArg];
                 } else if (arg.equals("--preload-default")) {
                     preloadDefault = true;
+                } else if (arg.equals("--start-child-zygote")) {
+                    startChildZygote = true;
+                } else if (arg.equals("--set-api-blacklist-exemptions")) {
+                    // consume all remaining args; this is a stand-alone command, never included
+                    // with the regular fork command.
+                    apiBlacklistExemptions = Arrays.copyOfRange(args, curArg + 1, args.length);
+                    curArg = args.length;
                 } else {
                     break;
                 }
@@ -579,13 +633,27 @@ class ZygoteConnection {
                     throw new IllegalArgumentException(
                             "Unexpected arguments after --preload-package.");
                 }
-            } else if (!preloadDefault) {
+            } else if (!preloadDefault && apiBlacklistExemptions == null) {
                 if (!seenRuntimeArgs) {
                     throw new IllegalArgumentException("Unexpected argument : " + args[curArg]);
                 }
 
                 remainingArgs = new String[args.length - curArg];
                 System.arraycopy(args, curArg, remainingArgs, 0, remainingArgs.length);
+            }
+
+            if (startChildZygote) {
+                boolean seenChildSocketArg = false;
+                for (String arg : remainingArgs) {
+                    if (arg.startsWith(Zygote.CHILD_ZYGOTE_SOCKET_NAME_ARG)) {
+                        seenChildSocketArg = true;
+                        break;
+                    }
+                }
+                if (!seenChildSocketArg) {
+                    throw new IllegalArgumentException("--start-child-zygote specified " +
+                            "without " + Zygote.CHILD_ZYGOTE_SOCKET_NAME_ARG);
+                }
             }
         }
     }
@@ -739,9 +807,10 @@ class ZygoteConnection {
      * @param parsedArgs non-null; zygote args
      * @param descriptors null-ok; new file descriptors for stdio if available.
      * @param pipeFd null-ok; pipe for communication back to Zygote.
+     * @param isZygote whether this new child process is itself a new Zygote.
      */
     private Runnable handleChildProc(Arguments parsedArgs, FileDescriptor[] descriptors,
-            FileDescriptor pipeFd) {
+            FileDescriptor pipeFd, boolean isZygote) {
         /**
          * By the time we get here, the native code has closed the two actual Zygote
          * socket connections, and substituted /dev/null in their place.  The LocalSocket
@@ -778,8 +847,13 @@ class ZygoteConnection {
             // Should not get here.
             throw new IllegalStateException("WrapperInit.execApplication unexpectedly returned");
         } else {
-            return ZygoteInit.zygoteInit(parsedArgs.targetSdkVersion, parsedArgs.remainingArgs,
-                    null /* classLoader */);
+            if (!isZygote) {
+                return ZygoteInit.zygoteInit(parsedArgs.targetSdkVersion, parsedArgs.remainingArgs,
+                        null /* classLoader */);
+            } else {
+                return ZygoteInit.childZygoteInit(parsedArgs.targetSdkVersion,
+                        parsedArgs.remainingArgs, null /* classLoader */);
+            }
         }
     }
 

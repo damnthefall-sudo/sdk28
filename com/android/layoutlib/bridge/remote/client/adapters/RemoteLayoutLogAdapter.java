@@ -42,9 +42,9 @@ public class RemoteLayoutLogAdapter implements RemoteLayoutLog {
     }
 
     @Override
-    public void fidelityWarning(String tag, String message, Throwable throwable,
-            Serializable data) {
-        mLog.fidelityWarning(tag, message, throwable, null);
+    public void fidelityWarning(String tag, String message, Throwable throwable, Object viewCookie,
+            Object data) {
+        mLog.fidelityWarning(tag, message, throwable, viewCookie, data);
     }
 
     @Override

@@ -212,7 +212,7 @@ import javax.crypto.Mac;
  * ...
  * }</pre>
  */
-public final class KeyProtection implements ProtectionParameter {
+public final class KeyProtection implements ProtectionParameter, UserAuthArgs {
     private final Date mKeyValidityStart;
     private final Date mKeyValidityForOriginationEnd;
     private final Date mKeyValidityForConsumptionEnd;
@@ -224,10 +224,13 @@ public final class KeyProtection implements ProtectionParameter {
     private final boolean mRandomizedEncryptionRequired;
     private final boolean mUserAuthenticationRequired;
     private final int mUserAuthenticationValidityDurationSeconds;
+    private final boolean mUserPresenceRequred;
     private final boolean mUserAuthenticationValidWhileOnBody;
     private final boolean mInvalidatedByBiometricEnrollment;
     private final long mBoundToSecureUserId;
     private final boolean mCriticalToDeviceEncryption;
+    private final boolean mUserConfirmationRequired;
+    private final boolean mUnlockedDeviceRequired;
 
     private KeyProtection(
             Date keyValidityStart,
@@ -241,10 +244,13 @@ public final class KeyProtection implements ProtectionParameter {
             boolean randomizedEncryptionRequired,
             boolean userAuthenticationRequired,
             int userAuthenticationValidityDurationSeconds,
+            boolean userPresenceRequred,
             boolean userAuthenticationValidWhileOnBody,
             boolean invalidatedByBiometricEnrollment,
             long boundToSecureUserId,
-            boolean criticalToDeviceEncryption) {
+            boolean criticalToDeviceEncryption,
+            boolean userConfirmationRequired,
+            boolean unlockedDeviceRequired) {
         mKeyValidityStart = Utils.cloneIfNotNull(keyValidityStart);
         mKeyValidityForOriginationEnd = Utils.cloneIfNotNull(keyValidityForOriginationEnd);
         mKeyValidityForConsumptionEnd = Utils.cloneIfNotNull(keyValidityForConsumptionEnd);
@@ -258,10 +264,13 @@ public final class KeyProtection implements ProtectionParameter {
         mRandomizedEncryptionRequired = randomizedEncryptionRequired;
         mUserAuthenticationRequired = userAuthenticationRequired;
         mUserAuthenticationValidityDurationSeconds = userAuthenticationValidityDurationSeconds;
+        mUserPresenceRequred = userPresenceRequred;
         mUserAuthenticationValidWhileOnBody = userAuthenticationValidWhileOnBody;
         mInvalidatedByBiometricEnrollment = invalidatedByBiometricEnrollment;
         mBoundToSecureUserId = boundToSecureUserId;
         mCriticalToDeviceEncryption = criticalToDeviceEncryption;
+        mUserConfirmationRequired = userConfirmationRequired;
+        mUnlockedDeviceRequired = unlockedDeviceRequired;
     }
 
     /**
@@ -396,6 +405,26 @@ public final class KeyProtection implements ProtectionParameter {
     }
 
     /**
+     * Returns {@code true} if the key is authorized to be used only for messages confirmed by the
+     * user.
+     *
+     * Confirmation is separate from user authentication (see
+     * {@link #isUserAuthenticationRequired()}). Keys can be created that require confirmation but
+     * not user authentication, or user authentication but not confirmation, or both. Confirmation
+     * verifies that some user with physical possession of the device has approved a displayed
+     * message. User authentication verifies that the correct user is present and has
+     * authenticated.
+     *
+     * <p>This authorization applies only to secret key and private key operations. Public key
+     * operations are not restricted.
+     *
+     * @see Builder#setUserConfirmationRequired(boolean)
+     */
+    public boolean isUserConfirmationRequired() {
+        return mUserConfirmationRequired;
+    }
+
+    /**
      * Gets the duration of time (seconds) for which this key is authorized to be used after the
      * user is successfully authenticated. This has effect only if user authentication is required
      * (see {@link #isUserAuthenticationRequired()}).
@@ -411,6 +440,14 @@ public final class KeyProtection implements ProtectionParameter {
      */
     public int getUserAuthenticationValidityDurationSeconds() {
         return mUserAuthenticationValidityDurationSeconds;
+    }
+
+    /**
+     * Returns {@code true} if the key is authorized to be used only if a test of user presence has
+     * been performed between the {@code Signature.initSign()} and {@code Signature.sign()} calls.
+     */
+    public boolean isUserPresenceRequired() {
+        return mUserPresenceRequred;
     }
 
     /**
@@ -471,6 +508,17 @@ public final class KeyProtection implements ProtectionParameter {
     }
 
     /**
+     * Returns {@code true} if the screen must be unlocked for this key to be used for encryption or
+     * signing. Decryption and signature verification will still be available when the screen is
+     * locked.
+     *
+     * @see Builder#setUnlockedDeviceRequired(boolean)
+     */
+    public boolean isUnlockedDeviceRequired() {
+        return mUnlockedDeviceRequired;
+    }
+
+    /**
      * Builder of {@link KeyProtection} instances.
      */
     public final static class Builder {
@@ -486,8 +534,12 @@ public final class KeyProtection implements ProtectionParameter {
         private boolean mRandomizedEncryptionRequired = true;
         private boolean mUserAuthenticationRequired;
         private int mUserAuthenticationValidityDurationSeconds = -1;
+        private boolean mUserPresenceRequired = false;
         private boolean mUserAuthenticationValidWhileOnBody;
         private boolean mInvalidatedByBiometricEnrollment = true;
+        private boolean mUserConfirmationRequired;
+        private boolean mUnlockedDeviceRequired = false;
+
         private long mBoundToSecureUserId = GateKeeper.INVALID_SECURE_USER_ID;
         private boolean mCriticalToDeviceEncryption = false;
 
@@ -719,6 +771,29 @@ public final class KeyProtection implements ProtectionParameter {
         }
 
         /**
+         * Sets whether this key is authorized to be used only for messages confirmed by the
+         * user.
+         *
+         * Confirmation is separate from user authentication (see
+         * {@link #setUserAuthenticationRequired(boolean)}). Keys can be created that require
+         * confirmation but not user authentication, or user authentication but not confirmation,
+         * or both. Confirmation verifies that some user with physical possession of the device has
+         * approved a displayed message. User authentication verifies that the correct user is
+         * present and has authenticated.
+         *
+         * <p>This authorization applies only to secret key and private key operations. Public key
+         * operations are not restricted.
+         *
+         * @see {@link android.security.ConfirmationPrompter ConfirmationPrompter} class for
+         * more details about user confirmations.
+         */
+        @NonNull
+        public Builder setUserConfirmationRequired(boolean required) {
+            mUserConfirmationRequired = required;
+            return this;
+        }
+
+        /**
          * Sets the duration of time (seconds) for which this key is authorized to be used after the
          * user is successfully authenticated. This has effect if the key requires user
          * authentication for its use (see {@link #setUserAuthenticationRequired(boolean)}).
@@ -760,6 +835,16 @@ public final class KeyProtection implements ProtectionParameter {
                 throw new IllegalArgumentException("seconds must be -1 or larger");
             }
             mUserAuthenticationValidityDurationSeconds = seconds;
+            return this;
+        }
+
+        /**
+         * Sets whether a test of user presence is required to be performed between the
+         * {@code Signature.initSign()} and {@code Signature.sign()} method calls.
+         */
+        @NonNull
+        public Builder setUserPresenceRequired(boolean required) {
+            mUserPresenceRequired = required;
             return this;
         }
 
@@ -845,6 +930,19 @@ public final class KeyProtection implements ProtectionParameter {
         }
 
         /**
+         * Sets whether the keystore requires the screen to be unlocked before allowing decryption
+         * using this key. If this is set to {@code true}, any attempt to decrypt or sign using this
+         * key while the screen is locked will fail. A locked device requires a PIN, password,
+         * fingerprint, or other trusted factor to access. While the screen is locked, the key can
+         * still be used for encryption or signature verification.
+         */
+        @NonNull
+        public Builder setUnlockedDeviceRequired(boolean unlockedDeviceRequired) {
+            mUnlockedDeviceRequired = unlockedDeviceRequired;
+            return this;
+        }
+
+        /**
          * Builds an instance of {@link KeyProtection}.
          *
          * @throws IllegalArgumentException if a required field is missing
@@ -863,10 +961,13 @@ public final class KeyProtection implements ProtectionParameter {
                     mRandomizedEncryptionRequired,
                     mUserAuthenticationRequired,
                     mUserAuthenticationValidityDurationSeconds,
+                    mUserPresenceRequired,
                     mUserAuthenticationValidWhileOnBody,
                     mInvalidatedByBiometricEnrollment,
                     mBoundToSecureUserId,
-                    mCriticalToDeviceEncryption);
+                    mCriticalToDeviceEncryption,
+                    mUserConfirmationRequired,
+                    mUnlockedDeviceRequired);
         }
     }
 }

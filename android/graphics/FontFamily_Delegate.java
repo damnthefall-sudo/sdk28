@@ -27,7 +27,6 @@ import android.annotation.Nullable;
 import android.content.res.AssetManager;
 import android.content.res.BridgeAssetManager;
 import android.graphics.fonts.FontVariationAxis;
-import android.text.FontConfig;
 
 import java.awt.Font;
 import java.awt.FontFormatException;
@@ -38,7 +37,6 @@ import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -451,14 +449,6 @@ public class FontFamily_Delegate {
     @LayoutlibDelegate
     /*package*/ static void nAbort(long builderPtr) {
         sManager.removeJavaReferenceFor(builderPtr);
-    }
-
-    /**
-     * @see FontFamily#allowUnsupportedFont
-     */
-    @LayoutlibDelegate
-    /*package*/ static void nAllowUnsupportedFont(long builderPtr) {
-        // Do nothing here as this is used for Minikin fonts
     }
 
     // ---- private helper methods ----

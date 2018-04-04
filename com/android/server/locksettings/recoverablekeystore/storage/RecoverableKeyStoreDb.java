@@ -22,17 +22,25 @@ import android.content.ContentValues;
 import android.content.Context;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
+import android.security.keystore.recovery.RecoveryController;
 import android.text.TextUtils;
 import android.util.Log;
 
+import com.android.server.locksettings.recoverablekeystore.TestOnlyInsecureCertificateHelper;
 import com.android.server.locksettings.recoverablekeystore.WrappedKey;
 import com.android.server.locksettings.recoverablekeystore.storage.RecoverableKeyStoreDbContract.KeysEntry;
 import com.android.server.locksettings.recoverablekeystore.storage.RecoverableKeyStoreDbContract.RecoveryServiceMetadataEntry;
+import com.android.server.locksettings.recoverablekeystore.storage.RecoverableKeyStoreDbContract.RootOfTrustEntry;
 import com.android.server.locksettings.recoverablekeystore.storage.RecoverableKeyStoreDbContract.UserMetadataEntry;
 
+import java.io.ByteArrayInputStream;
 import java.security.KeyFactory;
 import java.security.NoSuchAlgorithmException;
 import java.security.PublicKey;
+import java.security.cert.CertPath;
+import java.security.cert.CertificateEncodingException;
+import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
 import java.security.spec.InvalidKeySpecException;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.ArrayList;
@@ -52,8 +60,10 @@ public class RecoverableKeyStoreDb {
     private static final String TAG = "RecoverableKeyStoreDb";
     private static final int IDLE_TIMEOUT_SECONDS = 30;
     private static final int LAST_SYNCED_AT_UNSYNCED = -1;
+    private static final String CERT_PATH_ENCODING = "PkiPath";
 
     private final RecoverableKeyStoreDbHelper mKeyStoreDbHelper;
+    private final TestOnlyInsecureCertificateHelper mTestOnlyInsecureCertificateHelper;
 
     /**
      * A new instance, storing the database in the user directory of {@code context}.
@@ -69,6 +79,7 @@ public class RecoverableKeyStoreDb {
 
     private RecoverableKeyStoreDb(RecoverableKeyStoreDbHelper keyStoreDbHelper) {
         this.mKeyStoreDbHelper = keyStoreDbHelper;
+        this.mTestOnlyInsecureCertificateHelper = new TestOnlyInsecureCertificateHelper();
     }
 
     /**
@@ -289,8 +300,41 @@ public class RecoverableKeyStoreDb {
         ContentValues values = new ContentValues();
         values.put(UserMetadataEntry.COLUMN_NAME_USER_ID, userId);
         values.put(UserMetadataEntry.COLUMN_NAME_PLATFORM_KEY_GENERATION_ID, generationId);
-        return db.replace(
+        long result = db.replace(
                 UserMetadataEntry.TABLE_NAME, /*nullColumnHack=*/ null, values);
+        if (result != -1) {
+            invalidateKeysWithOldGenerationId(userId, generationId);
+        }
+        return result;
+    }
+
+    /**
+     * Updates status of old keys to {@code RecoveryController.RECOVERY_STATUS_PERMANENT_FAILURE}.
+     */
+    public void invalidateKeysWithOldGenerationId(int userId, int newGenerationId) {
+        SQLiteDatabase db = mKeyStoreDbHelper.getWritableDatabase();
+        ContentValues values = new ContentValues();
+        values.put(KeysEntry.COLUMN_NAME_RECOVERY_STATUS,
+                RecoveryController.RECOVERY_STATUS_PERMANENT_FAILURE);
+        String selection =
+                KeysEntry.COLUMN_NAME_USER_ID + " = ? AND "
+                + KeysEntry.COLUMN_NAME_GENERATION_ID + " < ?";
+        db.update(KeysEntry.TABLE_NAME, values, selection,
+            new String[] {String.valueOf(userId), String.valueOf(newGenerationId)});
+    }
+
+    /**
+     * Updates status of old keys to {@code RecoveryController.RECOVERY_STATUS_PERMANENT_FAILURE}.
+     */
+    public void invalidateKeysForUserIdOnCustomScreenLock(int userId) {
+        SQLiteDatabase db = mKeyStoreDbHelper.getWritableDatabase();
+        ContentValues values = new ContentValues();
+        values.put(KeysEntry.COLUMN_NAME_RECOVERY_STATUS,
+            RecoveryController.RECOVERY_STATUS_PERMANENT_FAILURE);
+        String selection =
+            KeysEntry.COLUMN_NAME_USER_ID + " = ?";
+        db.update(KeysEntry.TABLE_NAME, values, selection,
+            new String[] {String.valueOf(userId)});
     }
 
     /**
@@ -338,6 +382,87 @@ public class RecoverableKeyStoreDb {
     public long setRecoveryServicePublicKey(int userId, int uid, PublicKey publicKey) {
         return setBytes(userId, uid, RecoveryServiceMetadataEntry.COLUMN_NAME_PUBLIC_KEY,
                 publicKey.getEncoded());
+    }
+
+    /**
+     * Returns the serial number of the XML file containing certificates of the recovery service.
+     *
+     * @param userId The userId of the profile the application is running under.
+     * @param uid The uid of the application who initializes the local recovery components.
+     * @param rootAlias The root of trust alias.
+     * @return The value that were previously set, or null if there's none.
+     *
+     * @hide
+     */
+    @Nullable
+    public Long getRecoveryServiceCertSerial(int userId, int uid, @NonNull String rootAlias) {
+        return getLong(userId, uid, rootAlias,
+                RecoveryServiceMetadataEntry.COLUMN_NAME_CERT_SERIAL);
+    }
+
+    /**
+     * Records the serial number of the XML file containing certificates of the recovery service.
+     *
+     * @param userId The userId of the profile the application is running under.
+     * @param uid The uid of the application who initializes the local recovery components.
+     * @param rootAlias The root of trust alias.
+     * @param serial The serial number contained in the XML file for recovery service certificates.
+     * @return The primary key of the inserted row, or -1 if failed.
+     *
+     * @hide
+     */
+    public long setRecoveryServiceCertSerial(int userId, int uid, @NonNull String rootAlias,
+            long serial) {
+        return setLong(userId, uid, rootAlias, RecoveryServiceMetadataEntry.COLUMN_NAME_CERT_SERIAL,
+                serial);
+    }
+
+    /**
+     * Returns the {@code CertPath} of the recovery service.
+     *
+     * @param userId The userId of the profile the application is running under.
+     * @param uid The uid of the application who initializes the local recovery components.
+     * @param rootAlias The root of trust alias.
+     * @return The value that were previously set, or null if there's none.
+     *
+     * @hide
+     */
+    @Nullable
+    public CertPath getRecoveryServiceCertPath(int userId, int uid, @NonNull String rootAlias) {
+        byte[] bytes = getBytes(userId, uid, rootAlias,
+                RecoveryServiceMetadataEntry.COLUMN_NAME_CERT_PATH);
+        if (bytes == null) {
+            return null;
+        }
+        try {
+            return decodeCertPath(bytes);
+        } catch (CertificateException e) {
+            Log.wtf(TAG,
+                    String.format(Locale.US,
+                            "Recovery service CertPath entry cannot be decoded for "
+                                    + "userId=%d uid=%d.",
+                            userId, uid), e);
+            return null;
+        }
+    }
+
+    /**
+     * Sets the {@code CertPath} of the recovery service.
+     *
+     * @param userId The userId of the profile the application is running under.
+     * @param uid The uid of the application who initializes the local recovery components.
+     * @param rootAlias The root of trust alias.
+     * @param certPath The certificate path of the recovery service.
+     * @return The primary key of the inserted row, or -1 if failed.
+     * @hide
+     */
+    public long setRecoveryServiceCertPath(int userId, int uid, @NonNull String rootAlias,
+            CertPath certPath) throws CertificateEncodingException {
+        if (certPath.getCertificates().size() == 0) {
+            throw new CertificateEncodingException("No certificate contained in the cert path.");
+        }
+        return setBytes(userId, uid, rootAlias, RecoveryServiceMetadataEntry.COLUMN_NAME_CERT_PATH,
+                certPath.getEncoded(CERT_PATH_ENCODING));
     }
 
     /**
@@ -495,44 +620,82 @@ public class RecoverableKeyStoreDb {
     }
 
     /**
-     * Returns the first (and only?) public key for {@code userId}.
+     * Active root of trust for the recovery agent.
      *
-     * @param userId The userId of the profile whose keys are to be synced.
-     * @return The public key, or null if none exists.
+     * @param userId The userId of the profile the application is running under.
+     * @param uid The uid of the application.
+     * @param rootAlias The root of trust alias.
+     * @return The primary key of the updated row, or -1 if failed.
+     *
+     * @hide
      */
-    @Nullable
-    public PublicKey getRecoveryServicePublicKey(int userId) {
+    public long setActiveRootOfTrust(int userId, int uid, @Nullable String rootAlias) {
+        // TODO: Call getDefaultCertificateAliasIfEmpty() here too?
+        SQLiteDatabase db = mKeyStoreDbHelper.getWritableDatabase();
+        ContentValues values = new ContentValues();
+        values.put(RecoveryServiceMetadataEntry.COLUMN_NAME_ACTIVE_ROOT_OF_TRUST, rootAlias);
+        String selection =
+                RecoveryServiceMetadataEntry.COLUMN_NAME_USER_ID + " = ? AND "
+                + RecoveryServiceMetadataEntry.COLUMN_NAME_UID + " = ?";
+        ensureRecoveryServiceMetadataEntryExists(userId, uid);
+        return db.update(RecoveryServiceMetadataEntry.TABLE_NAME, values,
+            selection, new String[] {String.valueOf(userId), String.valueOf(uid)});
+    }
+
+    /**
+     * Active root of trust for the recovery agent.
+     *
+     * @param userId The userId of the profile the application is running under.
+     * @param uid The uid of the application who initialized the local recovery components.
+     * @return Active root of trust alias of null if it was not set
+     *
+     * @hide
+     */
+    public @Nullable String getActiveRootOfTrust(int userId, int uid) {
         SQLiteDatabase db = mKeyStoreDbHelper.getReadableDatabase();
 
-        String[] projection = { RecoveryServiceMetadataEntry.COLUMN_NAME_PUBLIC_KEY };
+        String[] projection = {
+                RecoveryServiceMetadataEntry._ID,
+                RecoveryServiceMetadataEntry.COLUMN_NAME_USER_ID,
+                RecoveryServiceMetadataEntry.COLUMN_NAME_UID,
+                RecoveryServiceMetadataEntry.COLUMN_NAME_ACTIVE_ROOT_OF_TRUST};
         String selection =
-                RecoveryServiceMetadataEntry.COLUMN_NAME_USER_ID + " = ?";
-        String[] selectionArguments = { Integer.toString(userId) };
+                RecoveryServiceMetadataEntry.COLUMN_NAME_USER_ID + " = ? AND "
+                        + RecoveryServiceMetadataEntry.COLUMN_NAME_UID + " = ?";
+        String[] selectionArguments = {Integer.toString(userId), Integer.toString(uid)};
 
         try (
-            Cursor cursor = db.query(
-                    RecoveryServiceMetadataEntry.TABLE_NAME,
-                    projection,
-                    selection,
-                    selectionArguments,
-                    /*groupBy=*/ null,
-                    /*having=*/ null,
-                    /*orderBy=*/ null)
+                Cursor cursor = db.query(
+                        RecoveryServiceMetadataEntry.TABLE_NAME,
+                        projection,
+                        selection,
+                        selectionArguments,
+                        /*groupBy=*/ null,
+                        /*having=*/ null,
+                        /*orderBy=*/ null)
         ) {
-            if (cursor.getCount() < 1) {
+            int count = cursor.getCount();
+            if (count == 0) {
                 return null;
             }
-
+            if (count > 1) {
+                Log.wtf(TAG,
+                        String.format(Locale.US,
+                                "%d deviceId entries found for userId=%d uid=%d. "
+                                        + "Should only ever be 0 or 1.", count, userId, uid));
+                return null;
+            }
             cursor.moveToFirst();
-            byte[] keyBytes = cursor.getBlob(cursor.getColumnIndexOrThrow(
-                    RecoveryServiceMetadataEntry.COLUMN_NAME_PUBLIC_KEY));
-
-            try {
-                return decodeX509Key(keyBytes);
-            } catch (InvalidKeySpecException e) {
-                Log.wtf(TAG, "Could not decode public key for " + userId);
+            int idx = cursor.getColumnIndexOrThrow(
+                    RecoveryServiceMetadataEntry.COLUMN_NAME_ACTIVE_ROOT_OF_TRUST);
+            if (cursor.isNull(idx)) {
                 return null;
             }
+            String result = cursor.getString(idx);
+            if (TextUtils.isEmpty(result)) {
+                return null;
+            }
+            return result;
         }
     }
 
@@ -564,7 +727,6 @@ public class RecoverableKeyStoreDb {
     public Long getCounterId(int userId, int uid) {
         return getLong(userId, uid, RecoveryServiceMetadataEntry.COLUMN_NAME_COUNTER_ID);
     }
-
 
     /**
      * Updates the server parameters given by the application initializing the local recovery
@@ -804,7 +966,6 @@ public class RecoverableKeyStoreDb {
      *
      * @hide
      */
-
     private long setBytes(int userId, int uid, String key, byte[] value) {
         SQLiteDatabase db = mKeyStoreDbHelper.getWritableDatabase();
         ContentValues values = new ContentValues();
@@ -820,6 +981,180 @@ public class RecoverableKeyStoreDb {
     }
 
     /**
+     * Returns given binary value from the database.
+     *
+     * @param userId The userId of the profile the application is running under.
+     * @param uid The uid of the application who initialized the local recovery components.
+     * @param rootAlias The root of trust alias.
+     * @param key from {@code RootOfTrustEntry}
+     * @return The value that were previously set, or null if there's none.
+     *
+     * @hide
+     */
+    private byte[] getBytes(int userId, int uid, String rootAlias, String key) {
+        rootAlias = mTestOnlyInsecureCertificateHelper.getDefaultCertificateAliasIfEmpty(rootAlias);
+        SQLiteDatabase db = mKeyStoreDbHelper.getReadableDatabase();
+
+        String[] projection = {
+                RootOfTrustEntry._ID,
+                RootOfTrustEntry.COLUMN_NAME_USER_ID,
+                RootOfTrustEntry.COLUMN_NAME_UID,
+                RootOfTrustEntry.COLUMN_NAME_ROOT_ALIAS,
+                key};
+        String selection =
+                RootOfTrustEntry.COLUMN_NAME_USER_ID + " = ? AND "
+                        + RootOfTrustEntry.COLUMN_NAME_UID + " = ? AND "
+                        + RootOfTrustEntry.COLUMN_NAME_ROOT_ALIAS + " = ?";
+        String[] selectionArguments = {Integer.toString(userId), Integer.toString(uid), rootAlias};
+
+        try (
+            Cursor cursor = db.query(
+                    RootOfTrustEntry.TABLE_NAME,
+                    projection,
+                    selection,
+                    selectionArguments,
+                    /*groupBy=*/ null,
+                    /*having=*/ null,
+                    /*orderBy=*/ null)
+        ) {
+            int count = cursor.getCount();
+            if (count == 0) {
+                return null;
+            }
+            if (count > 1) {
+                Log.wtf(TAG,
+                        String.format(Locale.US,
+                                "%d entries found for userId=%d uid=%d. "
+                                        + "Should only ever be 0 or 1.", count, userId, uid));
+                return null;
+            }
+            cursor.moveToFirst();
+            int idx = cursor.getColumnIndexOrThrow(key);
+            if (cursor.isNull(idx)) {
+                return null;
+            } else {
+                return cursor.getBlob(idx);
+            }
+        }
+    }
+
+    /**
+     * Sets a binary value in the database.
+     *
+     * @param userId The userId of the profile the application is running under.
+     * @param uid The uid of the application who initialized the local recovery components.
+     * @param rootAlias The root of trust alias.
+     * @param key defined in {@code RootOfTrustEntry}
+     * @param value new value.
+     * @return The primary key of the inserted row, or -1 if failed.
+     *
+     * @hide
+     */
+    private long setBytes(int userId, int uid, String rootAlias, String key, byte[] value) {
+        rootAlias = mTestOnlyInsecureCertificateHelper.getDefaultCertificateAliasIfEmpty(rootAlias);
+        SQLiteDatabase db = mKeyStoreDbHelper.getWritableDatabase();
+        ContentValues values = new ContentValues();
+        values.put(key, value);
+        String selection =
+                RootOfTrustEntry.COLUMN_NAME_USER_ID + " = ? AND "
+                        + RootOfTrustEntry.COLUMN_NAME_UID + " = ? AND "
+                        + RootOfTrustEntry.COLUMN_NAME_ROOT_ALIAS + " = ?";
+        String[] selectionArguments = {Integer.toString(userId), Integer.toString(uid), rootAlias};
+
+        ensureRootOfTrustEntryExists(userId, uid, rootAlias);
+        return db.update(
+                RootOfTrustEntry.TABLE_NAME, values, selection, selectionArguments);
+    }
+
+    /**
+     * Returns given long value from the database.
+     *
+     * @param userId The userId of the profile the application is running under.
+     * @param uid The uid of the application who initialized the local recovery components.
+     * @param rootAlias The root of trust alias.
+     * @param key from {@code RootOfTrustEntry}
+     * @return The value that were previously set, or null if there's none.
+     *
+     * @hide
+     */
+    private Long getLong(int userId, int uid, String rootAlias, String key) {
+        rootAlias = mTestOnlyInsecureCertificateHelper.getDefaultCertificateAliasIfEmpty(rootAlias);
+        SQLiteDatabase db = mKeyStoreDbHelper.getReadableDatabase();
+
+        String[] projection = {
+                RootOfTrustEntry._ID,
+                RootOfTrustEntry.COLUMN_NAME_USER_ID,
+                RootOfTrustEntry.COLUMN_NAME_UID,
+                RootOfTrustEntry.COLUMN_NAME_ROOT_ALIAS,
+                key};
+        String selection =
+                RootOfTrustEntry.COLUMN_NAME_USER_ID + " = ? AND "
+                        + RootOfTrustEntry.COLUMN_NAME_UID + " = ? AND "
+                        + RootOfTrustEntry.COLUMN_NAME_ROOT_ALIAS + " = ?";
+        String[] selectionArguments = {Integer.toString(userId), Integer.toString(uid), rootAlias};
+
+        try (
+            Cursor cursor = db.query(
+                    RootOfTrustEntry.TABLE_NAME,
+                    projection,
+                    selection,
+                    selectionArguments,
+                    /*groupBy=*/ null,
+                    /*having=*/ null,
+                    /*orderBy=*/ null)
+        ) {
+            int count = cursor.getCount();
+            if (count == 0) {
+                return null;
+            }
+            if (count > 1) {
+                Log.wtf(TAG,
+                        String.format(Locale.US,
+                                "%d entries found for userId=%d uid=%d. "
+                                        + "Should only ever be 0 or 1.", count, userId, uid));
+                return null;
+            }
+            cursor.moveToFirst();
+            int idx = cursor.getColumnIndexOrThrow(key);
+            if (cursor.isNull(idx)) {
+                return null;
+            } else {
+                return cursor.getLong(idx);
+            }
+        }
+    }
+
+    /**
+     * Sets a long value in the database.
+     *
+     * @param userId The userId of the profile the application is running under.
+     * @param uid The uid of the application who initialized the local recovery components.
+     * @param rootAlias The root of trust alias.
+     * @param key defined in {@code RootOfTrustEntry}
+     * @param value new value.
+     * @return The primary key of the inserted row, or -1 if failed.
+     *
+     * @hide
+     */
+
+    private long setLong(int userId, int uid, String rootAlias, String key, long value) {
+        rootAlias = mTestOnlyInsecureCertificateHelper.getDefaultCertificateAliasIfEmpty(rootAlias);
+        SQLiteDatabase db = mKeyStoreDbHelper.getWritableDatabase();
+        ContentValues values = new ContentValues();
+        values.put(key, value);
+        String selection =
+                RootOfTrustEntry.COLUMN_NAME_USER_ID + " = ? AND "
+                        + RootOfTrustEntry.COLUMN_NAME_UID + " = ? AND "
+                        + RootOfTrustEntry.COLUMN_NAME_ROOT_ALIAS + " = ?";
+        String[] selectionArguments = {Integer.toString(userId), Integer.toString(uid), rootAlias};
+
+        ensureRootOfTrustEntryExists(userId, uid, rootAlias);
+        return db.update(
+                RootOfTrustEntry.TABLE_NAME, values, selection, selectionArguments);
+    }
+
+
+    /**
      * Creates an empty row in the recovery service metadata table if such a row doesn't exist for
      * the given userId and uid, so db.update will succeed.
      */
@@ -829,6 +1164,20 @@ public class RecoverableKeyStoreDb {
         values.put(RecoveryServiceMetadataEntry.COLUMN_NAME_USER_ID, userId);
         values.put(RecoveryServiceMetadataEntry.COLUMN_NAME_UID, uid);
         db.insertWithOnConflict(RecoveryServiceMetadataEntry.TABLE_NAME, /*nullColumnHack=*/ null,
+                values, SQLiteDatabase.CONFLICT_IGNORE);
+    }
+
+    /**
+     * Creates an empty row in the root of trust table if such a row doesn't exist for
+     * the given userId and uid, so db.update will succeed.
+     */
+    private void ensureRootOfTrustEntryExists(int userId, int uid, String rootAlias) {
+        SQLiteDatabase db = mKeyStoreDbHelper.getWritableDatabase();
+        ContentValues values = new ContentValues();
+        values.put(RootOfTrustEntry.COLUMN_NAME_USER_ID, userId);
+        values.put(RootOfTrustEntry.COLUMN_NAME_UID, uid);
+        values.put(RootOfTrustEntry.COLUMN_NAME_ROOT_ALIAS, rootAlias);
+        db.insertWithOnConflict(RootOfTrustEntry.TABLE_NAME, /*nullColumnHack=*/ null,
                 values, SQLiteDatabase.CONFLICT_IGNORE);
     }
 
@@ -848,5 +1197,17 @@ public class RecoverableKeyStoreDb {
             // Should never happen
             throw new RuntimeException(e);
         }
+    }
+
+    @Nullable
+    private static CertPath decodeCertPath(byte[] bytes) throws CertificateException {
+        CertificateFactory certFactory;
+        try {
+            certFactory = CertificateFactory.getInstance("X.509");
+        } catch (CertificateException e) {
+            // Should not happen, as X.509 is mandatory for all providers.
+            throw new RuntimeException(e);
+        }
+        return certFactory.generateCertPath(new ByteArrayInputStream(bytes), CERT_PATH_ENCODING);
     }
 }

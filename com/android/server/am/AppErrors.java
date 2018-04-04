@@ -22,7 +22,6 @@ import com.android.internal.logging.nano.MetricsProto;
 import com.android.internal.os.ProcessCpuTracker;
 import com.android.server.RescueParty;
 import com.android.server.Watchdog;
-import com.android.server.am.proto.AppErrorsProto;
 
 import android.app.ActivityManager;
 import android.app.ActivityOptions;
@@ -48,6 +47,7 @@ import android.util.ArraySet;
 import android.util.EventLog;
 import android.util.Log;
 import android.util.Slog;
+import android.util.StatsLog;
 import android.util.SparseArray;
 import android.util.TimeUtils;
 import android.util.proto.ProtoOutputStream;
@@ -793,10 +793,20 @@ class AppErrors {
         AppErrorDialog.Data data = (AppErrorDialog.Data) msg.obj;
         boolean showBackground = Settings.Secure.getInt(mContext.getContentResolver(),
                 Settings.Secure.ANR_SHOW_BACKGROUND, 0) != 0;
+
+        AppErrorDialog dialogToShow = null;
+        final String packageName;
+        final int userId;
         synchronized (mService) {
-            ProcessRecord proc = data.proc;
-            AppErrorResult res = data.result;
-            if (proc != null && proc.crashDialog != null) {
+            final ProcessRecord proc = data.proc;
+            final AppErrorResult res = data.result;
+            if (proc == null) {
+                Slog.e(TAG, "handleShowAppErrorUi: proc is null");
+                return;
+            }
+            packageName = proc.info.packageName;
+            userId = proc.userId;
+            if (proc.crashDialog != null) {
                 Slog.e(TAG, "App already has crash dialog: " + proc);
                 if (res != null) {
                     res.set(AppErrorDialog.ALREADY_SHOWING);
@@ -806,8 +816,8 @@ class AppErrors {
             boolean isBackground = (UserHandle.getAppId(proc.uid)
                     >= Process.FIRST_APPLICATION_UID
                     && proc.pid != MY_PID);
-            for (int userId : mService.mUserController.getCurrentProfileIds()) {
-                isBackground &= (proc.userId != userId);
+            for (int profileId : mService.mUserController.getCurrentProfileIds()) {
+                isBackground &= (userId != profileId);
             }
             if (isBackground && !showBackground) {
                 Slog.w(TAG, "Skipping crash dialog of " + proc + ": background");
@@ -828,7 +838,7 @@ class AppErrors {
                     mAppsNotReportingCrashes.contains(proc.info.packageName);
             if ((mService.canShowErrorDialogs() || showBackground) && !crashSilenced
                     && (showFirstCrash || showFirstCrashDevOption || data.repeating)) {
-                proc.crashDialog = new AppErrorDialog(mContext, mService, data);
+                proc.crashDialog = dialogToShow = new AppErrorDialog(mContext, mService, data);
             } else {
                 // The device is asleep, so just pretend that the user
                 // saw a crash dialog and hit "force quit".
@@ -838,10 +848,9 @@ class AppErrors {
             }
         }
         // If we've created a crash dialog, show it without the lock held
-        if(data.proc.crashDialog != null) {
-            Slog.i(TAG, "Showing crash dialog for package " + data.proc.info.packageName
-                    + " u" + data.proc.userId);
-            data.proc.crashDialog.show();
+        if (dialogToShow != null) {
+            Slog.i(TAG, "Showing crash dialog for package " + packageName + " u" + userId);
+            dialogToShow.show();
         }
     }
 
@@ -1031,6 +1040,16 @@ class AppErrors {
             Process.sendSignal(app.pid, Process.SIGNAL_QUIT);
         }
 
+        StatsLog.write(StatsLog.ANR_OCCURRED, app.uid, app.processName,
+                activity == null ? "unknown": activity.shortComponentName, annotation,
+                (app.info != null) ? (app.info.isInstantApp()
+                        ? StatsLog.ANROCCURRED__IS_INSTANT_APP__TRUE
+                        : StatsLog.ANROCCURRED__IS_INSTANT_APP__FALSE)
+                        : StatsLog.ANROCCURRED__IS_INSTANT_APP__UNAVAILABLE,
+                app != null ? (app.isInterestingToUserLocked()
+                        ? StatsLog.ANROCCURRED__FOREGROUND_STATE__FOREGROUND
+                        : StatsLog.ANROCCURRED__FOREGROUND_STATE__BACKGROUND)
+                        : StatsLog.ANROCCURRED__FOREGROUND_STATE__UNKNOWN);
         mService.addErrorToDropBox("anr", app, app.processName, activity, parent, annotation,
                 cpuInfo, tracesFile, null);
 
@@ -1071,14 +1090,8 @@ class AppErrors {
 
             // Bring up the infamous App Not Responding dialog
             Message msg = Message.obtain();
-            HashMap<String, Object> map = new HashMap<String, Object>();
             msg.what = ActivityManagerService.SHOW_NOT_RESPONDING_UI_MSG;
-            msg.obj = map;
-            msg.arg1 = aboveSystem ? 1 : 0;
-            map.put("app", app);
-            if (activity != null) {
-                map.put("activity", activity);
-            }
+            msg.obj = new AppNotRespondingDialog.Data(app, activity, aboveSystem);
 
             mService.mUiHandler.sendMessage(msg);
         }
@@ -1095,11 +1108,15 @@ class AppErrors {
     }
 
     void handleShowAnrUi(Message msg) {
-        Dialog d = null;
+        Dialog dialogToShow = null;
         synchronized (mService) {
-            HashMap<String, Object> data = (HashMap<String, Object>) msg.obj;
-            ProcessRecord proc = (ProcessRecord)data.get("app");
-            if (proc != null && proc.anrDialog != null) {
+            AppNotRespondingDialog.Data data = (AppNotRespondingDialog.Data) msg.obj;
+            final ProcessRecord proc = data.proc;
+            if (proc == null) {
+                Slog.e(TAG, "handleShowAnrUi: proc is null");
+                return;
+            }
+            if (proc.anrDialog != null) {
                 Slog.e(TAG, "App already has anr dialog: " + proc);
                 MetricsLogger.action(mContext, MetricsProto.MetricsEvent.ACTION_APP_ANR,
                         AppNotRespondingDialog.ALREADY_SHOWING);
@@ -1118,10 +1135,8 @@ class AppErrors {
             boolean showBackground = Settings.Secure.getInt(mContext.getContentResolver(),
                     Settings.Secure.ANR_SHOW_BACKGROUND, 0) != 0;
             if (mService.canShowErrorDialogs() || showBackground) {
-                d = new AppNotRespondingDialog(mService,
-                        mContext, proc, (ActivityRecord)data.get("activity"),
-                        msg.arg1 != 0);
-                proc.anrDialog = d;
+                dialogToShow = new AppNotRespondingDialog(mService, mContext, data);
+                proc.anrDialog = dialogToShow;
             } else {
                 MetricsLogger.action(mContext, MetricsProto.MetricsEvent.ACTION_APP_ANR,
                         AppNotRespondingDialog.CANT_SHOW);
@@ -1130,8 +1145,8 @@ class AppErrors {
             }
         }
         // If we've created a crash dialog, show it without the lock held
-        if (d != null) {
-            d.show();
+        if (dialogToShow != null) {
+            dialogToShow.show();
         }
     }
 

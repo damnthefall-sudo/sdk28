@@ -111,12 +111,6 @@ public class TelecomManager {
             "android.telecom.action.SHOW_RESPOND_VIA_SMS_SETTINGS";
 
     /**
-     * The {@link android.content.Intent} action used to show the assisted dialing settings.
-     */
-    public static final String ACTION_SHOW_ASSISTED_DIALING_SETTINGS =
-            "android.telecom.action.SHOW_ASSISTED_DIALING_SETTINGS";
-
-    /**
      * The {@link android.content.Intent} action used to show the settings page used to configure
      * {@link PhoneAccount} preferences.
      */
@@ -619,15 +613,10 @@ public class TelecomManager {
     /**
      * The boolean indicated by this extra controls whether or not a call is eligible to undergo
      * assisted dialing. This extra is stored under {@link #EXTRA_OUTGOING_CALL_EXTRAS}.
+     * @hide
      */
     public static final String EXTRA_USE_ASSISTED_DIALING =
             "android.telecom.extra.USE_ASSISTED_DIALING";
-
-    /**
-     * The bundle indicated by this extra store information related to the assisted dialing action.
-     */
-    public static final String EXTRA_ASSISTED_DIALING_TRANSFORMATION_INFO =
-            "android.telecom.extra.ASSISTED_DIALING_TRANSFORMATION_INFO";
 
     /**
      * The following 4 constants define how properties such as phone numbers and names are
@@ -1320,7 +1309,7 @@ public class TelecomManager {
     public boolean endCall() {
         try {
             if (isServiceConnected()) {
-                return getTelecomService().endCall();
+                return getTelecomService().endCall(mContext.getPackageName());
             }
         } catch (RemoteException e) {
             Log.e(TAG, "Error calling ITelecomService#endCall", e);
@@ -1805,8 +1794,25 @@ public class TelecomManager {
     }
 
     /**
-     * Called from the recipient side of a handover to indicate a desire to accept the handover
-     * of an ongoing call to another {@link ConnectionService} identified by
+     * Called by an app to indicate that it wishes to accept the handover of an ongoing call to a
+     * {@link PhoneAccountHandle} it defines.
+     * <p>
+     * A call handover is the process where an ongoing call is transferred from one app (i.e.
+     * {@link ConnectionService} to another app.  The user could, for example, choose to continue a
+     * mobile network call in a video calling app.  The mobile network call via the Telephony stack
+     * is referred to as the source of the handover, and the video calling app is referred to as the
+     * destination.
+     * <p>
+     * When considering a handover scenario the <em>initiating</em> device is where a user initiated
+     * the handover process (e.g. by calling {@link android.telecom.Call#handoverTo(
+     * PhoneAccountHandle, int, Bundle)}, and the other device is considered the <em>receiving</em>
+     * device.
+     * <p>
+     * For a full discussion of the handover process and the APIs involved, see
+     * {@link android.telecom.Call#handoverTo(PhoneAccountHandle, int, Bundle)}.
+     * <p>
+     * This method is called from the <em>receiving</em> side of a handover to indicate a desire to
+     * accept the handover of an ongoing call to another {@link ConnectionService} identified by
      * {@link PhoneAccountHandle} destAcct. For managed {@link ConnectionService}s, the specified
      * {@link PhoneAccountHandle} must have been registered with {@link #registerPhoneAccount} and
      * the user must have enabled the corresponding {@link PhoneAccount}.  This can be checked using
@@ -1830,7 +1836,8 @@ public class TelecomManager {
      * @param videoState Video state after the handover.
      * @param destAcct The {@link PhoneAccountHandle} registered to the calling package.
      */
-    public void acceptHandover(Uri srcAddr, int videoState, PhoneAccountHandle destAcct) {
+    public void acceptHandover(Uri srcAddr, @VideoProfile.VideoState int videoState,
+            PhoneAccountHandle destAcct) {
         try {
             if (isServiceConnected()) {
                 getTelecomService().acceptHandover(srcAddr, videoState, destAcct);

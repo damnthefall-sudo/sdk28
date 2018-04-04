@@ -34,7 +34,7 @@ import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.TemporaryBuffer;
 import android.text.GraphicsOperations;
-import android.text.MeasuredText;
+import android.text.PrecomputedText;
 import android.text.SpannableString;
 import android.text.SpannedString;
 import android.text.TextUtils;
@@ -474,8 +474,7 @@ public class RecordingCanvas extends Canvas {
         }
 
         nDrawTextRun(mNativeCanvasWrapper, text, index, count, contextIndex, contextCount,
-                x, y, isRtl, paint.getNativeInstance(), 0 /* measured text */,
-                0 /* measured text offset */);
+                x, y, isRtl, paint.getNativeInstance(), 0 /* measured text */);
     }
 
     @Override
@@ -506,19 +505,16 @@ public class RecordingCanvas extends Canvas {
             char[] buf = TemporaryBuffer.obtain(contextLen);
             TextUtils.getChars(text, contextStart, contextEnd, buf, 0);
             long measuredTextPtr = 0;
-            int measuredTextOffset = 0;
-            if (text instanceof MeasuredText) {
-                MeasuredText mt = (MeasuredText) text;
+            if (text instanceof PrecomputedText) {
+                PrecomputedText mt = (PrecomputedText) text;
                 int paraIndex = mt.findParaIndex(start);
                 if (end <= mt.getParagraphEnd(paraIndex)) {
                     // Only support if the target is in the same paragraph.
                     measuredTextPtr = mt.getMeasuredParagraph(paraIndex).getNativePtr();
-                    measuredTextOffset = start - mt.getParagraphStart(paraIndex);
                 }
             }
             nDrawTextRun(mNativeCanvasWrapper, buf, start - contextStart, len,
-                    0, contextLen, x, y, isRtl, paint.getNativeInstance(),
-                    measuredTextPtr, measuredTextOffset);
+                    0, contextLen, x, y, isRtl, paint.getNativeInstance(), measuredTextPtr);
             TemporaryBuffer.recycle(buf);
         }
     }
@@ -641,7 +637,7 @@ public class RecordingCanvas extends Canvas {
     @FastNative
     private static native void nDrawTextRun(long nativeCanvas, char[] text, int start, int count,
             int contextStart, int contextCount, float x, float y, boolean isRtl, long nativePaint,
-            long nativeMeasuredText, int measuredTextOffset);
+            long nativePrecomputedText);
 
     @FastNative
     private static native void nDrawTextOnPath(long nativeCanvas, char[] text, int index, int count,

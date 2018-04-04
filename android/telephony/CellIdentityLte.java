@@ -16,6 +16,7 @@
 
 package android.telephony;
 
+import android.annotation.Nullable;
 import android.os.Parcel;
 import android.text.TextUtils;
 
@@ -36,22 +37,19 @@ public final class CellIdentityLte extends CellIdentity {
     private final int mTac;
     // 18-bit Absolute RF Channel Number
     private final int mEarfcn;
-    // long alpha Operator Name String or Enhanced Operator Name String
-    private final String mAlphaLong;
-    // short alpha Operator Name String or Enhanced Operator Name String
-    private final String mAlphaShort;
+    // cell bandwidth, in kHz
+    private final int mBandwidth;
 
     /**
      * @hide
      */
     public CellIdentityLte() {
-        super(TAG, TYPE_LTE, null, null);
+        super(TAG, TYPE_LTE, null, null, null, null);
         mCi = Integer.MAX_VALUE;
         mPci = Integer.MAX_VALUE;
         mTac = Integer.MAX_VALUE;
         mEarfcn = Integer.MAX_VALUE;
-        mAlphaLong = null;
-        mAlphaShort = null;
+        mBandwidth = Integer.MAX_VALUE;
     }
 
     /**
@@ -65,7 +63,8 @@ public final class CellIdentityLte extends CellIdentity {
      * @hide
      */
     public CellIdentityLte(int mcc, int mnc, int ci, int pci, int tac) {
-        this(ci, pci, tac, Integer.MAX_VALUE, String.valueOf(mcc), String.valueOf(mnc), null, null);
+        this(ci, pci, tac, Integer.MAX_VALUE, Integer.MAX_VALUE, String.valueOf(mcc),
+                String.valueOf(mnc), null, null);
     }
 
     /**
@@ -80,7 +79,8 @@ public final class CellIdentityLte extends CellIdentity {
      * @hide
      */
     public CellIdentityLte(int mcc, int mnc, int ci, int pci, int tac, int earfcn) {
-        this(ci, pci, tac, earfcn, String.valueOf(mcc), String.valueOf(mnc), null, null);
+        this(ci, pci, tac, earfcn, Integer.MAX_VALUE, String.valueOf(mcc), String.valueOf(mnc),
+                null, null);
     }
 
     /**
@@ -89,6 +89,7 @@ public final class CellIdentityLte extends CellIdentity {
      * @param pci Physical Cell Id 0..503
      * @param tac 16-bit Tracking Area Code
      * @param earfcn 18-bit LTE Absolute RF Channel Number
+     * @param bandwidth cell bandwidth in kHz
      * @param mccStr 3-digit Mobile Country Code in string format
      * @param mncStr 2 or 3-digit Mobile Network Code in string format
      * @param alphal long alpha Operator Name String or Enhanced Operator Name String
@@ -96,19 +97,18 @@ public final class CellIdentityLte extends CellIdentity {
      *
      * @hide
      */
-    public CellIdentityLte(int ci, int pci, int tac, int earfcn, String mccStr,
-                            String mncStr, String alphal, String alphas) {
-        super(TAG, TYPE_LTE, mccStr, mncStr);
+    public CellIdentityLte(int ci, int pci, int tac, int earfcn, int bandwidth, String mccStr,
+            String mncStr, String alphal, String alphas) {
+        super(TAG, TYPE_LTE, mccStr, mncStr, alphal, alphas);
         mCi = ci;
         mPci = pci;
         mTac = tac;
         mEarfcn = earfcn;
-        mAlphaLong = alphal;
-        mAlphaShort = alphas;
+        mBandwidth = bandwidth;
     }
 
     private CellIdentityLte(CellIdentityLte cid) {
-        this(cid.mCi, cid.mPci, cid.mTac, cid.mEarfcn, cid.mMccStr,
+        this(cid.mCi, cid.mPci, cid.mTac, cid.mEarfcn, cid.mBandwidth, cid.mMccStr,
                 cid.mMncStr, cid.mAlphaLong, cid.mAlphaShort);
     }
 
@@ -118,7 +118,7 @@ public final class CellIdentityLte extends CellIdentity {
 
     /**
      * @return 3-digit Mobile Country Code, 0..999, Integer.MAX_VALUE if unknown
-     * @deprecated Use {@link #getMccStr} instead.
+     * @deprecated Use {@link #getMccString} instead.
      */
     @Deprecated
     public int getMcc() {
@@ -127,7 +127,7 @@ public final class CellIdentityLte extends CellIdentity {
 
     /**
      * @return 2 or 3-digit Mobile Network Code, 0..999, Integer.MAX_VALUE if unknown
-     * @deprecated Use {@link #getMncStr} instead.
+     * @deprecated Use {@link #getMncString} instead.
      */
     @Deprecated
     public int getMnc() {
@@ -163,16 +163,23 @@ public final class CellIdentityLte extends CellIdentity {
     }
 
     /**
+     * @return Cell bandwidth in kHz, Integer.MAX_VALUE if unknown
+     */
+    public int getBandwidth() {
+        return mBandwidth;
+    }
+
+    /**
      * @return Mobile Country Code in string format, null if unknown
      */
-    public String getMccStr() {
+    public String getMccString() {
         return mMccStr;
     }
 
     /**
      * @return Mobile Network Code in string format, null if unknown
      */
-    public String getMncStr() {
+    public String getMncString() {
         return mMncStr;
     }
 
@@ -183,25 +190,15 @@ public final class CellIdentityLte extends CellIdentity {
         return (mMccStr == null || mMncStr == null) ? null : mMccStr + mMncStr;
     }
 
-    /**
-     * @return The long alpha tag associated with the current scan result (may be the operator
-     * name string or extended operator name string). May be null if unknown.
-     */
-    public CharSequence getOperatorAlphaLong() {
-        return mAlphaLong;
-    }
-
-    /**
-     * @return The short alpha tag associated with the current scan result (may be the operator
-     * name string or extended operator name string).  May be null if unknown.
-     */
-    public CharSequence getOperatorAlphaShort() {
-        return mAlphaShort;
+    /** @hide */
+    @Override
+    public int getChannelNumber() {
+        return mEarfcn;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(mMccStr, mMncStr, mCi, mPci, mTac, mAlphaLong, mAlphaShort);
+        return Objects.hash(mCi, mPci, mTac, super.hashCode());
     }
 
     @Override
@@ -219,10 +216,10 @@ public final class CellIdentityLte extends CellIdentity {
                 && mPci == o.mPci
                 && mTac == o.mTac
                 && mEarfcn == o.mEarfcn
+                && mBandwidth == o.mBandwidth
                 && TextUtils.equals(mMccStr, o.mMccStr)
                 && TextUtils.equals(mMncStr, o.mMncStr)
-                && TextUtils.equals(mAlphaLong, o.mAlphaLong)
-                && TextUtils.equals(mAlphaShort, o.mAlphaShort);
+                && super.equals(other);
     }
 
     @Override
@@ -232,6 +229,7 @@ public final class CellIdentityLte extends CellIdentity {
         .append(" mPci=").append(mPci)
         .append(" mTac=").append(mTac)
         .append(" mEarfcn=").append(mEarfcn)
+        .append(" mBandwidth=").append(mBandwidth)
         .append(" mMcc=").append(mMccStr)
         .append(" mMnc=").append(mMncStr)
         .append(" mAlphaLong=").append(mAlphaLong)
@@ -248,8 +246,7 @@ public final class CellIdentityLte extends CellIdentity {
         dest.writeInt(mPci);
         dest.writeInt(mTac);
         dest.writeInt(mEarfcn);
-        dest.writeString(mAlphaLong);
-        dest.writeString(mAlphaShort);
+        dest.writeInt(mBandwidth);
     }
 
     /** Construct from Parcel, type has already been processed */
@@ -259,8 +256,7 @@ public final class CellIdentityLte extends CellIdentity {
         mPci = in.readInt();
         mTac = in.readInt();
         mEarfcn = in.readInt();
-        mAlphaLong = in.readString();
-        mAlphaShort = in.readString();
+        mBandwidth = in.readInt();
 
         if (DBG) log(toString());
     }

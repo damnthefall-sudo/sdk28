@@ -16,6 +16,7 @@
 
 package android.net.wifi;
 
+import android.annotation.NonNull;
 import android.annotation.SystemApi;
 import android.content.pm.PackageManager;
 import android.net.IpConfiguration;
@@ -24,11 +25,13 @@ import android.net.MacAddress;
 import android.net.ProxyInfo;
 import android.net.StaticIpConfiguration;
 import android.net.Uri;
+import android.net.wifi.WifiInfo;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.os.UserHandle;
 import android.text.TextUtils;
 import android.util.BackupUtils;
+import android.util.Log;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
@@ -75,6 +78,8 @@ public class WifiConfiguration implements Parcelable {
 
     /** {@hide} */
     private String mPasspointManagementObjectTree;
+    /** {@hide} */
+    private static final int MAXIMUM_RANDOM_MAC_GENERATION_RETRY = 3;
 
     /**
      * Recognized key management schemes.
@@ -85,9 +90,6 @@ public class WifiConfiguration implements Parcelable {
         /** WPA is not used; plaintext or static WEP could be used. */
         public static final int NONE = 0;
         /** WPA pre-shared key (requires {@code preSharedKey} to be specified). */
-        /** @deprecated Due to security and performance limitations, use of WPA-1 networks
-         * is discouraged. WPA-2 (RSN) should be used instead. */
-        @Deprecated
         public static final int WPA_PSK = 1;
         /** WPA using EAP authentication. Generally used with an external authentication server. */
         public static final int WPA_EAP = 2;
@@ -121,7 +123,7 @@ public class WifiConfiguration implements Parcelable {
 
         public static final String varName = "key_mgmt";
 
-        public static final String[] strings = { "NONE", /* deprecated */ "WPA_PSK", "WPA_EAP",
+        public static final String[] strings = { "NONE", "WPA_PSK", "WPA_EAP",
                 "IEEE8021X", "WPA2_PSK", "OSEN", "FT_PSK", "FT_EAP" };
     }
 
@@ -439,6 +441,7 @@ public class WifiConfiguration implements Parcelable {
     /**
      * @hide
      */
+    @NonNull
     private IpConfiguration mIpConfiguration;
 
     /**
@@ -529,91 +532,6 @@ public class WifiConfiguration implements Parcelable {
      */
     /** @hide **/
     public static int INVALID_RSSI = -127;
-
-    /**
-     * @hide
-     * A summary of the RSSI and Band status for that configuration
-     * This is used as a temporary value by the auto-join controller
-     */
-    public static final class Visibility {
-        public int rssi5;   // strongest 5GHz RSSI
-        public int rssi24;  // strongest 2.4GHz RSSI
-        public int num5;    // number of BSSIDs on 5GHz
-        public int num24;   // number of BSSIDs on 2.4GHz
-        public long age5;   // timestamp of the strongest 5GHz BSSID (last time it was seen)
-        public long age24;  // timestamp of the strongest 2.4GHz BSSID (last time it was seen)
-        public String BSSID24;
-        public String BSSID5;
-        public int score; // Debug only, indicate last score used for autojoin/cell-handover
-        public int currentNetworkBoost; // Debug only, indicate boost applied to RSSI if current
-        public int bandPreferenceBoost; // Debug only, indicate boost applied to RSSI if current
-        public int lastChoiceBoost; // Debug only, indicate last choice applied to this configuration
-        public String lastChoiceConfig; // Debug only, indicate last choice applied to this configuration
-
-        public Visibility() {
-            rssi5 = INVALID_RSSI;
-            rssi24 = INVALID_RSSI;
-        }
-
-        public Visibility(Visibility source) {
-            rssi5 = source.rssi5;
-            rssi24 = source.rssi24;
-            age24 = source.age24;
-            age5 = source.age5;
-            num24 = source.num24;
-            num5 = source.num5;
-            BSSID5 = source.BSSID5;
-            BSSID24 = source.BSSID24;
-        }
-
-        @Override
-        public String toString() {
-            StringBuilder sbuf = new StringBuilder();
-            sbuf.append("[");
-            if (rssi24 > INVALID_RSSI) {
-                sbuf.append(Integer.toString(rssi24));
-                sbuf.append(",");
-                sbuf.append(Integer.toString(num24));
-                if (BSSID24 != null) sbuf.append(",").append(BSSID24);
-            }
-            sbuf.append("; ");
-            if (rssi5 > INVALID_RSSI) {
-                sbuf.append(Integer.toString(rssi5));
-                sbuf.append(",");
-                sbuf.append(Integer.toString(num5));
-                if (BSSID5 != null) sbuf.append(",").append(BSSID5);
-            }
-            if (score != 0) {
-                sbuf.append("; ").append(score);
-                sbuf.append(", ").append(currentNetworkBoost);
-                sbuf.append(", ").append(bandPreferenceBoost);
-                if (lastChoiceConfig != null) {
-                    sbuf.append(", ").append(lastChoiceBoost);
-                    sbuf.append(", ").append(lastChoiceConfig);
-                }
-            }
-            sbuf.append("]");
-            return sbuf.toString();
-        }
-    }
-
-    /** @hide
-     * Cache the visibility status of this configuration.
-     * Visibility can change at any time depending on scan results availability.
-     * Owner of the WifiConfiguration is responsible to set this field based on
-     * recent scan results.
-     ***/
-    public Visibility visibility;
-
-    /** @hide
-     * calculate and set Visibility for that configuration.
-     *
-     * age in milliseconds: we will consider only ScanResults that are more recent,
-     * i.e. younger.
-     ***/
-    public void setVisibility(Visibility status) {
-        visibility = status;
-    }
 
     // States for the userApproved field
     /**
@@ -884,27 +802,37 @@ public class WifiConfiguration implements Parcelable {
      * @hide
      * Randomized MAC address to use with this particular network
      */
+    @NonNull
     private MacAddress mRandomizedMacAddress;
 
     /**
      * @hide
      * Checks if the given MAC address can be used for Connected Mac Randomization
-     * by verifying that it is non-null, unicast, and locally assigned.
+     * by verifying that it is non-null, unicast, locally assigned, and not default mac.
      * @param mac MacAddress to check
      * @return true if mac is good to use
      */
-    private boolean isValidMacAddressForRandomization(MacAddress mac) {
-        return mac != null && !mac.isMulticastAddress() && mac.isLocallyAssigned();
+    public static boolean isValidMacAddressForRandomization(MacAddress mac) {
+        return mac != null && !mac.isMulticastAddress() && mac.isLocallyAssigned()
+                && !MacAddress.fromString(WifiInfo.DEFAULT_MAC_ADDRESS).equals(mac);
     }
 
     /**
      * @hide
      * Returns Randomized MAC address to use with the network.
-     * If it is not set/valid, create a new randomized address.
+     * If it is not set/valid, creates a new randomized address.
+     * If it can't generate a valid mac, returns the default MAC.
      */
-    public MacAddress getOrCreateRandomizedMacAddress() {
-        if (!isValidMacAddressForRandomization(mRandomizedMacAddress)) {
+    public @NonNull MacAddress getOrCreateRandomizedMacAddress() {
+        int randomMacGenerationCount = 0;
+        while (!isValidMacAddressForRandomization(mRandomizedMacAddress)
+                && randomMacGenerationCount < MAXIMUM_RANDOM_MAC_GENERATION_RETRY) {
             mRandomizedMacAddress = MacAddress.createRandomUnicastAddress();
+            randomMacGenerationCount++;
+        }
+
+        if (!isValidMacAddressForRandomization(mRandomizedMacAddress)) {
+            mRandomizedMacAddress = MacAddress.fromString(WifiInfo.DEFAULT_MAC_ADDRESS);
         }
         return mRandomizedMacAddress;
     }
@@ -914,7 +842,7 @@ public class WifiConfiguration implements Parcelable {
      * Returns MAC address set to be the local randomized MAC address.
      * Does not guarantee that the returned address is valid for use.
      */
-    public MacAddress getRandomizedMacAddress() {
+    public @NonNull MacAddress getRandomizedMacAddress() {
         return mRandomizedMacAddress;
     }
 
@@ -922,7 +850,11 @@ public class WifiConfiguration implements Parcelable {
      * @hide
      * @param mac MacAddress to change into
      */
-    public void setRandomizedMacAddress(MacAddress mac) {
+    public void setRandomizedMacAddress(@NonNull MacAddress mac) {
+        if (mac == null) {
+            Log.e(TAG, "setRandomizedMacAddress received null MacAddress.");
+            return;
+        }
         mRandomizedMacAddress = mac;
     }
 
@@ -1615,6 +1547,7 @@ public class WifiConfiguration implements Parcelable {
         creatorUid = -1;
         shared = true;
         dtimInterval = 0;
+        mRandomizedMacAddress = MacAddress.fromString(WifiInfo.DEFAULT_MAC_ADDRESS);
     }
 
     /**
@@ -2023,6 +1956,7 @@ public class WifiConfiguration implements Parcelable {
 
     /** @hide */
     public void setIpConfiguration(IpConfiguration ipConfiguration) {
+        if (ipConfiguration == null) ipConfiguration = new IpConfiguration();
         mIpConfiguration = ipConfiguration;
     }
 
@@ -2069,11 +2003,15 @@ public class WifiConfiguration implements Parcelable {
     }
 
     /**
-     * Set the {@link ProxyInfo} for this WifiConfiguration.
+     * Set the {@link ProxyInfo} for this WifiConfiguration. This method should only be used by a
+     * device owner or profile owner. When other apps attempt to save a {@link WifiConfiguration}
+     * with modified proxy settings, the methods {@link WifiManager#addNetwork} and
+     * {@link WifiManager#updateNetwork} fail and return {@code -1}.
+     *
      * @param httpProxy {@link ProxyInfo} representing the httpProxy to be used by this
-     *                  WifiConfiguration. Setting this {@code null} will explicitly set no proxy,
-     *                  removing any proxy that was previously set.
-     * @exception throw IllegalArgumentException for invalid httpProxy
+     *                  WifiConfiguration. Setting this to {@code null} will explicitly set no
+     *                  proxy, removing any proxy that was previously set.
+     * @exception IllegalArgumentException for invalid httpProxy
      */
     public void setHttpProxy(ProxyInfo httpProxy) {
         if (httpProxy == null) {
@@ -2170,9 +2108,6 @@ public class WifiConfiguration implements Parcelable {
             meteredHint = source.meteredHint;
             meteredOverride = source.meteredOverride;
             useExternalScores = source.useExternalScores;
-            if (source.visibility != null) {
-                visibility = new Visibility(source.visibility);
-            }
 
             didSelfAdd = source.didSelfAdd;
             lastConnectUid = source.lastConnectUid;
@@ -2306,7 +2241,7 @@ public class WifiConfiguration implements Parcelable {
                 config.allowedGroupCiphers    = readBitSet(in);
 
                 config.enterpriseConfig = in.readParcelable(null);
-                config.mIpConfiguration = in.readParcelable(null);
+                config.setIpConfiguration(in.readParcelable(null));
                 config.dhcpServer = in.readString();
                 config.defaultGwMacAddress = in.readString();
                 config.selfAdded = in.readInt() != 0;

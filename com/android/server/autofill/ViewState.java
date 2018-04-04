@@ -67,6 +67,10 @@ final class ViewState {
     public static final int STATE_IGNORED = 0x080;
     /** User manually request autofill in this view, after it was already autofilled. */
     public static final int STATE_RESTARTED_SESSION = 0x100;
+    /** View is the URL bar of a package on compat mode. */
+    public  static final int STATE_URL_BAR = 0x200;
+    /** View was asked to autofil but failed to do so. */
+    public static final int STATE_AUTOFILL_FAILED = 0x400;
 
     public final AutofillId id;
 
@@ -206,29 +210,51 @@ final class ViewState {
 
     @Override
     public String toString() {
-        return "ViewState: [id=" + id + ", datasetId=" + mDatasetId
-                + ", currentValue=" + mCurrentValue
-                + ", autofilledValue=" + mAutofilledValue
-                + ", bounds=" + mVirtualBounds + ", state=" + getStateAsString() + "]";
+        final StringBuilder builder = new StringBuilder("ViewState: [id=").append(id);
+        if (mDatasetId != null) {
+            builder.append("datasetId:" ).append(mDatasetId);
+        }
+        builder.append("state:" ).append(getStateAsString());
+        if (mCurrentValue != null) {
+            builder.append("currentValue:" ).append(mCurrentValue);
+        }
+        if (mAutofilledValue != null) {
+            builder.append("autofilledValue:" ).append(mAutofilledValue);
+        }
+        if (mSanitizedValue != null) {
+            builder.append("sanitizedValue:" ).append(mSanitizedValue);
+        }
+        if (mVirtualBounds != null) {
+            builder.append("virtualBounds:" ).append(mVirtualBounds);
+        }
+        return builder.toString();
     }
 
     void dump(String prefix, PrintWriter pw) {
-        pw.print(prefix); pw.print("id:" ); pw.println(this.id);
-        pw.print(prefix); pw.print("datasetId:" ); pw.println(this.mDatasetId);
+        pw.print(prefix); pw.print("id:" ); pw.println(id);
+        if (mDatasetId != null) {
+            pw.print(prefix); pw.print("datasetId:" ); pw.println(mDatasetId);
+        }
         pw.print(prefix); pw.print("state:" ); pw.println(getStateAsString());
-        pw.print(prefix); pw.print("response:");
-        if (mResponse == null) {
-            pw.println("N/A");
-        } else {
+        if (mResponse != null) {
+            pw.print(prefix); pw.print("response:");
             if (sVerbose) {
                 pw.println(mResponse);
             } else {
-                pw.println(mResponse.getRequestId());
+                pw.print("id=");pw.println(mResponse.getRequestId());
             }
         }
-        pw.print(prefix); pw.print("currentValue:" ); pw.println(mCurrentValue);
-        pw.print(prefix); pw.print("autofilledValue:" ); pw.println(mAutofilledValue);
-        pw.print(prefix); pw.print("sanitizedValue:" ); pw.println(mSanitizedValue);
-        pw.print(prefix); pw.print("virtualBounds:" ); pw.println(mVirtualBounds);
+        if (mCurrentValue != null) {
+            pw.print(prefix); pw.print("currentValue:" ); pw.println(mCurrentValue);
+        }
+        if (mAutofilledValue != null) {
+            pw.print(prefix); pw.print("autofilledValue:" ); pw.println(mAutofilledValue);
+        }
+        if (mSanitizedValue != null) {
+            pw.print(prefix); pw.print("sanitizedValue:" ); pw.println(mSanitizedValue);
+        }
+        if (mVirtualBounds != null) {
+            pw.print(prefix); pw.print("virtualBounds:" ); pw.println(mVirtualBounds);
+        }
     }
 }

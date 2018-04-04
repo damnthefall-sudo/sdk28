@@ -20,7 +20,12 @@ import android.Manifest;
 import android.app.ActivityManager;
 import android.app.AppOpsManager;
 import android.app.IUidObserver;
+import android.app.PendingIntent;
+import android.app.admin.DeviceAdminInfo;
+import android.app.admin.DevicePolicyManagerInternal;
+import android.app.usage.AppStandbyInfo;
 import android.app.usage.ConfigurationStats;
+import android.app.usage.EventStats;
 import android.app.usage.IUsageStatsManager;
 import android.app.usage.UsageEvents;
 import android.app.usage.UsageStatsManager;
@@ -71,6 +76,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 /**
  * A service that collects, aggregates, and persists application usage data.
@@ -98,6 +104,7 @@ public class UsageStatsService extends SystemService implements
     static final int MSG_REPORT_EVENT = 0;
     static final int MSG_FLUSH_TO_DISK = 1;
     static final int MSG_REMOVE_USER = 2;
+    static final int MSG_UID_STATE_CHANGED = 3;
 
     private final Object mLock = new Object();
     Handler mHandler;
@@ -106,6 +113,7 @@ public class UsageStatsService extends SystemService implements
     PackageManager mPackageManager;
     PackageManagerInternal mPackageManagerInternal;
     IDeviceIdleController mDeviceIdleController;
+    DevicePolicyManagerInternal mDpmInternal;
 
     private final SparseArray<UserUsageStatsService> mUserState = new SparseArray<>();
     private final SparseIntArray mUidToKernelCounter = new SparseIntArray();
@@ -113,16 +121,20 @@ public class UsageStatsService extends SystemService implements
     long mRealTimeSnapshot;
     long mSystemTimeSnapshot;
 
+    /** Manages the standby state of apps. */
     AppStandbyController mAppStandby;
+
+    /** Manages app time limit observers */
+    AppTimeLimitController mAppTimeLimit;
 
     private UsageStatsManagerInternal.AppIdleStateChangeListener mStandbyChangeListener =
             new UsageStatsManagerInternal.AppIdleStateChangeListener() {
                 @Override
                 public void onAppIdleStateChanged(String packageName, int userId, boolean idle,
-                        int bucket) {
+                        int bucket, int reason) {
                     Event event = new Event();
                     event.mEventType = Event.STANDBY_BUCKET_CHANGED;
-                    event.mBucket = bucket;
+                    event.mBucketAndReason = (bucket << 16) | (reason & 0xFFFF);
                     event.mPackage = packageName;
                     // This will later be converted to system time.
                     event.mTimeStamp = SystemClock.elapsedRealtime();
@@ -145,9 +157,24 @@ public class UsageStatsService extends SystemService implements
         mUserManager = (UserManager) getContext().getSystemService(Context.USER_SERVICE);
         mPackageManager = getContext().getPackageManager();
         mPackageManagerInternal = LocalServices.getService(PackageManagerInternal.class);
+        mDpmInternal = LocalServices.getService(DevicePolicyManagerInternal.class);
         mHandler = new H(BackgroundThread.get().getLooper());
 
         mAppStandby = new AppStandbyController(getContext(), BackgroundThread.get().getLooper());
+
+        mAppTimeLimit = new AppTimeLimitController(
+                (observerId, userId, timeLimit, timeElapsed, callbackIntent) -> {
+                    Intent intent = new Intent();
+                    intent.putExtra(UsageStatsManager.EXTRA_OBSERVER_ID, observerId);
+                    intent.putExtra(UsageStatsManager.EXTRA_TIME_LIMIT, timeLimit);
+                    intent.putExtra(UsageStatsManager.EXTRA_TIME_USED, timeElapsed);
+                    try {
+                        callbackIntent.send(getContext(), 0, intent);
+                    } catch (PendingIntent.CanceledException e) {
+                        Slog.w(TAG, "Couldn't deliver callback: "
+                                + callbackIntent);
+                    }
+                }, mHandler.getLooper());
 
         mAppStandby.addListener(mStandbyChangeListener);
         File systemDataDir = new File(Environment.getDataDirectory(), "system");
@@ -219,18 +246,7 @@ public class UsageStatsService extends SystemService implements
     private final IUidObserver mUidObserver = new IUidObserver.Stub() {
         @Override
         public void onUidStateChanged(int uid, int procState, long procStateSeq) {
-            final int newCounter = (procState <= ActivityManager.PROCESS_STATE_TOP) ? 0 : 1;
-            synchronized (mUidToKernelCounter) {
-                final int oldCounter = mUidToKernelCounter.get(uid, 0);
-                if (newCounter != oldCounter) {
-                    mUidToKernelCounter.put(uid, newCounter);
-                    try {
-                        FileUtils.stringToFile(KERNEL_COUNTER_FILE, uid + " " + newCounter);
-                    } catch (IOException e) {
-                        Slog.w(TAG, "Failed to update counter set: " + e);
-                    }
-                }
-            }
+            mHandler.obtainMessage(MSG_UID_STATE_CHANGED, uid, procState).sendToTarget();
         }
 
         @Override
@@ -383,6 +399,16 @@ public class UsageStatsService extends SystemService implements
             service.reportEvent(event);
 
             mAppStandby.reportEvent(event, elapsedRealtime, userId);
+            switch (event.mEventType) {
+                case Event.MOVE_TO_FOREGROUND:
+                    mAppTimeLimit.moveToForeground(event.getPackageName(), event.getClassName(),
+                            userId);
+                    break;
+                case Event.MOVE_TO_BACKGROUND:
+                    mAppTimeLimit.moveToBackground(event.getPackageName(), event.getClassName(),
+                            userId);
+                    break;
+            }
         }
     }
 
@@ -403,6 +429,7 @@ public class UsageStatsService extends SystemService implements
             Slog.i(TAG, "Removing user " + userId + " and all data.");
             mUserState.remove(userId);
             mAppStandby.onUserRemoved(userId);
+            mAppTimeLimit.onUserRemoved(userId);
             cleanUpRemovedUsersLocked();
         }
     }
@@ -460,6 +487,23 @@ public class UsageStatsService extends SystemService implements
     /**
      * Called by the Binder stub.
      */
+    List<EventStats> queryEventStats(int userId, int bucketType, long beginTime,
+            long endTime) {
+        synchronized (mLock) {
+            final long timeNow = checkAndGetTimeLocked();
+            if (!validRange(timeNow, beginTime, endTime)) {
+                return null;
+            }
+
+            final UserUsageStatsService service =
+                    getUserDataAndInitializeIfNeededLocked(userId, timeNow);
+            return service.queryEventStats(bucketType, beginTime, endTime);
+        }
+    }
+
+    /**
+     * Called by the Binder stub.
+     */
     UsageEvents queryEvents(int userId, long beginTime, long endTime,
             boolean shouldObfuscateInstantApps) {
         synchronized (mLock) {
@@ -471,6 +515,23 @@ public class UsageStatsService extends SystemService implements
             final UserUsageStatsService service =
                     getUserDataAndInitializeIfNeededLocked(userId, timeNow);
             return service.queryEvents(beginTime, endTime, shouldObfuscateInstantApps);
+        }
+    }
+
+    /**
+     * Called by the Binder stub.
+     */
+    UsageEvents queryEventsForPackage(int userId, long beginTime, long endTime,
+            String packageName) {
+        synchronized (mLock) {
+            final long timeNow = checkAndGetTimeLocked();
+            if (!validRange(timeNow, beginTime, endTime)) {
+                return null;
+            }
+
+            final UserUsageStatsService service =
+                    getUserDataAndInitializeIfNeededLocked(userId, timeNow);
+            return service.queryEventsForPackage(beginTime, endTime, packageName);
         }
     }
 
@@ -498,6 +559,7 @@ public class UsageStatsService extends SystemService implements
             IndentingPrintWriter idpw = new IndentingPrintWriter(pw, "  ");
 
             boolean checkin = false;
+            boolean compact = false;
             String pkg = null;
 
             if (args != null) {
@@ -505,6 +567,9 @@ public class UsageStatsService extends SystemService implements
                     String arg = args[i];
                     if ("--checkin".equals(arg)) {
                         checkin = true;
+                    } else
+                    if ("-c".equals(arg)) {
+                        compact = true;
                     } else if ("flush".equals(arg)) {
                         flushToDiskLocked();
                         pw.println("Flushed stats to disk");
@@ -526,7 +591,7 @@ public class UsageStatsService extends SystemService implements
                 if (checkin) {
                     mUserState.valueAt(i).checkin(idpw);
                 } else {
-                    mUserState.valueAt(i).dump(idpw, pkg);
+                    mUserState.valueAt(i).dump(idpw, pkg, compact);
                     idpw.println();
                 }
                 mAppStandby.dumpUser(idpw, userId, pkg);
@@ -537,6 +602,8 @@ public class UsageStatsService extends SystemService implements
                 pw.println();
                 mAppStandby.dumpState(args, pw);
             }
+
+            mAppTimeLimit.dump(pw);
         }
     }
 
@@ -559,6 +626,25 @@ public class UsageStatsService extends SystemService implements
                 case MSG_REMOVE_USER:
                     onUserRemoved(msg.arg1);
                     break;
+
+                case MSG_UID_STATE_CHANGED: {
+                    final int uid = msg.arg1;
+                    final int procState = msg.arg2;
+
+                    final int newCounter = (procState <= ActivityManager.PROCESS_STATE_TOP) ? 0 : 1;
+                    synchronized (mUidToKernelCounter) {
+                        final int oldCounter = mUidToKernelCounter.get(uid, 0);
+                        if (newCounter != oldCounter) {
+                            mUidToKernelCounter.put(uid, newCounter);
+                            try {
+                                FileUtils.stringToFile(KERNEL_COUNTER_FILE, uid + " " + newCounter);
+                            } catch (IOException e) {
+                                Slog.w(TAG, "Failed to update counter set: " + e);
+                            }
+                        }
+                    }
+                    break;
+                }
 
                 default:
                     super.handleMessage(msg);
@@ -583,6 +669,19 @@ public class UsageStatsService extends SystemService implements
                         == PackageManager.PERMISSION_GRANTED;
             }
             return mode == AppOpsManager.MODE_ALLOWED;
+        }
+
+        private boolean hasObserverPermission(String callingPackage) {
+            final int callingUid = Binder.getCallingUid();
+            if (callingUid == Process.SYSTEM_UID
+                    || (mDpmInternal != null
+                        && mDpmInternal.isActiveAdminWithPolicy(callingUid,
+                            DeviceAdminInfo.USES_POLICY_PROFILE_OWNER))) {
+                // Caller is the system or the profile owner, so proceed.
+                return true;
+            }
+            return getContext().checkCallingPermission(Manifest.permission.OBSERVE_APP_USAGE)
+                    == PackageManager.PERMISSION_GRANTED;
         }
 
         @Override
@@ -632,6 +731,28 @@ public class UsageStatsService extends SystemService implements
         }
 
         @Override
+        public ParceledListSlice<EventStats> queryEventStats(int bucketType,
+                long beginTime, long endTime, String callingPackage) throws RemoteException {
+            if (!hasPermission(callingPackage)) {
+                return null;
+            }
+
+            final int userId = UserHandle.getCallingUserId();
+            final long token = Binder.clearCallingIdentity();
+            try {
+                final List<EventStats> results =
+                        UsageStatsService.this.queryEventStats(userId, bucketType,
+                                beginTime, endTime);
+                if (results != null) {
+                    return new ParceledListSlice<>(results);
+                }
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+            return null;
+        }
+
+        @Override
         public UsageEvents queryEvents(long beginTime, long endTime, String callingPackage) {
             if (!hasPermission(callingPackage)) {
                 return null;
@@ -651,10 +772,30 @@ public class UsageStatsService extends SystemService implements
         }
 
         @Override
+        public UsageEvents queryEventsForPackage(long beginTime, long endTime,
+                String callingPackage) {
+            final int callingUid = Binder.getCallingUid();
+            final int callingUserId = UserHandle.getUserId(callingUid);
+
+            if (mPackageManagerInternal.getPackageUid(callingPackage, PackageManager.MATCH_ANY_USER,
+                    callingUserId) != callingUid) {
+                throw new SecurityException("Calling uid " + callingPackage + " cannot query events"
+                        + "for package " + callingPackage);
+            }
+            final long token = Binder.clearCallingIdentity();
+            try {
+                return UsageStatsService.this.queryEventsForPackage(callingUserId, beginTime,
+                        endTime, callingPackage);
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        @Override
         public boolean isAppInactive(String packageName, int userId) {
             try {
                 userId = ActivityManager.getService().handleIncomingUser(Binder.getCallingPid(),
-                        Binder.getCallingUid(), userId, false, true, "isAppInactive", null);
+                        Binder.getCallingUid(), userId, false, false, "isAppInactive", null);
             } catch (RemoteException re) {
                 throw re.rethrowFromSystemServer();
             }
@@ -739,10 +880,10 @@ public class UsageStatsService extends SystemService implements
             } catch (RemoteException re) {
                 throw re.rethrowFromSystemServer();
             }
-            final boolean shellCaller = callingUid == 0 || callingUid == Process.SHELL_UID;
-            final String reason = shellCaller
-                    ? UsageStatsManager.REASON_FORCED
-                    : UsageStatsManager.REASON_PREDICTED + ":" + callingUid;
+            final boolean systemCaller = UserHandle.isCore(callingUid);
+            final int reason = systemCaller
+                    ? UsageStatsManager.REASON_MAIN_FORCED
+                    : UsageStatsManager.REASON_MAIN_PREDICTED;
             final long token = Binder.clearCallingIdentity();
             try {
                 // Caller cannot set their own standby state
@@ -758,7 +899,8 @@ public class UsageStatsService extends SystemService implements
         }
 
         @Override
-        public Map getAppStandbyBuckets(String callingPackageName, int userId) {
+        public ParceledListSlice<AppStandbyInfo> getAppStandbyBuckets(String callingPackageName,
+                int userId) {
             final int callingUid = Binder.getCallingUid();
             try {
                 userId = ActivityManager.getService().handleIncomingUser(
@@ -773,15 +915,17 @@ public class UsageStatsService extends SystemService implements
             }
             final long token = Binder.clearCallingIdentity();
             try {
-                return mAppStandby.getAppStandbyBuckets(userId,
-                        SystemClock.elapsedRealtime());
+                final List<AppStandbyInfo> standbyBucketList =
+                        mAppStandby.getAppStandbyBuckets(userId);
+                return (standbyBucketList == null) ? ParceledListSlice.emptyList()
+                        : new ParceledListSlice<>(standbyBucketList);
             } finally {
                 Binder.restoreCallingIdentity(token);
             }
         }
 
         @Override
-        public void setAppStandbyBuckets(Map appBuckets, int userId) {
+        public void setAppStandbyBuckets(ParceledListSlice appBuckets, int userId) {
             getContext().enforceCallingPermission(Manifest.permission.CHANGE_APP_IDLE_STATE,
                     "No permission to change app standby state");
 
@@ -794,16 +938,16 @@ public class UsageStatsService extends SystemService implements
                 throw re.rethrowFromSystemServer();
             }
             final boolean shellCaller = callingUid == 0 || callingUid == Process.SHELL_UID;
-            final String reason = shellCaller
-                    ? UsageStatsManager.REASON_FORCED
-                    : UsageStatsManager.REASON_PREDICTED + ":" + callingUid;
+            final int reason = shellCaller
+                    ? UsageStatsManager.REASON_MAIN_FORCED
+                    : UsageStatsManager.REASON_MAIN_PREDICTED;
             final long token = Binder.clearCallingIdentity();
             try {
                 final long elapsedRealtime = SystemClock.elapsedRealtime();
-                Map<String, Integer> buckets = (Map<String, Integer>) appBuckets;
-                for (Map.Entry<String, Integer> entry: buckets.entrySet()) {
-                    String packageName = entry.getKey();
-                    int bucket = entry.getValue();
+                List<AppStandbyInfo> bucketList = appBuckets.getList();
+                for (AppStandbyInfo bucketInfo : bucketList) {
+                    final String packageName = bucketInfo.mPackageName;
+                    final int bucket = bucketInfo.mStandbyBucket;
                     if (bucket < UsageStatsManager.STANDBY_BUCKET_ACTIVE
                             || bucket > UsageStatsManager.STANDBY_BUCKET_NEVER) {
                         throw new IllegalArgumentException(
@@ -873,6 +1017,60 @@ public class UsageStatsService extends SystemService implements
 
             mHandler.obtainMessage(MSG_REPORT_EVENT, userId, 0, event).sendToTarget();
         }
+
+        @Override
+        public void registerAppUsageObserver(int observerId,
+                String[] packages, long timeLimitMs, PendingIntent
+                callbackIntent, String callingPackage) {
+            if (!hasObserverPermission(callingPackage)) {
+                throw new SecurityException("Caller doesn't have OBSERVE_APP_USAGE permission");
+            }
+
+            if (packages == null || packages.length == 0) {
+                throw new IllegalArgumentException("Must specify at least one package");
+            }
+            if (timeLimitMs <= 0) {
+                throw new IllegalArgumentException("Time limit must be > 0");
+            }
+            if (callbackIntent == null) {
+                throw new NullPointerException("callbackIntent can't be null");
+            }
+            final int callingUid = Binder.getCallingUid();
+            final int userId = UserHandle.getUserId(callingUid);
+            final long token = Binder.clearCallingIdentity();
+            try {
+                UsageStatsService.this.registerAppUsageObserver(callingUid, observerId,
+                        packages, timeLimitMs, callbackIntent, userId);
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        @Override
+        public void unregisterAppUsageObserver(int observerId, String callingPackage) {
+            if (!hasObserverPermission(callingPackage)) {
+                throw new SecurityException("Caller doesn't have OBSERVE_APP_USAGE permission");
+            }
+
+            final int callingUid = Binder.getCallingUid();
+            final int userId = UserHandle.getUserId(callingUid);
+            final long token = Binder.clearCallingIdentity();
+            try {
+                UsageStatsService.this.unregisterAppUsageObserver(callingUid, observerId, userId);
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+    }
+
+    void registerAppUsageObserver(int callingUid, int observerId, String[] packages,
+            long timeLimitMs, PendingIntent callbackIntent, int userId) {
+        mAppTimeLimit.addObserver(callingUid, observerId, packages, timeLimitMs, callbackIntent,
+                userId);
+    }
+
+    void unregisterAppUsageObserver(int callingUid, int observerId, int userId) {
+        mAppTimeLimit.removeObserver(callingUid, observerId, userId);
     }
 
     /**
@@ -932,6 +1130,25 @@ public class UsageStatsService extends SystemService implements
 
             event.mEventType = UsageEvents.Event.CONFIGURATION_CHANGE;
             event.mConfiguration = new Configuration(config);
+            mHandler.obtainMessage(MSG_REPORT_EVENT, userId, 0, event).sendToTarget();
+        }
+
+        @Override
+        public void reportInterruptiveNotification(String packageName, String channelId,
+                int userId) {
+            if (packageName == null || channelId == null) {
+                Slog.w(TAG, "Event reported without a package name or a channel ID");
+                return;
+            }
+
+            UsageEvents.Event event = new UsageEvents.Event();
+            event.mPackage = packageName.intern();
+            event.mNotificationChannelId = channelId.intern();
+
+            // This will later be converted to system time.
+            event.mTimeStamp = SystemClock.elapsedRealtime();
+
+            event.mEventType = Event.NOTIFICATION_INTERRUPTION;
             mHandler.obtainMessage(MSG_REPORT_EVENT, userId, 0, event).sendToTarget();
         }
 
@@ -1043,6 +1260,12 @@ public class UsageStatsService extends SystemService implements
             return mAppStandby.getTimeSinceLastJobRun(packageName, userId);
         }
 
+        @Override
+        public void reportAppJobState(String packageName, int userId,
+                int numDeferredJobs, long timeSinceLastJobRun) {
+        }
+
+        @Override
         public void onActiveAdminAdded(String packageName, int userId) {
             mAppStandby.addActiveDeviceAdmin(packageName, userId);
         }
@@ -1055,6 +1278,11 @@ public class UsageStatsService extends SystemService implements
         @Override
         public void onAdminDataAvailable() {
             mAppStandby.onAdminDataAvailable();
+        }
+
+        @Override
+        public void reportExemptedSyncStart(String packageName, int userId) {
+            mAppStandby.postReportExemptedSyncStart(packageName, userId);
         }
     }
 }

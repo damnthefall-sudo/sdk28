@@ -16,14 +16,10 @@
 
 package androidx.car.widget;
 
-import static java.lang.annotation.RetentionPolicy.SOURCE;
-
+import android.car.drivingstate.CarUxRestrictions;
 import android.content.Context;
 import android.content.res.Resources;
 import android.graphics.drawable.Drawable;
-import android.support.annotation.DrawableRes;
-import android.support.annotation.IntDef;
-import android.support.v7.widget.RecyclerView;
 import android.text.TextUtils;
 import android.view.View;
 import android.view.ViewGroup;
@@ -38,7 +34,15 @@ import java.lang.annotation.Retention;
 import java.util.ArrayList;
 import java.util.List;
 
+import androidx.annotation.DrawableRes;
+import androidx.annotation.IdRes;
+import androidx.annotation.IntDef;
+import androidx.annotation.StyleRes;
 import androidx.car.R;
+import androidx.car.utils.CarUxRestrictionsUtils;
+import androidx.recyclerview.widget.RecyclerView;
+
+import static java.lang.annotation.RetentionPolicy.SOURCE;
 
 /**
  * Class to build a list item of text.
@@ -101,8 +105,6 @@ public class TextListItem extends ListItem<TextListItem.ViewHolder> {
     private final Context mContext;
 
     private final List<ViewBinder<ViewHolder>> mBinders = new ArrayList<>();
-    // Store custom binders separately so they will bind after binders created by setters.
-    private final List<ViewBinder<ViewHolder>> mCustomBinders = new ArrayList<>();
 
     private View.OnClickListener mOnClickListener;
 
@@ -151,34 +153,46 @@ public class TextListItem extends ListItem<TextListItem.ViewHolder> {
     }
 
     /**
-     * Applies all {@link ViewBinder} to {@code ViewHolder}.
+     * Calculates the layout params for views in {@link ViewHolder}.
      */
     @Override
-    public void bind(ViewHolder viewHolder) {
-        if (isDirty()) {
-            mBinders.clear();
+    protected void resolveDirtyState() {
+        mBinders.clear();
 
-            // Create binders that adjust layout params of each view.
-            setItemLayoutHeight();
-            setPrimaryAction();
-            setText();
-            setSupplementalActions();
-            setOnClickListener();
+        // Create binders that adjust layout params of each view.
+        setItemLayoutHeight();
+        setPrimaryAction();
+        setText();
+        setSupplementalActions();
+        setOnClickListener();
+    }
 
-            // Custom view binders are always applied after the one created by this class.
-            mBinders.addAll(mCustomBinders);
-
-            markClean();
-        }
-
-        // Hide all subviews then apply view binders to adjust subviews.
-        setAllSubViewsGone(viewHolder);
+    /**
+     * Hides all views in {@link ViewHolder} then applies ViewBinders to adjust view layout params.
+     */
+    @Override
+    public void onBind(ViewHolder viewHolder) {
+        hideSubViews(viewHolder);
         for (ViewBinder binder : mBinders) {
             binder.bind(viewHolder);
         }
     }
 
-    void setAllSubViewsGone(ViewHolder vh) {
+    /** Sets the title text appearance from the specified style resource. */
+    @Override
+    void setTitleTextAppearance(@StyleRes int titleTextAppearance) {
+        super.setTitleTextAppearance(titleTextAppearance);
+        setTextContent();
+    }
+
+    /** Sets the body text appearance from the specified style resource. */
+    @Override
+    void setBodyTextAppearance(@StyleRes int bodyTextAppearance) {
+        super.setBodyTextAppearance(bodyTextAppearance);
+        setTextContent();
+    }
+
+    private void hideSubViews(ViewHolder vh) {
         View[] subviews = new View[] {
                 vh.getPrimaryIcon(),
                 vh.getTitle(), vh.getBody(),
@@ -229,12 +243,11 @@ public class TextListItem extends ListItem<TextListItem.ViewHolder> {
         setTextVerticalMargin();
         // Only set start margin because text end is relative to the start of supplemental actions.
         setTextStartMargin();
+        setTextEndLayout();
     }
 
     private void setOnClickListener() {
-        if (mOnClickListener != null) {
-            mBinders.add(vh -> vh.itemView.setOnClickListener(mOnClickListener));
-        }
+        mBinders.add(vh -> vh.itemView.setOnClickListener(mOnClickListener));
     }
 
     private void setPrimaryIconContent() {
@@ -256,7 +269,7 @@ public class TextListItem extends ListItem<TextListItem.ViewHolder> {
                 // Do nothing.
                 break;
             default:
-                throw new IllegalStateException("Unrecognizable primary action type.");
+                throw new IllegalStateException("Unknown primary action type.");
         }
     }
 
@@ -325,7 +338,7 @@ public class TextListItem extends ListItem<TextListItem.ViewHolder> {
                 // Do nothing.
                 break;
             default:
-                throw new IllegalStateException("Unrecognizable primary action type.");
+                throw new IllegalStateException("Unknown primary action type.");
         }
     }
 
@@ -345,13 +358,13 @@ public class TextListItem extends ListItem<TextListItem.ViewHolder> {
 
         if (mIsBodyPrimary) {
             mBinders.add(vh -> {
-                vh.getTitle().setTextAppearance(R.style.CarBody2);
-                vh.getBody().setTextAppearance(R.style.CarBody1);
+                vh.getTitle().setTextAppearance(getBodyTextAppearance());
+                vh.getBody().setTextAppearance(getTitleTextAppearance());
             });
         } else {
             mBinders.add(vh -> {
-                vh.getTitle().setTextAppearance(R.style.CarBody1);
-                vh.getBody().setTextAppearance(R.style.CarBody2);
+                vh.getTitle().setTextAppearance(getTitleTextAppearance());
+                vh.getBody().setTextAppearance(getBodyTextAppearance());
             });
         }
     }
@@ -375,7 +388,7 @@ public class TextListItem extends ListItem<TextListItem.ViewHolder> {
                 startMarginResId = R.dimen.car_keyline_4;
                 break;
             default:
-                throw new IllegalStateException("Unrecognizable primary action type.");
+                throw new IllegalStateException("Unknown primary action type.");
         }
         int startMargin = mContext.getResources().getDimensionPixelSize(startMarginResId);
         mBinders.add(vh -> {
@@ -444,6 +457,82 @@ public class TextListItem extends ListItem<TextListItem.ViewHolder> {
     }
 
     /**
+     * Returns the id of the leading (left most in LTR) view of supplemental actions.
+     * The view could be one of the supplemental actions (icon, button, switch), or their divider.
+     * Returns 0 if none is enabled.
+     */
+    @IdRes
+    private int getSupplementalActionLeadingView() {
+        int leadingViewId;
+        switch (mSupplementalActionType) {
+            case SUPPLEMENTAL_ACTION_NO_ACTION:
+                leadingViewId = 0;
+                break;
+            case SUPPLEMENTAL_ACTION_SUPPLEMENTAL_ICON:
+                leadingViewId = mShowSupplementalIconDivider
+                        ? R.id.supplemental_icon_divider : R.id.supplemental_icon;
+                break;
+            case SUPPLEMENTAL_ACTION_ONE_ACTION:
+                leadingViewId = mShowAction1Divider ? R.id.action1_divider : R.id.action1;
+                break;
+            case SUPPLEMENTAL_ACTION_TWO_ACTIONS:
+                leadingViewId = mShowAction2Divider ? R.id.action2_divider : R.id.action2;
+                break;
+            case SUPPLEMENTAL_ACTION_SWITCH:
+                leadingViewId = mShowSwitchDivider ? R.id.switch_divider : R.id.switch_widget;
+                break;
+            default:
+                throw new IllegalStateException("Unknown supplemental action type.");
+        }
+        return leadingViewId;
+    }
+
+    private void setTextEndLayout() {
+        // Figure out which view the text should align to.
+        @IdRes int leadingViewId = getSupplementalActionLeadingView();
+
+        if (leadingViewId == 0) {
+            // There is no supplemental action. Text should align to parent end with KL1 padding.
+            mBinders.add(vh -> {
+                Resources resources = mContext.getResources();
+                int padding = resources.getDimensionPixelSize(R.dimen.car_keyline_1);
+
+                RelativeLayout.LayoutParams titleLayoutParams =
+                        (RelativeLayout.LayoutParams) vh.getTitle().getLayoutParams();
+                titleLayoutParams.setMarginEnd(padding);
+                titleLayoutParams.addRule(RelativeLayout.ALIGN_PARENT_END);
+                titleLayoutParams.removeRule(RelativeLayout.START_OF);
+
+                RelativeLayout.LayoutParams bodyLayoutParams =
+                        (RelativeLayout.LayoutParams) vh.getBody().getLayoutParams();
+                bodyLayoutParams.setMarginEnd(padding);
+                bodyLayoutParams.addRule(RelativeLayout.ALIGN_PARENT_END);
+                bodyLayoutParams.removeRule(RelativeLayout.START_OF);
+            });
+        } else {
+            // Text align to start of leading supplemental view with padding.
+            mBinders.add(vh -> {
+                Resources resources = mContext.getResources();
+                int padding = resources.getDimensionPixelSize(R.dimen.car_padding_4);
+
+                RelativeLayout.LayoutParams titleLayoutParams =
+                        (RelativeLayout.LayoutParams) vh.getTitle().getLayoutParams();
+                titleLayoutParams.setMarginEnd(padding);
+                titleLayoutParams.removeRule(RelativeLayout.ALIGN_PARENT_END);
+                titleLayoutParams.addRule(RelativeLayout.START_OF, leadingViewId);
+                vh.getTitle().requestLayout();
+
+                RelativeLayout.LayoutParams bodyLayoutParams =
+                        (RelativeLayout.LayoutParams) vh.getBody().getLayoutParams();
+                bodyLayoutParams.setMarginEnd(padding);
+                bodyLayoutParams.removeRule(RelativeLayout.ALIGN_PARENT_END);
+                bodyLayoutParams.addRule(RelativeLayout.START_OF, leadingViewId);
+                vh.getBody().requestLayout();
+            });
+        }
+    }
+
+    /**
      * Sets up view(s) for supplemental action.
      */
     private void setSupplementalActions() {
@@ -498,7 +587,7 @@ public class TextListItem extends ListItem<TextListItem.ViewHolder> {
                 });
                 break;
             default:
-                throw new IllegalArgumentException("Unrecognized supplemental action type.");
+                throw new IllegalStateException("Unknown supplemental action type.");
         }
     }
 
@@ -589,19 +678,11 @@ public class TextListItem extends ListItem<TextListItem.ViewHolder> {
     /**
      * Sets the body text of item.
      *
-     * <p>Text beyond length required by regulation will be truncated.
-     *
      * @param body text to be displayed.
      * @param asPrimary sets {@code Body Text} as primary text of item.
      */
     public void setBody(String body, boolean asPrimary) {
-        int limit = mContext.getResources().getInteger(
-                R.integer.car_list_item_text_length_limit);
-        if (body.length() < limit) {
-            mBody = body;
-        } else {
-            mBody = body.substring(0, limit) + mContext.getString(R.string.ellipsis);
-        }
+        mBody = body;
         mIsBodyPrimary = asPrimary;
 
         markDirty();
@@ -709,31 +790,21 @@ public class TextListItem extends ListItem<TextListItem.ViewHolder> {
     }
 
     /**
-     * Adds {@link ViewBinder} to interact with sub-views in {@link ViewHolder}. These ViewBinders
-     * will always bind after other {@code setFoobar} methods have bound.
+     * Sets the state of {@code Switch}. For this method to take effect,
+     * {@link #setSwitch(boolean, boolean, CompoundButton.OnCheckedChangeListener)} must be called
+     * first to set {@code Supplemental Action} as a {@code Switch}.
      *
-     * <p>Make sure to call setFoobar() method on the intended sub-view first.
-     *
-     * <p>Example:
-     * <pre>
-     * {@code
-     * TextListItem item = new TextListItem(context);
-     * item.setTitle("title");
-     * item.addViewBinder((viewHolder) -> {
-     *     viewHolder.getTitle().doMoreStuff();
-     * });
-     * }
-     * </pre>
+     * @param isChecked sets the "checked/unchecked, namely on/off" state of switch.
      */
-    public void addViewBinder(ViewBinder<ViewHolder> binder) {
-        mCustomBinders.add(binder);
+    public void setSwitchState(boolean isChecked) {
+        mSwitchChecked = isChecked;
         markDirty();
     }
 
     /**
      * Holds views of TextListItem.
      */
-    public static class ViewHolder extends RecyclerView.ViewHolder {
+    public static class ViewHolder extends ListItem.ViewHolder {
 
         private RelativeLayout mContainerLayout;
 
@@ -774,6 +845,18 @@ public class TextListItem extends ListItem<TextListItem.ViewHolder> {
             mAction1Divider = itemView.findViewById(R.id.action1_divider);
             mAction2 = itemView.findViewById(R.id.action2);
             mAction2Divider = itemView.findViewById(R.id.action2_divider);
+        }
+
+        /**
+         * Update children views to comply with car UX restrictions.
+         *
+         * <p>{@code Body} text might be truncated to meet length limit required by regulation.
+         *
+         * @param restrictions current car UX restrictions.
+         */
+        @Override
+        void complyWithUxRestrictions(CarUxRestrictions restrictions) {
+            CarUxRestrictionsUtils.comply(itemView.getContext(), restrictions, getBody());
         }
 
         public RelativeLayout getContainerLayout() {

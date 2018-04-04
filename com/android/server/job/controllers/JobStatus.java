@@ -73,7 +73,6 @@ public final class JobStatus {
     static final int CONSTRAINT_TIMING_DELAY = 1<<31;
     static final int CONSTRAINT_DEADLINE = 1<<30;
     static final int CONSTRAINT_CONNECTIVITY = 1<<28;
-    static final int CONSTRAINT_APP_NOT_IDLE = 1<<27;
     static final int CONSTRAINT_CONTENT_TRIGGER = 1<<26;
     static final int CONSTRAINT_DEVICE_NOT_DOZING = 1<<25;
     static final int CONSTRAINT_BACKGROUND_NOT_RESTRICTED = 1<<22;
@@ -96,11 +95,18 @@ public final class JobStatus {
     public static final long MIN_TRIGGER_MAX_DELAY = 1000;
 
     final JobInfo job;
-    /** Uid of the package requesting this job. */
+    /**
+     * Uid of the package requesting this job.  This can differ from the "source"
+     * uid when the job was scheduled on the app's behalf, such as with the jobs
+     * that underly Sync Manager operation.
+     */
     final int callingUid;
     final int targetSdkVersion;
     final String batteryName;
 
+    /**
+     * Identity of the app in which the job is hosted.
+     */
     final String sourcePackageName;
     final int sourceUserId;
     final int sourceUid;
@@ -152,6 +158,9 @@ public final class JobStatus {
 
     // Set to true if doze constraint was satisfied due to app being whitelisted.
     public boolean dozeWhitelisted;
+
+    // Set to true when the app is "active" per AppStateTracker
+    public boolean uidActive;
 
     /**
      * Flag for {@link #trackingControllers}: the battery controller is currently tracking this job.
@@ -261,6 +270,31 @@ public final class JobStatus {
         return callingUid;
     }
 
+    /**
+     * Core constructor for JobStatus instances.  All other ctors funnel down to this one.
+     *
+     * @param job The actual requested parameters for the job
+     * @param callingUid Identity of the app that is scheduling the job.  This may not be the
+     *     app in which the job is implemented; such as with sync jobs.
+     * @param targetSdkVersion The targetSdkVersion of the app in which the job will run.
+     * @param sourcePackageName The package name of the app in which the job will run.
+     * @param sourceUserId The user in which the job will run
+     * @param standbyBucket The standby bucket that the source package is currently assigned to,
+     *     cached here for speed of handling during runnability evaluations (and updated when bucket
+     *     assignments are changed)
+     * @param heartbeat Timestamp of when the job was created, in the standby-related
+     *     timebase.
+     * @param tag A string associated with the job for debugging/logging purposes.
+     * @param numFailures Count of how many times this job has requested a reschedule because
+     *     its work was not yet finished.
+     * @param earliestRunTimeElapsedMillis Milestone: earliest point in time at which the job
+     *     is to be considered runnable
+     * @param latestRunTimeElapsedMillis Milestone: point in time at which the job will be
+     *     considered overdue
+     * @param lastSuccessfulRunTime When did we last run this job to completion?
+     * @param lastFailedRunTime When did we last run this job only to have it stop incomplete?
+     * @param internalFlags Non-API property flags about this job
+     */
     private JobStatus(JobInfo job, int callingUid, int targetSdkVersion, String sourcePackageName,
             int sourceUserId, int standbyBucket, long heartbeat, String tag, int numFailures,
             long earliestRunTimeElapsedMillis, long latestRunTimeElapsedMillis,
@@ -302,7 +336,6 @@ public final class JobStatus {
         this.numFailures = numFailures;
 
         int requiredConstraints = job.getConstraintFlags();
-
         if (job.getRequiredNetwork() != null) {
             requiredConstraints |= CONSTRAINT_CONNECTIVITY;
         }
@@ -323,6 +356,13 @@ public final class JobStatus {
         mInternalFlags = internalFlags;
 
         updateEstimatedNetworkBytesLocked();
+
+        if (job.getRequiredNetwork() != null) {
+            // Later, when we check if a given network satisfies the required
+            // network, we need to know the UID that is requesting it, so push
+            // our source UID into place.
+            job.getRequiredNetwork().networkCapabilities.setSingleUid(this.sourceUid);
+        }
     }
 
     /** Copy constructor: used specifically when cloning JobStatus objects for persistence,
@@ -391,8 +431,8 @@ public final class JobStatus {
     /**
      * Create a newly scheduled job.
      * @param callingUid Uid of the package that scheduled this job.
-     * @param sourcePkg Package name on whose behalf this job is scheduled. Null indicates
-     *                          the calling package is the source.
+     * @param sourcePkg Package name of the app that will actually run the job.  Null indicates
+     *     that the calling package is the source.
      * @param sourceUserId User id for whom this job is scheduled. -1 indicates this is same as the
      *     caller.
      */
@@ -414,8 +454,9 @@ public final class JobStatus {
         int standbyBucket = JobSchedulerService.standbyBucketForPackage(jobPackage,
                 sourceUserId, elapsedNow);
         JobSchedulerInternal js = LocalServices.getService(JobSchedulerInternal.class);
-        long currentHeartbeat = js != null ? js.currentHeartbeat() : 0;
-
+        long currentHeartbeat = js != null
+                ? js.baseHeartbeatForApp(jobPackage, sourceUserId, standbyBucket)
+                : 0;
         return new JobStatus(job, callingUid, resolveTargetSdkVersion(job), sourcePkg, sourceUserId,
                 standbyBucket, currentHeartbeat, tag, 0,
                 earliestRunTimeElapsedMillis, latestRunTimeElapsedMillis,
@@ -831,10 +872,6 @@ public final class JobStatus {
         return setConstraintSatisfied(CONSTRAINT_CONNECTIVITY, state);
     }
 
-    boolean setAppNotIdleConstraintSatisfied(boolean state) {
-        return setConstraintSatisfied(CONSTRAINT_APP_NOT_IDLE, state);
-    }
-
     boolean setContentTriggerConstraintSatisfied(boolean state) {
         return setConstraintSatisfied(CONSTRAINT_CONTENT_TRIGGER, state);
     }
@@ -846,6 +883,14 @@ public final class JobStatus {
 
     boolean setBackgroundNotRestrictedConstraintSatisfied(boolean state) {
         return setConstraintSatisfied(CONSTRAINT_BACKGROUND_NOT_RESTRICTED, state);
+    }
+
+    boolean setUidActive(final boolean newActiveState) {
+        if (newActiveState != uidActive) {
+            uidActive = newActiveState;
+            return true;
+        }
+        return false; /* unchanged */
     }
 
     boolean setConstraintSatisfied(int constraint, boolean state) {
@@ -881,11 +926,6 @@ public final class JobStatus {
         return mLastFailedRunTime;
     }
 
-    public boolean shouldDump(int filterUid) {
-        return filterUid == -1 || UserHandle.getAppId(getUid()) == filterUid
-                || UserHandle.getAppId(getSourceUid()) == filterUid;
-    }
-
     /**
      * @return Whether or not this job is ready to run, based on its requirements. This is true if
      * the constraints are satisfied <strong>or</strong> the deadline on the job has expired.
@@ -902,13 +942,11 @@ public final class JobStatus {
         // NotRestrictedInBackground implicit constraint must be satisfied
         final boolean deadlineSatisfied = (!job.isPeriodic() && hasDeadlineConstraint()
                 && (satisfiedConstraints & CONSTRAINT_DEADLINE) != 0);
-        final boolean notIdle = (satisfiedConstraints & CONSTRAINT_APP_NOT_IDLE) != 0;
         final boolean notDozing = (satisfiedConstraints & CONSTRAINT_DEVICE_NOT_DOZING) != 0
                 || (job.getFlags() & JobInfo.FLAG_WILL_BE_FOREGROUND) != 0;
         final boolean notRestrictedInBg =
                 (satisfiedConstraints & CONSTRAINT_BACKGROUND_NOT_RESTRICTED) != 0;
-        return (isConstraintsSatisfied() || deadlineSatisfied) && notIdle && notDozing
-                && notRestrictedInBg;
+        return (isConstraintsSatisfied() || deadlineSatisfied) && notDozing && notRestrictedInBg;
     }
 
     static final int CONSTRAINTS_OF_INTEREST = CONSTRAINT_CHARGING | CONSTRAINT_BATTERY_NOT_LOW
@@ -987,9 +1025,6 @@ public final class JobStatus {
         }
         if (job.isPersisted()) {
             sb.append(" PERSISTED");
-        }
-        if ((satisfiedConstraints&CONSTRAINT_APP_NOT_IDLE) == 0) {
-            sb.append(" WAIT:APP_NOT_IDLE");
         }
         if ((satisfiedConstraints&CONSTRAINT_DEVICE_NOT_DOZING) == 0) {
             sb.append(" WAIT:DEV_NOT_DOZING");
@@ -1089,9 +1124,6 @@ public final class JobStatus {
         if ((constraints&CONSTRAINT_CONNECTIVITY) != 0) {
             pw.print(" CONNECTIVITY");
         }
-        if ((constraints&CONSTRAINT_APP_NOT_IDLE) != 0) {
-            pw.print(" APP_NOT_IDLE");
-        }
         if ((constraints&CONSTRAINT_CONTENT_TRIGGER) != 0) {
             pw.print(" CONTENT_TRIGGER");
         }
@@ -1130,9 +1162,6 @@ public final class JobStatus {
         }
         if ((constraints & CONSTRAINT_CONNECTIVITY) != 0) {
             proto.write(fieldId, JobStatusDumpProto.CONSTRAINT_CONNECTIVITY);
-        }
-        if ((constraints & CONSTRAINT_APP_NOT_IDLE) != 0) {
-            proto.write(fieldId, JobStatusDumpProto.CONSTRAINT_APP_NOT_IDLE);
         }
         if ((constraints & CONSTRAINT_CONTENT_TRIGGER) != 0) {
             proto.write(fieldId, JobStatusDumpProto.CONSTRAINT_CONTENT_TRIGGER);
@@ -1305,6 +1334,9 @@ public final class JobStatus {
             if (dozeWhitelisted) {
                 pw.print(prefix); pw.println("Doze whitelisted: true");
             }
+            if (uidActive) {
+                pw.print(prefix); pw.println("Uid: active");
+            }
         }
         if (trackingControllers != 0) {
             pw.print(prefix); pw.print("Tracking:");
@@ -1345,6 +1377,15 @@ public final class JobStatus {
         }
         pw.print(prefix); pw.print("Standby bucket: ");
         pw.println(bucketName(standbyBucket));
+        if (standbyBucket > 0) {
+            pw.print(prefix); pw.print("Base heartbeat: ");
+            pw.println(baseHeartbeat);
+        }
+        if (whenStandbyDeferred != 0) {
+            pw.print(prefix); pw.print("  Deferred since: ");
+            TimeUtils.formatDuration(whenStandbyDeferred, elapsedRealtimeMillis, pw);
+            pw.println();
+        }
         pw.print(prefix); pw.print("Enqueue time: ");
         TimeUtils.formatDuration(enqueueTime, elapsedRealtimeMillis, pw);
         pw.println();

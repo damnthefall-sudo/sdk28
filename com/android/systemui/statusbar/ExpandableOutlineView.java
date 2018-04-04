@@ -61,7 +61,7 @@ public abstract class ExpandableOutlineView extends ExpandableView {
     private final Path mClipPath = new Path();
     private boolean mCustomOutline;
     private float mOutlineAlpha = -1f;
-    private float mOutlineRadius;
+    protected float mOutlineRadius;
     private boolean mAlwaysRoundBothCorners;
     private Path mTmpPath = new Path();
     private Path mTmpPath2 = new Path();
@@ -78,6 +78,8 @@ public abstract class ExpandableOutlineView extends ExpandableView {
     protected boolean mShouldTranslateContents;
     private boolean mClipRoundedToClipTopAmount;
     private float mDistanceToTopRoundness = -1;
+    private float mExtraWidthForClipping;
+    private int mMinimumHeightForClipping = 0;
 
     private final ViewOutlineProvider mProvider = new ViewOutlineProvider() {
         @Override
@@ -202,11 +204,11 @@ public abstract class ExpandableOutlineView extends ExpandableView {
         canvas.save();
         Path intersectPath = null;
         if (mClipRoundedToClipTopAmount) {
-            int left = 0;
+            int left = (int) (- mExtraWidthForClipping / 2.0f);
             int top = (int) (mClipTopAmount - mDistanceToTopRoundness);
-            int right = getWidth();
-            int bottom = (int) Math.max(getActualHeight() - mClipBottomAmount,
-                    top + mOutlineRadius);
+            int right = getWidth() + (int) (mExtraWidthForClipping + left);
+            int bottom = (int) Math.max(mMinimumHeightForClipping,
+                    Math.max(getActualHeight() - mClipBottomAmount, top + mOutlineRadius));
             ExpandableOutlineView.getRoundedRectPath(left, top, right, bottom, mOutlineRadius,
                     0.0f,
                     mClipPath);
@@ -232,6 +234,14 @@ public abstract class ExpandableOutlineView extends ExpandableView {
         boolean result = super.drawChild(canvas, child, drawingTime);
         canvas.restore();
         return result;
+    }
+
+    public void setExtraWidthForClipping(float extraWidthForClipping) {
+        mExtraWidthForClipping = extraWidthForClipping;
+    }
+
+    public void setMinimumHeightForClipping(int minimumHeightForClipping) {
+        mMinimumHeightForClipping = minimumHeightForClipping;
     }
 
     @Override
@@ -266,12 +276,18 @@ public abstract class ExpandableOutlineView extends ExpandableView {
         setClipToOutline(mAlwaysRoundBothCorners);
     }
 
-    public void setTopRoundness(float topRoundness, boolean animate) {
+    /**
+     * Set the topRoundness of this view.
+     * @return Whether the roundness was changed.
+     */
+    public boolean setTopRoundness(float topRoundness, boolean animate) {
         if (mTopRoundness != topRoundness) {
             mTopRoundness = topRoundness;
             PropertyAnimator.setProperty(this, TOP_ROUNDNESS, topRoundness,
                     ROUNDNESS_PROPERTIES, animate);
+            return true;
         }
+        return false;
     }
 
     protected void applyRoundness() {
@@ -295,12 +311,18 @@ public abstract class ExpandableOutlineView extends ExpandableView {
         return mCurrentBottomRoundness * mOutlineRadius;
     }
 
-    public void setBottomRoundness(float bottomRoundness, boolean animate) {
+    /**
+     * Set the bottom roundness of this view.
+     * @return Whether the roundness was changed.
+     */
+    public boolean setBottomRoundness(float bottomRoundness, boolean animate) {
         if (mBottomRoundness != bottomRoundness) {
             mBottomRoundness = bottomRoundness;
             PropertyAnimator.setProperty(this, BOTTOM_ROUNDNESS, bottomRoundness,
                     ROUNDNESS_PROPERTIES, animate);
+            return true;
         }
+        return false;
     }
 
     protected void setBackgroundTop(int backgroundTop) {

@@ -17,6 +17,7 @@
 package com.android.internal.telephony;
 
 import android.net.KeepalivePacketData;
+import android.net.LinkProperties;
 import android.os.Handler;
 import android.os.Message;
 import android.os.WorkSource;
@@ -1625,22 +1626,27 @@ public interface CommandsInterface {
 
     /**
      * Setup a packet data connection On successful completion, the result
-     * message will return a {@link com.android.internal.telephony.dataconnection.DataCallResponse}
-     * object containing the connection information.
+     * message will return a SetupDataResult object containing the connection information.
      *
-     * @param radioTechnology
-     *            Radio technology to use. Values is one of RIL_RADIO_TECHNOLOGY_*
+     * @param accessNetworkType
+     *            Access network to use. Values is one of AccessNetworkConstants.AccessNetworkType.
      * @param dataProfile
      *            Data profile for data call setup
      * @param isRoaming
      *            Device is roaming or not
      * @param allowRoaming
      *            Flag indicating data roaming is enabled or not
+     * @param reason
+     *            The reason for data setup
+     * @param linkProperties
+     *            If the reason is for handover, this indicates the link properties of the existing
+     *            data connection
      * @param result
      *            Callback message
      */
-    void setupDataCall(int radioTechnology, DataProfile dataProfile, boolean isRoaming,
-                       boolean allowRoaming, Message result);
+    void setupDataCall(int accessNetworkType, DataProfile dataProfile, boolean isRoaming,
+                       boolean allowRoaming, int reason, LinkProperties linkProperties,
+                       Message result);
 
     /**
      * Deactivate packet data connection
@@ -1723,18 +1729,6 @@ public interface CommandsInterface {
     public int getLteOnCdmaMode();
 
     /**
-     * Request the ISIM application on the UICC to perform the AKA
-     * challenge/response algorithm for IMS authentication. The nonce string
-     * and challenge response are Base64 encoded Strings.
-     *
-     * @param nonce the nonce string to pass with the ISIM authentication request
-     * @param response a callback message with the String response in the obj field
-     * @deprecated
-     * @see requestIccSimAuthentication
-     */
-    public void requestIsimAuthentication(String nonce, Message response);
-
-    /**
      * Request the SIM application on the UICC to perform authentication
      * challenge/response algorithm. The data string and challenge response are
      * Base64 encoded Strings.
@@ -1792,6 +1786,17 @@ public interface CommandsInterface {
      */
     void registerForCellInfoList(Handler h, int what, Object obj);
     void unregisterForCellInfoList(Handler h);
+
+    /**
+     * Fires when a new {@link android.telephony.PhysicalChannelConfig} list is received from the
+     * RIL.
+     */
+    void registerForPhysicalChannelConfiguration(Handler h, int what, Object obj);
+
+    /**
+     * Unregisters the handler for {@link android.telephony.PhysicalChannelConfig} updates.
+     */
+    void unregisterForPhysicalChannelConfiguration(Handler h);
 
     /**
      * Set Initial Attach Apn
@@ -2119,6 +2124,38 @@ public interface CommandsInterface {
      * @param result callback message contains the information of SUCCESS/FAILURE
      */
     void setUnsolResponseFilter(int filter, Message result);
+
+    /**
+     * Send the signal strength reporting criteria to the modem.
+     *
+     * @param hysteresisMs A hysteresis time in milliseconds. A value of 0 disables hysteresis.
+     * @param hysteresisDb An interval in dB defining the required magnitude change between reports.
+     *     A value of 0 disables hysteresis.
+     * @param thresholdsDbm An array of trigger thresholds in dBm. A size of 0 disables thresholds.
+     * @param ran RadioAccessNetwork for which to apply criteria.
+     * @param result callback message contains the information of SUCCESS/FAILURE
+     */
+    void setSignalStrengthReportingCriteria(int hysteresisMs, int hysteresisDb, int[] thresholdsDbm,
+            int ran, Message result);
+
+    /**
+     * Send the link capacity reporting criteria to the modem
+     *
+     * @param hysteresisMs A hysteresis time in milliseconds. A value of 0 disables hysteresis.
+     * @param hysteresisDlKbps An interval in kbps defining the required magnitude change between DL
+     *     reports. A value of 0 disables hysteresis.
+     * @param hysteresisUlKbps An interval in kbps defining the required magnitude change between UL
+     *     reports. A value of 0 disables hysteresis.
+     * @param thresholdsDlKbps An array of trigger thresholds in kbps for downlink reports. A size
+     *     of 0 disables thresholds.
+     * @param thresholdsUlKbps An array of trigger thresholds in kbps for uplink reports. A size
+     *     of 0 disables thresholds.
+     * @param ran RadioAccessNetwork for which to apply criteria.
+     * @param result callback message contains the information of SUCCESS/FAILURE
+     */
+    void setLinkCapacityReportingCriteria(int hysteresisMs, int hysteresisDlKbps,
+            int hysteresisUlKbps, int[] thresholdsDlKbps, int[] thresholdsUlKbps, int ran,
+            Message result);
 
     /**
      * Set SIM card power up or down

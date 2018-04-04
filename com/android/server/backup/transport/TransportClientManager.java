@@ -22,8 +22,9 @@ import static com.android.server.backup.transport.TransportUtils.formatMessage;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
-import android.util.Log;
+import android.os.Bundle;
 import com.android.server.backup.TransportManager;
+import com.android.server.backup.transport.TransportUtils.Priority;
 import java.io.PrintWriter;
 import java.util.Map;
 import java.util.WeakHashMap;
@@ -36,12 +37,14 @@ public class TransportClientManager {
     private static final String TAG = "TransportClientManager";
 
     private final Context mContext;
+    private final TransportStats mTransportStats;
     private final Object mTransportClientsLock = new Object();
     private int mTransportClientsCreated = 0;
     private Map<TransportClient, String> mTransportClientsCallerMap = new WeakHashMap<>();
 
-    public TransportClientManager(Context context) {
+    public TransportClientManager(Context context, TransportStats transportStats) {
         mContext = context;
+        mTransportStats = transportStats;
     }
 
     /**
@@ -57,17 +60,47 @@ public class TransportClientManager {
     public TransportClient getTransportClient(ComponentName transportComponent, String caller) {
         Intent bindIntent =
                 new Intent(SERVICE_ACTION_TRANSPORT_HOST).setComponent(transportComponent);
+
+        return getTransportClient(transportComponent, caller, bindIntent);
+    }
+
+    /**
+     * Retrieves a {@link TransportClient} for the transport identified by {@param
+     * transportComponent} whose binding intent will have the {@param extras} extras.
+     *
+     * @param transportComponent The {@link ComponentName} of the transport.
+     * @param extras A {@link Bundle} of extras to pass to the binding intent.
+     * @param caller A {@link String} identifying the caller for logging/debugging purposes. Check
+     *     {@link TransportClient#connectAsync(TransportConnectionListener, String)} for more
+     *     details.
+     * @return A {@link TransportClient}.
+     */
+    public TransportClient getTransportClient(
+            ComponentName transportComponent, Bundle extras, String caller) {
+        Intent bindIntent =
+                new Intent(SERVICE_ACTION_TRANSPORT_HOST).setComponent(transportComponent);
+        bindIntent.putExtras(extras);
+
+        return getTransportClient(transportComponent, caller, bindIntent);
+    }
+
+    private TransportClient getTransportClient(
+            ComponentName transportComponent, String caller, Intent bindIntent) {
         synchronized (mTransportClientsLock) {
             TransportClient transportClient =
                     new TransportClient(
                             mContext,
+                            mTransportStats,
                             bindIntent,
                             transportComponent,
-                            Integer.toString(mTransportClientsCreated));
+                            Integer.toString(mTransportClientsCreated),
+                            caller);
             mTransportClientsCallerMap.put(transportClient, caller);
             mTransportClientsCreated++;
             TransportUtils.log(
-                    Log.DEBUG, TAG, formatMessage(null, caller, "Retrieving " + transportClient));
+                    Priority.DEBUG,
+                    TAG,
+                    formatMessage(null, caller, "Retrieving " + transportClient));
             return transportClient;
         }
     }
@@ -82,9 +115,12 @@ public class TransportClientManager {
      */
     public void disposeOfTransportClient(TransportClient transportClient, String caller) {
         transportClient.unbind(caller);
+        transportClient.markAsDisposed();
         synchronized (mTransportClientsLock) {
             TransportUtils.log(
-                    Log.DEBUG, TAG, formatMessage(null, caller, "Disposing of " + transportClient));
+                    Priority.DEBUG,
+                    TAG,
+                    formatMessage(null, caller, "Disposing of " + transportClient));
             mTransportClientsCallerMap.remove(transportClient);
         }
     }

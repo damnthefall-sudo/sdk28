@@ -1001,8 +1001,8 @@ public class CaptureResult extends CameraMetadata<CaptureResult.Key<?>> {
      * </tbody>
      * </table>
      * <p>If the camera device supports AE external flash mode (ON_EXTERNAL_FLASH is included in
-     * {@link CameraCharacteristics#CONTROL_AE_AVAILABLE_MODES android.control.aeAvailableModes}), aeState must be FLASH_REQUIRED after the camera device
-     * finishes AE scan and it's too dark without flash.</p>
+     * {@link CameraCharacteristics#CONTROL_AE_AVAILABLE_MODES android.control.aeAvailableModes}), {@link CaptureResult#CONTROL_AE_STATE android.control.aeState} must be FLASH_REQUIRED after
+     * the camera device finishes AE scan and it's too dark without flash.</p>
      * <p>For the above table, the camera device may skip reporting any state changes that happen
      * without application intervention (i.e. mode switch, trigger, locking). Any state that
      * can be skipped in that manner is called a transient state.</p>
@@ -1081,6 +1081,7 @@ public class CaptureResult extends CameraMetadata<CaptureResult.Key<?>> {
      * @see CaptureRequest#CONTROL_AE_LOCK
      * @see CaptureRequest#CONTROL_AE_MODE
      * @see CaptureRequest#CONTROL_AE_PRECAPTURE_TRIGGER
+     * @see CaptureResult#CONTROL_AE_STATE
      * @see CaptureRequest#CONTROL_MODE
      * @see CaptureRequest#CONTROL_SCENE_MODE
      * @see CameraCharacteristics#INFO_SUPPORTED_HARDWARE_LEVEL
@@ -1156,7 +1157,8 @@ public class CaptureResult extends CameraMetadata<CaptureResult.Key<?>> {
      * is used, all non-zero weights will have the same effect. A region with 0 weight is
      * ignored.</p>
      * <p>If all regions have 0 weight, then no specific metering area needs to be used by the
-     * camera device.</p>
+     * camera device. The capture result will either be a zero weight region as well, or
+     * the region selected by the camera device as the focus area of interest.</p>
      * <p>If the metering region is outside the used {@link CaptureRequest#SCALER_CROP_REGION android.scaler.cropRegion} returned in
      * capture result metadata, the camera device will ignore the sections outside the crop
      * region and output only the intersection rectangle as the metering region in the result
@@ -2781,7 +2783,7 @@ public class CaptureResult extends CameraMetadata<CaptureResult.Key<?>> {
      * from the main sensor along the +X axis (to the right from the user's perspective) will
      * report <code>(0.03, 0, 0)</code>.</p>
      * <p>To transform a pixel coordinates between two cameras facing the same direction, first
-     * the source camera {@link CameraCharacteristics#LENS_RADIAL_DISTORTION android.lens.radialDistortion} must be corrected for.  Then the source
+     * the source camera {@link CameraCharacteristics#LENS_DISTORTION android.lens.distortion} must be corrected for.  Then the source
      * camera {@link CameraCharacteristics#LENS_INTRINSIC_CALIBRATION android.lens.intrinsicCalibration} needs to be applied, followed by the
      * {@link CameraCharacteristics#LENS_POSE_ROTATION android.lens.poseRotation} of the source camera, the translation of the source camera
      * relative to the destination camera, the {@link CameraCharacteristics#LENS_POSE_ROTATION android.lens.poseRotation} of the destination
@@ -2795,10 +2797,10 @@ public class CaptureResult extends CameraMetadata<CaptureResult.Key<?>> {
      * <p><b>Units</b>: Meters</p>
      * <p><b>Optional</b> - This value may be {@code null} on some devices.</p>
      *
+     * @see CameraCharacteristics#LENS_DISTORTION
      * @see CameraCharacteristics#LENS_INTRINSIC_CALIBRATION
      * @see CameraCharacteristics#LENS_POSE_REFERENCE
      * @see CameraCharacteristics#LENS_POSE_ROTATION
-     * @see CameraCharacteristics#LENS_RADIAL_DISTORTION
      */
     @PublicKey
     public static final Key<float[]> LENS_POSE_TRANSLATION =
@@ -2844,7 +2846,7 @@ public class CaptureResult extends CameraMetadata<CaptureResult.Key<?>> {
      * where <code>(0,0)</code> is the top-left of the
      * preCorrectionActiveArraySize rectangle. Once the pose and
      * intrinsic calibration transforms have been applied to a
-     * world point, then the {@link CameraCharacteristics#LENS_RADIAL_DISTORTION android.lens.radialDistortion}
+     * world point, then the {@link CameraCharacteristics#LENS_DISTORTION android.lens.distortion}
      * transform needs to be applied, and the result adjusted to
      * be in the {@link CameraCharacteristics#SENSOR_INFO_ACTIVE_ARRAY_SIZE android.sensor.info.activeArraySize} coordinate
      * system (where <code>(0, 0)</code> is the top-left of the
@@ -2857,9 +2859,9 @@ public class CaptureResult extends CameraMetadata<CaptureResult.Key<?>> {
      * coordinate system.</p>
      * <p><b>Optional</b> - This value may be {@code null} on some devices.</p>
      *
+     * @see CameraCharacteristics#LENS_DISTORTION
      * @see CameraCharacteristics#LENS_POSE_ROTATION
      * @see CameraCharacteristics#LENS_POSE_TRANSLATION
-     * @see CameraCharacteristics#LENS_RADIAL_DISTORTION
      * @see CameraCharacteristics#SENSOR_INFO_ACTIVE_ARRAY_SIZE
      * @see CameraCharacteristics#SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE
      */
@@ -2901,10 +2903,57 @@ public class CaptureResult extends CameraMetadata<CaptureResult.Key<?>> {
      * <p><b>Optional</b> - This value may be {@code null} on some devices.</p>
      *
      * @see CameraCharacteristics#LENS_INTRINSIC_CALIBRATION
+     * @deprecated
+     * <p>This field was inconsistently defined in terms of its
+     * normalization. Use {@link CameraCharacteristics#LENS_DISTORTION android.lens.distortion} instead.</p>
+     *
+     * @see CameraCharacteristics#LENS_DISTORTION
+
      */
+    @Deprecated
     @PublicKey
     public static final Key<float[]> LENS_RADIAL_DISTORTION =
             new Key<float[]>("android.lens.radialDistortion", float[].class);
+
+    /**
+     * <p>The correction coefficients to correct for this camera device's
+     * radial and tangential lens distortion.</p>
+     * <p>Replaces the deprecated {@link CameraCharacteristics#LENS_RADIAL_DISTORTION android.lens.radialDistortion} field, which was
+     * inconsistently defined.</p>
+     * <p>Three radial distortion coefficients <code>[kappa_1, kappa_2,
+     * kappa_3]</code> and two tangential distortion coefficients
+     * <code>[kappa_4, kappa_5]</code> that can be used to correct the
+     * lens's geometric distortion with the mapping equations:</p>
+     * <pre><code> x_c = x_i * ( 1 + kappa_1 * r^2 + kappa_2 * r^4 + kappa_3 * r^6 ) +
+     *        kappa_4 * (2 * x_i * y_i) + kappa_5 * ( r^2 + 2 * x_i^2 )
+     *  y_c = y_i * ( 1 + kappa_1 * r^2 + kappa_2 * r^4 + kappa_3 * r^6 ) +
+     *        kappa_5 * (2 * x_i * y_i) + kappa_4 * ( r^2 + 2 * y_i^2 )
+     * </code></pre>
+     * <p>Here, <code>[x_c, y_c]</code> are the coordinates to sample in the
+     * input image that correspond to the pixel values in the
+     * corrected image at the coordinate <code>[x_i, y_i]</code>:</p>
+     * <pre><code> correctedImage(x_i, y_i) = sample_at(x_c, y_c, inputImage)
+     * </code></pre>
+     * <p>The pixel coordinates are defined in a coordinate system
+     * related to the {@link CameraCharacteristics#LENS_INTRINSIC_CALIBRATION android.lens.intrinsicCalibration}
+     * calibration fields; see that entry for details of the mapping stages.
+     * Both <code>[x_i, y_i]</code> and <code>[x_c, y_c]</code>
+     * have <code>(0,0)</code> at the lens optical center <code>[c_x, c_y]</code>, and
+     * the range of the coordinates depends on the focal length
+     * terms of the intrinsic calibration.</p>
+     * <p>Finally, <code>r</code> represents the radial distance from the
+     * optical center, <code>r^2 = x_i^2 + y_i^2</code>.</p>
+     * <p>The distortion model used is the Brown-Conrady model.</p>
+     * <p><b>Units</b>:
+     * Unitless coefficients.</p>
+     * <p><b>Optional</b> - This value may be {@code null} on some devices.</p>
+     *
+     * @see CameraCharacteristics#LENS_INTRINSIC_CALIBRATION
+     * @see CameraCharacteristics#LENS_RADIAL_DISTORTION
+     */
+    @PublicKey
+    public static final Key<float[]> LENS_DISTORTION =
+            new Key<float[]>("android.lens.distortion", float[].class);
 
     /**
      * <p>Mode of operation for the noise reduction algorithm.</p>
@@ -2979,6 +3028,8 @@ public class CaptureResult extends CameraMetadata<CaptureResult.Key<?>> {
      * Optional. Default value is FINAL.</p>
      * <p><b>Optional</b> - This value may be {@code null} on some devices.</p>
      * @deprecated
+     * <p>Not used in HALv3 or newer</p>
+
      * @hide
      */
     @Deprecated
@@ -2995,6 +3046,8 @@ public class CaptureResult extends CameraMetadata<CaptureResult.Key<?>> {
      * &gt; 0</p>
      * <p><b>Optional</b> - This value may be {@code null} on some devices.</p>
      * @deprecated
+     * <p>Not used in HALv3 or newer</p>
+
      * @hide
      */
     @Deprecated
@@ -3775,6 +3828,8 @@ public class CaptureResult extends CameraMetadata<CaptureResult.Key<?>> {
      *
      * @see CaptureRequest#COLOR_CORRECTION_GAINS
      * @deprecated
+     * <p>Never fully implemented or specified; do not use</p>
+
      * @hide
      */
     @Deprecated
@@ -3799,6 +3854,8 @@ public class CaptureResult extends CameraMetadata<CaptureResult.Key<?>> {
      * regardless of the android.control.* current values.</p>
      * <p><b>Optional</b> - This value may be {@code null} on some devices.</p>
      * @deprecated
+     * <p>Never fully implemented or specified; do not use</p>
+
      * @hide
      */
     @Deprecated
@@ -3909,21 +3966,18 @@ public class CaptureResult extends CameraMetadata<CaptureResult.Key<?>> {
             new Key<Integer>("android.statistics.lensShadingMapMode", int.class);
 
     /**
-     * <p>Whether the camera device outputs the OIS data in output
+     * <p>A control for selecting whether OIS position information is included in output
      * result metadata.</p>
-     * <p>When set to ON,
-     * {@link CaptureResult#STATISTICS_OIS_TIMESTAMPS android.statistics.oisTimestamps}, android.statistics.oisShiftPixelX,
-     * android.statistics.oisShiftPixelY will provide OIS data in the output result metadata.</p>
      * <p><b>Possible values:</b>
      * <ul>
      *   <li>{@link #STATISTICS_OIS_DATA_MODE_OFF OFF}</li>
      *   <li>{@link #STATISTICS_OIS_DATA_MODE_ON ON}</li>
      * </ul></p>
      * <p><b>Available values for this device:</b><br>
-     * android.Statistics.info.availableOisDataModes</p>
+     * {@link CameraCharacteristics#STATISTICS_INFO_AVAILABLE_OIS_DATA_MODES android.statistics.info.availableOisDataModes}</p>
      * <p><b>Optional</b> - This value may be {@code null} on some devices.</p>
      *
-     * @see CaptureResult#STATISTICS_OIS_TIMESTAMPS
+     * @see CameraCharacteristics#STATISTICS_INFO_AVAILABLE_OIS_DATA_MODES
      * @see #STATISTICS_OIS_DATA_MODE_OFF
      * @see #STATISTICS_OIS_DATA_MODE_ON
      */
@@ -3939,8 +3993,8 @@ public class CaptureResult extends CameraMetadata<CaptureResult.Key<?>> {
      * <p><b>Optional</b> - This value may be {@code null} on some devices.</p>
      *
      * @see CaptureResult#SENSOR_TIMESTAMP
+     * @hide
      */
-    @PublicKey
     public static final Key<long[]> STATISTICS_OIS_TIMESTAMPS =
             new Key<long[]>("android.statistics.oisTimestamps", long[].class);
 
@@ -3948,16 +4002,14 @@ public class CaptureResult extends CameraMetadata<CaptureResult.Key<?>> {
      * <p>An array of shifts of OIS samples, in x direction.</p>
      * <p>The array contains the amount of shifts in x direction, in pixels, based on OIS samples.
      * A positive value is a shift from left to right in active array coordinate system. For
-     * example, if the optical center is (1000, 500) in active array coordinates, an shift of
+     * example, if the optical center is (1000, 500) in active array coordinates, a shift of
      * (3, 0) puts the new optical center at (1003, 500).</p>
      * <p>The number of shifts must match the number of timestamps in
-     * {@link CaptureResult#STATISTICS_OIS_TIMESTAMPS android.statistics.oisTimestamps}.</p>
+     * android.statistics.oisTimestamps.</p>
      * <p><b>Units</b>: Pixels in active array.</p>
      * <p><b>Optional</b> - This value may be {@code null} on some devices.</p>
-     *
-     * @see CaptureResult#STATISTICS_OIS_TIMESTAMPS
+     * @hide
      */
-    @PublicKey
     public static final Key<float[]> STATISTICS_OIS_X_SHIFTS =
             new Key<float[]>("android.statistics.oisXShifts", float[].class);
 
@@ -3965,18 +4017,33 @@ public class CaptureResult extends CameraMetadata<CaptureResult.Key<?>> {
      * <p>An array of shifts of OIS samples, in y direction.</p>
      * <p>The array contains the amount of shifts in y direction, in pixels, based on OIS samples.
      * A positive value is a shift from top to bottom in active array coordinate system. For
-     * example, if the optical center is (1000, 500) in active array coordinates, an shift of
+     * example, if the optical center is (1000, 500) in active array coordinates, a shift of
      * (0, 5) puts the new optical center at (1000, 505).</p>
      * <p>The number of shifts must match the number of timestamps in
-     * {@link CaptureResult#STATISTICS_OIS_TIMESTAMPS android.statistics.oisTimestamps}.</p>
+     * android.statistics.oisTimestamps.</p>
      * <p><b>Units</b>: Pixels in active array.</p>
      * <p><b>Optional</b> - This value may be {@code null} on some devices.</p>
-     *
-     * @see CaptureResult#STATISTICS_OIS_TIMESTAMPS
+     * @hide
      */
-    @PublicKey
     public static final Key<float[]> STATISTICS_OIS_Y_SHIFTS =
             new Key<float[]>("android.statistics.oisYShifts", float[].class);
+
+    /**
+     * <p>An array of OIS samples.</p>
+     * <p>Each OIS sample contains the timestamp and the amount of shifts in x and y direction,
+     * in pixels, of the OIS sample.</p>
+     * <p>A positive value for a shift in x direction is a shift from left to right in active array
+     * coordinate system. For example, if the optical center is (1000, 500) in active array
+     * coordinates, a shift of (3, 0) puts the new optical center at (1003, 500).</p>
+     * <p>A positive value for a shift in y direction is a shift from top to bottom in active array
+     * coordinate system. For example, if the optical center is (1000, 500) in active array
+     * coordinates, a shift of (0, 5) puts the new optical center at (1000, 505).</p>
+     * <p><b>Optional</b> - This value may be {@code null} on some devices.</p>
+     */
+    @PublicKey
+    @SyntheticKey
+    public static final Key<android.hardware.camera2.params.OisSample[]> STATISTICS_OIS_SAMPLES =
+            new Key<android.hardware.camera2.params.OisSample[]>("android.statistics.oisSamples", android.hardware.camera2.params.OisSample[].class);
 
     /**
      * <p>Tonemapping / contrast / gamma curve for the blue
@@ -4029,6 +4096,8 @@ public class CaptureResult extends CameraMetadata<CaptureResult.Key<?>> {
      * of points can be less than max (that is, the request doesn't have to
      * always provide a curve with number of points equivalent to
      * {@link CameraCharacteristics#TONEMAP_MAX_CURVE_POINTS android.tonemap.maxCurvePoints}).</p>
+     * <p>For devices with MONOCHROME capability, only red channel is used. Green and blue channels
+     * are ignored.</p>
      * <p>A few examples, and their corresponding graphical mappings; these
      * only specify the red channel and the precision is limited to 4
      * digits, for conciseness.</p>
@@ -4091,6 +4160,8 @@ public class CaptureResult extends CameraMetadata<CaptureResult.Key<?>> {
      * of points can be less than max (that is, the request doesn't have to
      * always provide a curve with number of points equivalent to
      * {@link CameraCharacteristics#TONEMAP_MAX_CURVE_POINTS android.tonemap.maxCurvePoints}).</p>
+     * <p>For devices with MONOCHROME capability, only red channel is used. Green and blue channels
+     * are ignored.</p>
      * <p>A few examples, and their corresponding graphical mappings; these
      * only specify the red channel and the precision is limited to 4
      * digits, for conciseness.</p>
@@ -4382,6 +4453,49 @@ public class CaptureResult extends CameraMetadata<CaptureResult.Key<?>> {
     @PublicKey
     public static final Key<Float> REPROCESS_EFFECTIVE_EXPOSURE_FACTOR =
             new Key<Float>("android.reprocess.effectiveExposureFactor", float.class);
+
+    /**
+     * <p>Mode of operation for the lens distortion correction block.</p>
+     * <p>The lens distortion correction block attempts to improve image quality by fixing
+     * radial, tangential, or other geometric aberrations in the camera device's optics.  If
+     * available, the {@link CameraCharacteristics#LENS_DISTORTION android.lens.distortion} field documents the lens's distortion parameters.</p>
+     * <p>OFF means no distortion correction is done.</p>
+     * <p>FAST/HIGH_QUALITY both mean camera device determined distortion correction will be
+     * applied. HIGH_QUALITY mode indicates that the camera device will use the highest-quality
+     * correction algorithms, even if it slows down capture rate. FAST means the camera device
+     * will not slow down capture rate when applying correction. FAST may be the same as OFF if
+     * any correction at all would slow down capture rate.  Every output stream will have a
+     * similar amount of enhancement applied.</p>
+     * <p>The correction only applies to processed outputs such as YUV, JPEG, or DEPTH16; it is not
+     * applied to any RAW output.  Metadata coordinates such as face rectangles or metering
+     * regions are also not affected by correction.</p>
+     * <p>Applications enabling distortion correction need to pay extra attention when converting
+     * image coordinates between corrected output buffers and the sensor array. For example, if
+     * the app supports tap-to-focus and enables correction, it then has to apply the distortion
+     * model described in {@link CameraCharacteristics#LENS_DISTORTION android.lens.distortion} to the image buffer tap coordinates to properly
+     * calculate the tap position on the sensor active array to be used with
+     * {@link CaptureRequest#CONTROL_AF_REGIONS android.control.afRegions}. The same applies in reverse to detected face rectangles if
+     * they need to be drawn on top of the corrected output buffers.</p>
+     * <p><b>Possible values:</b>
+     * <ul>
+     *   <li>{@link #DISTORTION_CORRECTION_MODE_OFF OFF}</li>
+     *   <li>{@link #DISTORTION_CORRECTION_MODE_FAST FAST}</li>
+     *   <li>{@link #DISTORTION_CORRECTION_MODE_HIGH_QUALITY HIGH_QUALITY}</li>
+     * </ul></p>
+     * <p><b>Available values for this device:</b><br>
+     * {@link CameraCharacteristics#DISTORTION_CORRECTION_AVAILABLE_MODES android.distortionCorrection.availableModes}</p>
+     * <p><b>Optional</b> - This value may be {@code null} on some devices.</p>
+     *
+     * @see CaptureRequest#CONTROL_AF_REGIONS
+     * @see CameraCharacteristics#DISTORTION_CORRECTION_AVAILABLE_MODES
+     * @see CameraCharacteristics#LENS_DISTORTION
+     * @see #DISTORTION_CORRECTION_MODE_OFF
+     * @see #DISTORTION_CORRECTION_MODE_FAST
+     * @see #DISTORTION_CORRECTION_MODE_HIGH_QUALITY
+     */
+    @PublicKey
+    public static final Key<Integer> DISTORTION_CORRECTION_MODE =
+            new Key<Integer>("android.distortionCorrection.mode", int.class);
 
     /*~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~@~
      * End generated code

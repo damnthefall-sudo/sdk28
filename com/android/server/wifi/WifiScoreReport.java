@@ -16,7 +16,6 @@
 
 package com.android.server.wifi;
 
-import android.content.Context;
 import android.net.NetworkAgent;
 import android.net.wifi.WifiInfo;
 import android.util.Log;
@@ -35,7 +34,7 @@ import java.util.Locale;
 public class WifiScoreReport {
     private static final String TAG = "WifiScoreReport";
 
-    private static final int DUMPSYS_ENTRY_COUNT_LIMIT = 14400; // 12 hours on 3 second poll
+    private static final int DUMPSYS_ENTRY_COUNT_LIMIT = 3600; // 3 hours on 3 second poll
 
     private boolean mVerboseLoggingEnabled = false;
     private static final long FIRST_REASONABLE_WALL_CLOCK = 1490000000000L; // mid-December 2016
@@ -44,18 +43,18 @@ public class WifiScoreReport {
     private String mReport;
     private boolean mReportValid = false;
 
+    private final ScoringParams mScoringParams;
     private final Clock mClock;
     private int mSessionNumber = 0;
 
-    ConnectedScore mConnectedScore;
     ConnectedScore mAggressiveConnectedScore;
-    VelocityBasedConnectedScore mFancyConnectedScore;
+    VelocityBasedConnectedScore mVelocityBasedConnectedScore;
 
-    WifiScoreReport(Context context, WifiConfigManager wifiConfigManager, Clock clock) {
+    WifiScoreReport(ScoringParams scoringParams, Clock clock) {
+        mScoringParams = scoringParams;
         mClock = clock;
-        mConnectedScore = new LegacyConnectedScore(context, wifiConfigManager, clock);
-        mAggressiveConnectedScore = new AggressiveConnectedScore(context, clock);
-        mFancyConnectedScore = new VelocityBasedConnectedScore(context, clock);
+        mAggressiveConnectedScore = new AggressiveConnectedScore(scoringParams, clock);
+        mVelocityBasedConnectedScore = new VelocityBasedConnectedScore(scoringParams, clock);
     }
 
     /**
@@ -76,9 +75,8 @@ public class WifiScoreReport {
             mSessionNumber++;
             mReportValid = false;
         }
-        mConnectedScore.reset();
         mAggressiveConnectedScore.reset();
-        mFancyConnectedScore.reset();
+        mVelocityBasedConnectedScore.reset();
         if (mVerboseLoggingEnabled) Log.d(TAG, "reset");
     }
 
@@ -109,27 +107,46 @@ public class WifiScoreReport {
      *
      * @param wifiInfo WifiInfo instance pointing to the currently connected network.
      * @param networkAgent NetworkAgent to be notified of new score.
-     * @param aggressiveHandover int current aggressiveHandover setting.
      * @param wifiMetrics for reporting our scores.
      */
     public void calculateAndReportScore(WifiInfo wifiInfo, NetworkAgent networkAgent,
-                                        int aggressiveHandover, WifiMetrics wifiMetrics) {
+                                        WifiMetrics wifiMetrics) {
         int score;
 
         long millis = mClock.getWallClockMillis();
+        int netId = 0;
 
-        mConnectedScore.updateUsingWifiInfo(wifiInfo, millis);
+        if (networkAgent != null) {
+            netId = networkAgent.netId;
+        }
+
         mAggressiveConnectedScore.updateUsingWifiInfo(wifiInfo, millis);
-        mFancyConnectedScore.updateUsingWifiInfo(wifiInfo, millis);
+        mVelocityBasedConnectedScore.updateUsingWifiInfo(wifiInfo, millis);
 
-        int s0 = mConnectedScore.generateScore();
         int s1 = mAggressiveConnectedScore.generateScore();
-        int s2 = mFancyConnectedScore.generateScore();
+        int s2 = mVelocityBasedConnectedScore.generateScore();
 
-        if (aggressiveHandover == 0) {
-            score = s2;
-        } else {
-            score = s2; // TODO Remove aggressive handover plumbing (b/27877641)
+        score = s2;
+
+        if (wifiInfo.score > ConnectedScore.WIFI_TRANSITION_SCORE
+                 && score <= ConnectedScore.WIFI_TRANSITION_SCORE
+                 && wifiInfo.txSuccessRate >= mScoringParams.getYippeeSkippyPacketsPerSecond()
+                 && wifiInfo.rxSuccessRate >= mScoringParams.getYippeeSkippyPacketsPerSecond()) {
+            score = ConnectedScore.WIFI_TRANSITION_SCORE + 1;
+        }
+
+        if (wifiInfo.score > ConnectedScore.WIFI_TRANSITION_SCORE
+                 && score <= ConnectedScore.WIFI_TRANSITION_SCORE) {
+            // We don't want to trigger a downward breach unless the rssi is
+            // below the entry threshold.  There is noise in the measured rssi, and
+            // the kalman-filtered rssi is affected by the trend, so check them both.
+            // TODO(b/74613347) skip this if there are other indications to support the low score
+            int entry = mScoringParams.getEntryRssi(wifiInfo.getFrequency());
+            if (mVelocityBasedConnectedScore.getFilteredRssi() >= entry
+                    || wifiInfo.getRssi() >= entry) {
+                // Stay a notch above the transition score to reduce ambiguity.
+                score = ConnectedScore.WIFI_TRANSITION_SCORE + 1;
+            }
         }
 
         //sanitize boundaries
@@ -140,7 +157,7 @@ public class WifiScoreReport {
             score = 0;
         }
 
-        logLinkMetrics(wifiInfo, millis, s0, s1, s2);
+        logLinkMetrics(wifiInfo, millis, netId, s1, s2, score);
 
         //report score
         if (score != wifiInfo.score) {
@@ -168,11 +185,12 @@ public class WifiScoreReport {
     /**
      * Data logging for dumpsys
      */
-    private void logLinkMetrics(WifiInfo wifiInfo, long now, int s0, int s1, int s2) {
+    private void logLinkMetrics(WifiInfo wifiInfo, long now, int netId,
+                                int s1, int s2, int score) {
         if (now < FIRST_REASONABLE_WALL_CLOCK) return;
         double rssi = wifiInfo.getRssi();
-        double filteredRssi = mFancyConnectedScore.getFilteredRssi();
-        double rssiThreshold = mFancyConnectedScore.getAdjustedRssiThreshold();
+        double filteredRssi = mVelocityBasedConnectedScore.getFilteredRssi();
+        double rssiThreshold = mVelocityBasedConnectedScore.getAdjustedRssiThreshold();
         int freq = wifiInfo.getFrequency();
         int linkSpeed = wifiInfo.getLinkSpeed();
         double txSuccessRate = wifiInfo.txSuccessRate;
@@ -183,10 +201,11 @@ public class WifiScoreReport {
         try {
             String timestamp = new SimpleDateFormat("MM-dd HH:mm:ss.SSS").format(new Date(now));
             s = String.format(Locale.US, // Use US to avoid comma/decimal confusion
-                    "%s,%d,%.1f,%.1f,%.1f,%d,%d,%.2f,%.2f,%.2f,%.2f,%d,%d,%d",
-                    timestamp, mSessionNumber, rssi, filteredRssi, rssiThreshold, freq, linkSpeed,
+                    "%s,%d,%d,%.1f,%.1f,%.1f,%d,%d,%.2f,%.2f,%.2f,%.2f,%d,%d,%d",
+                    timestamp, mSessionNumber, netId,
+                    rssi, filteredRssi, rssiThreshold, freq, linkSpeed,
                     txSuccessRate, txRetriesRate, txBadRate, rxSuccessRate,
-                    s0, s1, s2);
+                    s1, s2, score);
         } catch (Exception e) {
             Log.e(TAG, "format problem", e);
             return;
@@ -215,8 +234,8 @@ public class WifiScoreReport {
         synchronized (mLinkMetricsHistory) {
             history = new LinkedList<>(mLinkMetricsHistory);
         }
-        pw.println("time,session,rssi,filtered_rssi,rssi_threshold,"
-                + "freq,linkspeed,tx_good,tx_retry,tx_bad,rx_pps,s0,s1,s2");
+        pw.println("time,session,netid,rssi,filtered_rssi,rssi_threshold,"
+                + "freq,linkspeed,tx_good,tx_retry,tx_bad,rx_pps,s1,s2,score");
         for (String line : history) {
             pw.println(line);
         }

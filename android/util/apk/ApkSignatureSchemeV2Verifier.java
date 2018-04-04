@@ -213,7 +213,9 @@ public class ApkSignatureSchemeV2Verifier {
 
         byte[] verityRootHash = null;
         if (contentDigests.containsKey(CONTENT_DIGEST_VERITY_CHUNKED_SHA256)) {
-            verityRootHash = contentDigests.get(CONTENT_DIGEST_VERITY_CHUNKED_SHA256);
+            byte[] verityDigest = contentDigests.get(CONTENT_DIGEST_VERITY_CHUNKED_SHA256);
+            verityRootHash = ApkSigningBlockUtils.parseVerityDigestAndVerifySourceLength(
+                    verityDigest, apk.length(), signatureInfo);
         }
 
         return new VerifiedSigner(
@@ -409,6 +411,20 @@ public class ApkSignatureSchemeV2Verifier {
         try (RandomAccessFile apk = new RandomAccessFile(apkPath, "r")) {
             SignatureInfo signatureInfo = findSignature(apk);
             return ApkSigningBlockUtils.generateApkVerity(apkPath, bufferFactory, signatureInfo);
+        }
+    }
+
+    static byte[] generateFsverityRootHash(String apkPath)
+            throws IOException, SignatureNotFoundException, DigestException,
+                   NoSuchAlgorithmException {
+        try (RandomAccessFile apk = new RandomAccessFile(apkPath, "r")) {
+            SignatureInfo signatureInfo = findSignature(apk);
+            VerifiedSigner vSigner = verify(apk, false);
+            if (vSigner.verityRootHash == null) {
+                return null;
+            }
+            return ApkVerityBuilder.generateFsverityRootHash(
+                    apk, ByteBuffer.wrap(vSigner.verityRootHash), signatureInfo);
         }
     }
 

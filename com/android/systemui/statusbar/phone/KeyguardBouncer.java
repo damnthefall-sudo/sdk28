@@ -16,18 +16,23 @@
 
 package com.android.systemui.statusbar.phone;
 
+import static com.android.keyguard.KeyguardHostView.OnDismissAction;
+import static com.android.keyguard.KeyguardSecurityModel.SecurityMode;
+
 import android.content.Context;
 import android.os.Handler;
 import android.os.UserHandle;
 import android.os.UserManager;
+import android.util.Log;
+import android.util.MathUtils;
 import android.util.Slog;
+import android.util.StatsLog;
 import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
 import android.view.WindowInsets;
-import android.view.accessibility.AccessibilityEvent;
 
 import com.android.internal.widget.LockPatternUtils;
 import com.android.keyguard.KeyguardHostView;
@@ -40,15 +45,13 @@ import com.android.systemui.DejankUtils;
 import com.android.systemui.classifier.FalsingManager;
 import com.android.systemui.keyguard.DismissCallbackRegistry;
 
-import static com.android.keyguard.KeyguardHostView.OnDismissAction;
-import static com.android.keyguard.KeyguardSecurityModel.SecurityMode;
-
 /**
  * A class which manages the bouncer on the lockscreen.
  */
 public class KeyguardBouncer {
 
-    final static private String TAG = "KeyguardBouncer";
+    private static final String TAG = "KeyguardBouncer";
+    static final float ALPHA_EXPANSION_THRESHOLD = 0.95f;
 
     protected final Context mContext;
     protected final ViewMediatorCallback mCallback;
@@ -57,10 +60,6 @@ public class KeyguardBouncer {
     private final FalsingManager mFalsingManager;
     private final DismissCallbackRegistry mDismissCallbackRegistry;
     private final Handler mHandler;
-    protected KeyguardHostView mKeyguardView;
-    protected ViewGroup mRoot;
-    private boolean mShowingSoon;
-    private int mBouncerPromptReason;
     private final KeyguardUpdateMonitorCallback mUpdateMonitorCallback =
             new KeyguardUpdateMonitorCallback() {
                 @Override
@@ -69,29 +68,57 @@ public class KeyguardBouncer {
                 }
             };
     private final Runnable mRemoveViewRunnable = this::removeView;
+
     private int mStatusBarHeight;
+    private float mExpansion;
+    protected KeyguardHostView mKeyguardView;
+    protected ViewGroup mRoot;
+    private boolean mShowingSoon;
+    private int mBouncerPromptReason;
+    private boolean mIsAnimatingAway;
 
     public KeyguardBouncer(Context context, ViewMediatorCallback callback,
             LockPatternUtils lockPatternUtils, ViewGroup container,
-            DismissCallbackRegistry dismissCallbackRegistry) {
+            DismissCallbackRegistry dismissCallbackRegistry, FalsingManager falsingManager) {
         mContext = context;
         mCallback = callback;
         mLockPatternUtils = lockPatternUtils;
         mContainer = container;
         KeyguardUpdateMonitor.getInstance(mContext).registerCallback(mUpdateMonitorCallback);
-        mFalsingManager = FalsingManager.getInstance(mContext);
+        mFalsingManager = falsingManager;
         mDismissCallbackRegistry = dismissCallbackRegistry;
         mHandler = new Handler();
     }
 
     public void show(boolean resetSecuritySelection) {
+        show(resetSecuritySelection, true /* notifyFalsing */);
+    }
+
+    /**
+     * Shows the bouncer.
+     *
+     * @param resetSecuritySelection Cleans keyguard view
+     * @param animated true when the bouncer show show animated, false when the user will be
+     *                 dragging it and animation should be deferred.
+     */
+    public void show(boolean resetSecuritySelection, boolean animated) {
         final int keyguardUserId = KeyguardUpdateMonitor.getCurrentUser();
         if (keyguardUserId == UserHandle.USER_SYSTEM && UserManager.isSplitSystemUser()) {
             // In split system user mode, we never unlock system user.
             return;
         }
-        mFalsingManager.onBouncerShown();
         ensureView();
+
+        // On the keyguard, we want to show the bouncer when the user drags up, but it's
+        // not correct to end the falsing session. We still need to verify if those touches
+        // are valid.
+        // Later, at the end of the animation, when the bouncer is at the top of the screen,
+        // onFullyShown() will be called and FalsingManager will stop recording touches.
+        if (animated) {
+            mFalsingManager.onBouncerShown();
+            setExpansion(0);
+        }
+
         if (resetSecuritySelection) {
             // showPrimarySecurityScreen() updates the current security method. This is needed in
             // case we are already showing and the current security method changed.
@@ -125,6 +152,30 @@ public class KeyguardBouncer {
         mCallback.onBouncerVisiblityChanged(true /* shown */);
     }
 
+    /**
+     * This method must be called at the end of the bouncer animation when
+     * the translation is performed manually by the user, otherwise FalsingManager
+     * will never be notified and its internal state will be out of sync.
+     */
+    public void onFullyShown() {
+        mFalsingManager.onBouncerShown();
+    }
+
+    /**
+     * This method must be called at the end of the bouncer animation when
+     * the translation is performed manually by the user, otherwise FalsingManager
+     * will never be notified and its internal state will be out of sync.
+     */
+    public void onFullyHidden() {
+        if (!mShowingSoon) {
+            cancelShowRunnable();
+            if (mRoot != null) {
+                mRoot.setVisibility(View.INVISIBLE);
+            }
+            mFalsingManager.onBouncerHidden();
+        }
+    }
+
     private final Runnable mShowRunnable = new Runnable() {
         @Override
         public void run() {
@@ -152,7 +203,8 @@ public class KeyguardBouncer {
                 mKeyguardView.requestLayout();
             }
             mShowingSoon = false;
-            mKeyguardView.sendAccessibilityEvent(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED);
+            StatsLog.write(StatsLog.KEYGUARD_BOUNCER_STATE_CHANGED,
+                StatsLog.KEYGUARD_BOUNCER_STATE_CHANGED__STATE__SHOWN);
         }
     };
 
@@ -164,11 +216,19 @@ public class KeyguardBouncer {
      *               and {@link KeyguardSecurityView#PROMPT_REASON_RESTART}
      */
     public void showPromptReason(int reason) {
-        mKeyguardView.showPromptReason(reason);
+        if (mKeyguardView != null) {
+            mKeyguardView.showPromptReason(reason);
+        } else {
+            Log.w(TAG, "Trying to show prompt reason on empty bouncer");
+        }
     }
 
     public void showMessage(String message, int color) {
-        mKeyguardView.showMessage(message, color);
+        if (mKeyguardView != null) {
+            mKeyguardView.showMessage(message, color);
+        } else {
+            Log.w(TAG, "Trying to show message on empty bouncer");
+        }
     }
 
     private void cancelShowRunnable() {
@@ -184,6 +244,8 @@ public class KeyguardBouncer {
 
     public void hide(boolean destroyView) {
         if (isShowing()) {
+            StatsLog.write(StatsLog.KEYGUARD_BOUNCER_STATE_CHANGED,
+                StatsLog.KEYGUARD_BOUNCER_STATE_CHANGED__STATE__HIDDEN);
             mDismissCallbackRegistry.notifyDismissCancelled();
         }
         mFalsingManager.onBouncerHidden();
@@ -193,6 +255,7 @@ public class KeyguardBouncer {
             mKeyguardView.cancelDismissAction();
             mKeyguardView.cleanUp();
         }
+        mIsAnimatingAway = false;
         if (mRoot != null) {
             mRoot.setVisibility(View.INVISIBLE);
             if (destroyView) {
@@ -208,6 +271,7 @@ public class KeyguardBouncer {
      * See {@link StatusBarKeyguardViewManager#startPreHideAnimation}.
      */
     public void startPreHideAnimation(Runnable runnable) {
+        mIsAnimatingAway = true;
         if (mKeyguardView != null) {
             mKeyguardView.startDisappearAnimation(runnable);
         } else if (runnable != null) {
@@ -231,7 +295,16 @@ public class KeyguardBouncer {
     }
 
     public boolean isShowing() {
-        return mShowingSoon || (mRoot != null && mRoot.getVisibility() == View.VISIBLE);
+        return (mShowingSoon || (mRoot != null && mRoot.getVisibility() == View.VISIBLE))
+                && mExpansion == 0;
+    }
+
+    /**
+     * @return {@code true} when bouncer's pre-hide animation already started but isn't completely
+     *         hidden yet, {@code false} otherwise.
+     */
+    public boolean isAnimatingAway() {
+        return mIsAnimatingAway;
     }
 
     public void prepare() {
@@ -241,6 +314,38 @@ public class KeyguardBouncer {
             mKeyguardView.showPrimarySecurityScreen();
         }
         mBouncerPromptReason = mCallback.getBouncerPromptReason();
+    }
+
+    /**
+     * Current notification panel expansion
+     * @param fraction 0 when notification panel is collapsed and 1 when expanded.
+     * @see StatusBarKeyguardViewManager#onPanelExpansionChanged
+     */
+    public void setExpansion(float fraction) {
+        mExpansion = fraction;
+        if (mKeyguardView != null && !mIsAnimatingAway) {
+            float alpha = MathUtils.map(ALPHA_EXPANSION_THRESHOLD, 1, 1, 0, fraction);
+            mKeyguardView.setAlpha(MathUtils.constrain(alpha, 0f, 1f));
+            mKeyguardView.setTranslationY(fraction * mKeyguardView.getHeight());
+        }
+    }
+
+    public boolean willDismissWithAction() {
+        return mKeyguardView != null && mKeyguardView.hasDismissActions();
+    }
+
+    public int getTop() {
+        if (mKeyguardView == null) {
+            return 0;
+        }
+
+        int top = mKeyguardView.getTop();
+        // The password view has an extra top padding that should be ignored.
+        if (mKeyguardView.getCurrentSecurityMode() == SecurityMode.Password) {
+            View messageArea = mKeyguardView.findViewById(R.id.keyguard_message_area);
+            top += messageArea.getTop();
+        }
+        return top;
     }
 
     protected void ensureView() {
@@ -264,6 +369,7 @@ public class KeyguardBouncer {
         mStatusBarHeight = mRoot.getResources().getDimensionPixelOffset(
                 com.android.systemui.R.dimen.status_bar_height);
         mRoot.setVisibility(View.INVISIBLE);
+        mRoot.setAccessibilityPaneTitle(mKeyguardView.getAccessibilityTitleForCurrentMode());
 
         final WindowInsets rootInsets = mRoot.getRootWindowInsets();
         if (rootInsets != null) {

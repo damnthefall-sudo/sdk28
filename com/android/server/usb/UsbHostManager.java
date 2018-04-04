@@ -16,6 +16,10 @@
 
 package com.android.server.usb;
 
+import static com.android.internal.usb.DumpUtils.writeDevice;
+import static com.android.internal.util.dump.DumpUtils.writeComponentName;
+
+import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.content.ComponentName;
 import android.content.Context;
@@ -23,11 +27,16 @@ import android.hardware.usb.UsbConstants;
 import android.hardware.usb.UsbDevice;
 import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
+import android.service.ServiceProtoEnums;
+import android.service.usb.UsbConnectionRecordProto;
+import android.service.usb.UsbHostManagerProto;
+import android.service.usb.UsbIsHeadsetProto;
 import android.text.TextUtils;
 import android.util.Slog;
 
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.util.IndentingPrintWriter;
+import com.android.internal.util.dump.DualDumpOutputStream;
 import com.android.server.usb.descriptors.UsbDescriptor;
 import com.android.server.usb.descriptors.UsbDescriptorParser;
 import com.android.server.usb.descriptors.UsbDeviceDescriptor;
@@ -44,7 +53,8 @@ import java.util.LinkedList;
  */
 public class UsbHostManager {
     private static final String TAG = UsbHostManager.class.getSimpleName();
-    private static final boolean DEBUG = true;
+    private static final boolean DEBUG = false;
+    private static final int LINUX_FOUNDATION_VID = 0x1d6b;
 
     private final Context mContext;
 
@@ -84,10 +94,13 @@ public class UsbHostManager {
         long mTimestamp;        // Same time-base as system log.
         String mDeviceAddress;
 
-        static final int CONNECT = 0;
-        static final int CONNECT_BADPARSE = 1;
-        static final int CONNECT_BADDEVICE = 2;
-        static final int DISCONNECT = -1;
+        static final int CONNECT = ServiceProtoEnums.USB_CONNECTION_RECORD_MODE_CONNECT; // 0
+        static final int CONNECT_BADPARSE =
+                ServiceProtoEnums.USB_CONNECTION_RECORD_MODE_CONNECT_BADPARSE; // 1
+        static final int CONNECT_BADDEVICE =
+                ServiceProtoEnums.USB_CONNECTION_RECORD_MODE_CONNECT_BADDEVICE; // 2
+        static final int DISCONNECT =
+                ServiceProtoEnums.USB_CONNECTION_RECORD_MODE_DISCONNECT; // -1
 
         final int mMode;
         final byte[] mDescriptors;
@@ -101,6 +114,31 @@ public class UsbHostManager {
 
         private String formatTime() {
             return (new StringBuilder(sFormat.format(new Date(mTimestamp)))).toString();
+        }
+
+        void dump(@NonNull DualDumpOutputStream dump, String idName, long id) {
+            long token = dump.start(idName, id);
+
+            dump.write("device_address", UsbConnectionRecordProto.DEVICE_ADDRESS, mDeviceAddress);
+            dump.write("mode", UsbConnectionRecordProto.MODE, mMode);
+            dump.write("timestamp", UsbConnectionRecordProto.TIMESTAMP, mTimestamp);
+
+            if (mMode != DISCONNECT) {
+                UsbDescriptorParser parser = new UsbDescriptorParser(mDeviceAddress, mDescriptors);
+
+                UsbDeviceDescriptor deviceDescriptor = parser.getDeviceDescriptor();
+
+                dump.write("manufacturer", UsbConnectionRecordProto.MANUFACTURER,
+                        deviceDescriptor.getVendorID());
+                dump.write("product", UsbConnectionRecordProto.PRODUCT,
+                        deviceDescriptor.getProductID());
+                long isHeadSetToken = dump.start("is_headset", UsbConnectionRecordProto.IS_HEADSET);
+                dump.write("in", UsbIsHeadsetProto.IN, parser.isInputHeadset());
+                dump.write("out", UsbIsHeadsetProto.OUT, parser.isOutputHeadset());
+                dump.end(isHeadSetToken);
+            }
+
+            dump.end(token);
         }
 
         void dumpShort(IndentingPrintWriter pw) {
@@ -263,6 +301,40 @@ public class UsbHostManager {
         }
     }
 
+    private void logUsbDevice(UsbDescriptorParser descriptorParser) {
+        int vid = 0;
+        int pid = 0;
+        String mfg = "<unknown>";
+        String product = "<unknown>";
+        String version = "<unknown>";
+        String serial = "<unknown>";
+
+        UsbDeviceDescriptor deviceDescriptor = descriptorParser.getDeviceDescriptor();
+        if (deviceDescriptor != null) {
+            vid = deviceDescriptor.getVendorID();
+            pid = deviceDescriptor.getProductID();
+            mfg = deviceDescriptor.getMfgString(descriptorParser);
+            product = deviceDescriptor.getProductString(descriptorParser);
+            version = deviceDescriptor.getDeviceReleaseString();
+            serial = deviceDescriptor.getSerialString(descriptorParser);
+        }
+
+        if (vid == LINUX_FOUNDATION_VID) {
+            return;  // don't care about OS-constructed virtual USB devices.
+        }
+        boolean hasAudio = descriptorParser.hasAudioInterface();
+        boolean hasHid = descriptorParser.hasHIDInterface();
+        boolean hasStorage = descriptorParser.hasStorageInterface();
+
+        String attachedString = "USB device attached: ";
+        attachedString += String.format("vidpid %04x:%04x", vid, pid);
+        attachedString += String.format(" mfg/product/ver/serial %s/%s/%s/%s",
+                                        mfg, product, version, serial);
+        attachedString += String.format(" hasAudio/HID/Storage: %b/%b/%b",
+                                        hasAudio, hasHid, hasStorage);
+        Slog.d(TAG, attachedString);
+    }
+
     /* Called from JNI in monitorUsbHostBus() to report new USB devices
        Returns true if successful, i.e. the USB Audio device descriptors are
        correctly parsed and the unique device is added to the audio device list.
@@ -274,10 +346,18 @@ public class UsbHostManager {
             Slog.d(TAG, "usbDeviceAdded(" + deviceAddress + ") - start");
         }
 
-        // check class/subclass first as it is more likely to be blacklisted
-        if (isBlackListed(deviceClass, deviceSubclass) || isBlackListed(deviceAddress)) {
+        if (isBlackListed(deviceAddress)) {
             if (DEBUG) {
-                Slog.d(TAG, "device is black listed");
+                Slog.d(TAG, "device address is black listed");
+            }
+            return false;
+        }
+        UsbDescriptorParser parser = new UsbDescriptorParser(deviceAddress, descriptors);
+        logUsbDevice(parser);
+
+        if (isBlackListed(deviceClass, deviceSubclass)) {
+            if (DEBUG) {
+                Slog.d(TAG, "device class is black listed");
             }
             return false;
         }
@@ -290,46 +370,31 @@ public class UsbHostManager {
                 return false;
             }
 
-            UsbDescriptorParser parser = new UsbDescriptorParser(deviceAddress);
-            if (parser.parseDescriptors(descriptors)) {
-
-                UsbDevice newDevice = parser.toAndroidUsbDevice();
-                if (newDevice == null) {
-                    Slog.e(TAG, "Couldn't create UsbDevice object.");
-                    // Tracking
-                    addConnectionRecord(deviceAddress, ConnectionRecord.CONNECT_BADDEVICE,
-                            parser.getRawDescriptors());
-                } else {
-                    mDevices.put(deviceAddress, newDevice);
-
-                    // It is fine to call this only for the current user as all broadcasts are
-                    // sent to all profiles of the user and the dialogs should only show once.
-                    ComponentName usbDeviceConnectionHandler = getUsbDeviceConnectionHandler();
-                    if (usbDeviceConnectionHandler == null) {
-                        getCurrentUserSettings().deviceAttached(newDevice);
-                    } else {
-                        getCurrentUserSettings().deviceAttachedForFixedHandler(newDevice,
-                                usbDeviceConnectionHandler);
-                    }
-
-                    // Headset?
-                    boolean isInputHeadset = parser.isInputHeadset();
-                    boolean isOutputHeadset = parser.isOutputHeadset();
-                    Slog.i(TAG, "---- isHeadset[in: " + isInputHeadset
-                            + " , out: " + isOutputHeadset + "]");
-
-                    mUsbAlsaManager.usbDeviceAdded(newDevice, isInputHeadset, isOutputHeadset);
-
-                    // Tracking
-                    addConnectionRecord(deviceAddress, ConnectionRecord.CONNECT,
-                            parser.getRawDescriptors());
-                }
-            } else {
-                Slog.e(TAG, "Error parsing USB device descriptors for " + deviceAddress);
+            UsbDevice newDevice = parser.toAndroidUsbDevice();
+            if (newDevice == null) {
+                Slog.e(TAG, "Couldn't create UsbDevice object.");
                 // Tracking
-                addConnectionRecord(deviceAddress, ConnectionRecord.CONNECT_BADPARSE,
+                addConnectionRecord(deviceAddress, ConnectionRecord.CONNECT_BADDEVICE,
                         parser.getRawDescriptors());
-                return false;
+            } else {
+                mDevices.put(deviceAddress, newDevice);
+                Slog.d(TAG, "Added device " + newDevice);
+
+                // It is fine to call this only for the current user as all broadcasts are
+                // sent to all profiles of the user and the dialogs should only show once.
+                ComponentName usbDeviceConnectionHandler = getUsbDeviceConnectionHandler();
+                if (usbDeviceConnectionHandler == null) {
+                    getCurrentUserSettings().deviceAttached(newDevice);
+                } else {
+                    getCurrentUserSettings().deviceAttachedForFixedHandler(newDevice,
+                            usbDeviceConnectionHandler);
+                }
+
+                mUsbAlsaManager.usbDeviceAdded(deviceAddress, newDevice, parser);
+
+                // Tracking
+                addConnectionRecord(deviceAddress, ConnectionRecord.CONNECT,
+                        parser.getRawDescriptors());
             }
         }
 
@@ -346,12 +411,15 @@ public class UsbHostManager {
         synchronized (mLock) {
             UsbDevice device = mDevices.remove(deviceAddress);
             if (device != null) {
-                mUsbAlsaManager.usbDeviceRemoved(device);
+                Slog.d(TAG, "Removed device at " + deviceAddress + ": " + device.getProductName());
+                mUsbAlsaManager.usbDeviceRemoved(deviceAddress/*device*/);
                 mSettingsManager.usbDeviceRemoved(device);
                 getCurrentUserSettings().usbDeviceRemoved(device);
 
                 // Tracking
                 addConnectionRecord(deviceAddress, ConnectionRecord.DISCONNECT, null);
+            } else {
+                Slog.d(TAG, "Removed device at " + deviceAddress + " was already gone");
             }
         }
     }
@@ -395,30 +463,30 @@ public class UsbHostManager {
 
     /**
      * Dump out various information about the state of USB device connections.
-     *
      */
-    public void dump(IndentingPrintWriter pw, String[] args) {
-        pw.println("USB Host State:");
+    public void dump(DualDumpOutputStream dump, String idName, long id) {
+        long token = dump.start(idName, id);
+
         synchronized (mHandlerLock) {
             if (mUsbDeviceConnectionHandler != null) {
-                pw.println("Default USB Host Connection handler: " + mUsbDeviceConnectionHandler);
+                writeComponentName(dump, "default_usb_host_connection_handler",
+                        UsbHostManagerProto.DEFAULT_USB_HOST_CONNECTION_HANDLER,
+                        mUsbDeviceConnectionHandler);
             }
         }
         synchronized (mLock) {
             for (String name : mDevices.keySet()) {
-                pw.println("  " + name + ": " + mDevices.get(name));
+                writeDevice(dump, "devices", UsbHostManagerProto.DEVICES, mDevices.get(name));
             }
 
-            // Connections
-            pw.println("" + mNumConnects + " total connects/disconnects");
-            pw.println("Last " + mConnections.size() + " connections/disconnections");
+            dump.write("num_connects", UsbHostManagerProto.NUM_CONNECTS, mNumConnects);
+
             for (ConnectionRecord rec : mConnections) {
-                rec.dumpShort(pw);
+                rec.dump(dump, "connections", UsbHostManagerProto.CONNECTIONS);
             }
-
         }
 
-        mUsbAlsaManager.dump(pw);
+        dump.end(token);
     }
 
     /**

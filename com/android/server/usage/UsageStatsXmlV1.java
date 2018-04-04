@@ -26,10 +26,8 @@ import android.app.usage.TimeSparseArray;
 import android.app.usage.UsageEvents;
 import android.app.usage.UsageStats;
 import android.content.res.Configuration;
-import android.text.TextUtils;
 import android.util.ArrayMap;
-import android.util.Log;
-import android.util.LogWriter;
+import android.util.Pair;
 
 import java.io.IOException;
 import java.net.ProtocolException;
@@ -39,6 +37,11 @@ import java.net.ProtocolException;
  */
 final class UsageStatsXmlV1 {
     private static final String TAG = "UsageStatsXmlV1";
+
+    private static final String INTERACTIVE_TAG = "interactive";
+    private static final String NON_INTERACTIVE_TAG = "non-interactive";
+    private static final String KEYGUARD_SHOWN_TAG = "keyguard-shown";
+    private static final String KEYGUARD_HIDDEN_TAG = "keyguard-hidden";
 
     private static final String PACKAGES_TAG = "packages";
     private static final String PACKAGE_TAG = "package";
@@ -65,6 +68,7 @@ final class UsageStatsXmlV1 {
     private static final String TYPE_ATTR = "type";
     private static final String SHORTCUT_ID_ATTR = "shortcutId";
     private static final String STANDBY_BUCKET_ATTR = "standbyBucket";
+    private static final String APP_LAUNCH_COUNT_ATTR = "appLaunchCount";
 
     // Time attributes stored as an offset of the beginTime.
     private static final String LAST_TIME_ACTIVE_ATTR = "lastTimeActive";
@@ -84,6 +88,7 @@ final class UsageStatsXmlV1 {
                 parser, LAST_TIME_ACTIVE_ATTR);
         stats.mTotalTimeInForeground = XmlUtils.readLongAttribute(parser, TOTAL_TIME_ACTIVE_ATTR);
         stats.mLastEvent = XmlUtils.readIntAttribute(parser, LAST_EVENT_ATTR);
+        stats.mAppLaunchCount = XmlUtils.readIntAttribute(parser, APP_LAUNCH_COUNT_ATTR, 0);
         int eventCode;
         while ((eventCode = parser.next()) != XmlPullParser.END_DOCUMENT) {
             final String tag = parser.getName();
@@ -98,6 +103,14 @@ final class UsageStatsXmlV1 {
                 loadChooserCounts(parser, stats, action);
             }
         }
+    }
+
+    private static void loadCountAndTime(XmlPullParser parser,
+            IntervalStats.EventTracker tracker)
+            throws IOException, XmlPullParserException {
+        tracker.count = XmlUtils.readIntAttribute(parser, COUNT_ATTR, 0);
+        tracker.duration = XmlUtils.readLongAttribute(parser, TIME_ATTR, 0);
+        XmlUtils.skipCurrentTag(parser);
     }
 
     private static void loadChooserCounts(
@@ -175,7 +188,7 @@ final class UsageStatsXmlV1 {
                 event.mShortcutId = (id != null) ? id.intern() : null;
                 break;
             case UsageEvents.Event.STANDBY_BUCKET_CHANGED:
-                event.mBucket = XmlUtils.readIntAttribute(parser, STANDBY_BUCKET_ATTR, 0);
+                event.mBucketAndReason = XmlUtils.readIntAttribute(parser, STANDBY_BUCKET_ATTR, 0);
                 break;
         }
 
@@ -196,8 +209,19 @@ final class UsageStatsXmlV1 {
         XmlUtils.writeStringAttribute(xml, PACKAGE_ATTR, usageStats.mPackageName);
         XmlUtils.writeLongAttribute(xml, TOTAL_TIME_ACTIVE_ATTR, usageStats.mTotalTimeInForeground);
         XmlUtils.writeIntAttribute(xml, LAST_EVENT_ATTR, usageStats.mLastEvent);
+        if (usageStats.mAppLaunchCount > 0) {
+            XmlUtils.writeIntAttribute(xml, APP_LAUNCH_COUNT_ATTR, usageStats.mAppLaunchCount);
+        }
         writeChooserCounts(xml, usageStats);
         xml.endTag(null, PACKAGE_TAG);
+    }
+
+    private static void writeCountAndTime(XmlSerializer xml, String tag, int count, long time)
+            throws IOException {
+        xml.startTag(null, tag);
+        XmlUtils.writeIntAttribute(xml, COUNT_ATTR, count);
+        XmlUtils.writeLongAttribute(xml, TIME_ATTR, time);
+        xml.endTag(null, tag);
     }
 
     private static void writeChooserCounts(XmlSerializer xml, final UsageStats usageStats)
@@ -281,8 +305,8 @@ final class UsageStatsXmlV1 {
                 }
                 break;
             case UsageEvents.Event.STANDBY_BUCKET_CHANGED:
-                if (event.mBucket != 0) {
-                    XmlUtils.writeIntAttribute(xml, STANDBY_BUCKET_ATTR, event.mBucket);
+                if (event.mBucketAndReason != 0) {
+                    XmlUtils.writeIntAttribute(xml, STANDBY_BUCKET_ATTR, event.mBucketAndReason);
                 }
         }
 
@@ -318,6 +342,22 @@ final class UsageStatsXmlV1 {
 
             final String tag = parser.getName();
             switch (tag) {
+                case INTERACTIVE_TAG:
+                    loadCountAndTime(parser, statsOut.interactiveTracker);
+                    break;
+
+                case NON_INTERACTIVE_TAG:
+                    loadCountAndTime(parser, statsOut.nonInteractiveTracker);
+                    break;
+
+                case KEYGUARD_SHOWN_TAG:
+                    loadCountAndTime(parser, statsOut.keyguardShownTracker);
+                    break;
+
+                case KEYGUARD_HIDDEN_TAG:
+                    loadCountAndTime(parser, statsOut.keyguardHiddenTracker);
+                    break;
+
                 case PACKAGE_TAG:
                     loadUsageStats(parser, statsOut);
                     break;
@@ -343,6 +383,15 @@ final class UsageStatsXmlV1 {
      */
     public static void write(XmlSerializer xml, IntervalStats stats) throws IOException {
         XmlUtils.writeLongAttribute(xml, END_TIME_ATTR, stats.endTime - stats.beginTime);
+
+        writeCountAndTime(xml, INTERACTIVE_TAG, stats.interactiveTracker.count,
+                stats.interactiveTracker.duration);
+        writeCountAndTime(xml, NON_INTERACTIVE_TAG, stats.nonInteractiveTracker.count,
+                stats.nonInteractiveTracker.duration);
+        writeCountAndTime(xml, KEYGUARD_SHOWN_TAG, stats.keyguardShownTracker.count,
+                stats.keyguardShownTracker.duration);
+        writeCountAndTime(xml, KEYGUARD_HIDDEN_TAG, stats.keyguardHiddenTracker.count,
+                stats.keyguardHiddenTracker.duration);
 
         xml.startTag(null, PACKAGES_TAG);
         final int statsCount = stats.packageStats.size();

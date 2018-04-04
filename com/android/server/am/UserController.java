@@ -47,6 +47,7 @@ import android.app.Dialog;
 import android.app.IStopUserCallback;
 import android.app.IUserSwitchObserver;
 import android.app.KeyguardManager;
+import android.app.usage.UsageEvents;
 import android.content.Context;
 import android.content.IIntentReceiver;
 import android.content.Intent;
@@ -95,7 +96,6 @@ import com.android.internal.widget.LockPatternUtils;
 import com.android.server.FgThread;
 import com.android.server.LocalServices;
 import com.android.server.SystemServiceManager;
-import com.android.server.am.proto.UserControllerProto;
 import com.android.server.pm.UserManagerService;
 import com.android.server.wm.WindowManagerService;
 
@@ -435,6 +435,14 @@ class UserController implements Handler.Callback {
         }
         mInjector.getUserManagerInternal().setUserState(userId, uss.state);
         uss.mUnlockProgress.finish();
+
+        // Get unaware persistent apps running and start any unaware providers
+        // in already-running apps that are partially aware
+        if (userId == UserHandle.USER_SYSTEM) {
+            mInjector.startPersistentApps(PackageManager.MATCH_DIRECT_BOOT_UNAWARE);
+        }
+        mInjector.installEncryptionUnawareProviders(userId);
+
         // Dispatch unlocked to external apps
         final Intent unlockedIntent = new Intent(Intent.ACTION_USER_UNLOCKED);
         unlockedIntent.putExtra(Intent.EXTRA_USER_HANDLE, userId);
@@ -743,7 +751,7 @@ class UserController implements Handler.Callback {
             mInjector.stackSupervisorRemoveUser(userId);
             // Remove the user if it is ephemeral.
             if (getUserInfo(userId).isEphemeral()) {
-                mInjector.getUserManager().removeUser(userId);
+                mInjector.getUserManager().removeUserEvenWhenDisallowed(userId);
             }
             // Evict the user's credential encryption key.
             try {
@@ -952,6 +960,8 @@ class UserController implements Handler.Callback {
                 mInjector.getUserManagerInternal().setUserState(userId, uss.state);
             }
             if (foreground) {
+                // Make sure the old user is no longer considering the display to be on.
+                mInjector.reportGlobalUsageEventLocked(UsageEvents.Event.SCREEN_NON_INTERACTIVE);
                 synchronized (mLock) {
                     mCurrentUserId = userId;
                     mTargetUserId = UserHandle.USER_NULL; // reset, mCurrentUserId has caught up
@@ -959,6 +969,7 @@ class UserController implements Handler.Callback {
                 mInjector.updateUserConfiguration();
                 updateCurrentProfileIds();
                 mInjector.getWindowManager().setCurrentUser(userId, getCurrentProfileIds());
+                mInjector.reportCurWakefulnessUsageEvent();
                 // Once the internal notion of the active user has switched, we lock the device
                 // with the option to show the user switcher on the keyguard.
                 if (mUserSwitchUiEnabled) {
@@ -1489,9 +1500,8 @@ class UserController implements Handler.Callback {
                 }
             }
         }
-        if (!allowAll && targetUserId < 0) {
-            throw new IllegalArgumentException(
-                    "Call does not support special user #" + targetUserId);
+        if (!allowAll) {
+            ensureNotSpecialUser(targetUserId);
         }
         // Check shell permission
         if (callingUid == Process.SHELL_UID && targetUserId >= UserHandle.USER_SYSTEM) {
@@ -1506,6 +1516,13 @@ class UserController implements Handler.Callback {
     int unsafeConvertIncomingUser(int userId) {
         return (userId == UserHandle.USER_CURRENT || userId == UserHandle.USER_CURRENT_OR_SELF)
                 ? getCurrentUserId(): userId;
+    }
+
+    void ensureNotSpecialUser(int userId) {
+        if (userId >= 0) {
+            return;
+        }
+        throw new IllegalArgumentException("Call does not support special user #" + userId);
     }
 
     void registerUserSwitchObserver(IUserSwitchObserver observer, String name) {
@@ -1576,6 +1593,7 @@ class UserController implements Handler.Callback {
 
     void onSystemReady() {
         updateCurrentProfileIds();
+        mInjector.reportCurWakefulnessUsageEvent();
     }
 
     /**
@@ -1719,6 +1737,20 @@ class UserController implements Handler.Callback {
 
     int[] getUserIds() {
         return mInjector.getUserManager().getUserIds();
+    }
+
+    /**
+     * If {@code userId} is {@link UserHandle#USER_ALL}, then return an array with all running user
+     * IDs. Otherwise return an array whose only element is the given user id.
+     *
+     * It doesn't handle other special user IDs such as {@link UserHandle#USER_CURRENT}.
+     */
+    int[] expandUserId(int userId) {
+        if (userId != UserHandle.USER_ALL) {
+            return new int[] {userId};
+        } else {
+            return getUsers();
+        }
     }
 
     boolean exists(int userId) {
@@ -1945,10 +1977,6 @@ class UserController implements Handler.Callback {
                 FgThread.getHandler().post(() -> {
                     mInjector.loadUserRecents(userId);
                 });
-                if (userId == UserHandle.USER_SYSTEM) {
-                    mInjector.startPersistentApps(PackageManager.MATCH_DIRECT_BOOT_UNAWARE);
-                }
-                mInjector.installEncryptionUnawareProviders(userId);
                 finishUserUnlocked((UserState) msg.obj);
                 break;
             case SYSTEM_USER_CURRENT_MSG:
@@ -2158,6 +2186,18 @@ class UserController implements Handler.Callback {
                     true /* above system */, switchingFromSystemUserMessage,
                     switchingToSystemUserMessage);
             d.show();
+        }
+
+        void reportGlobalUsageEventLocked(int event) {
+            synchronized (mService) {
+                mService.reportGlobalUsageEventLocked(event);
+            }
+        }
+
+        void reportCurWakefulnessUsageEvent() {
+            synchronized (mService) {
+                mService.reportCurWakefulnessUsageEventLocked();
+            }
         }
 
         void stackSupervisorRemoveUser(int userId) {

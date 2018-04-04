@@ -16,20 +16,18 @@
 
 package com.android.server.backup.restore;
 
-import static com.android.server.backup.RefactoredBackupManagerService.DEBUG;
-import static com.android.server.backup.RefactoredBackupManagerService.KEY_WIDGET_STATE;
-import static com.android.server.backup.RefactoredBackupManagerService.MORE_DEBUG;
-import static com.android.server.backup.RefactoredBackupManagerService.OP_TYPE_RESTORE_WAIT;
-import static com.android.server.backup.RefactoredBackupManagerService.PACKAGE_MANAGER_SENTINEL;
-import static com.android.server.backup.RefactoredBackupManagerService.SETTINGS_PACKAGE;
-import static com.android.server.backup.RefactoredBackupManagerService.TAG;
-import static com.android.server.backup.RefactoredBackupManagerService
-        .TIMEOUT_RESTORE_FINISHED_INTERVAL;
-import static com.android.server.backup.RefactoredBackupManagerService.TIMEOUT_RESTORE_INTERVAL;
+import static com.android.server.backup.BackupManagerService.DEBUG;
+import static com.android.server.backup.BackupManagerService.KEY_WIDGET_STATE;
+import static com.android.server.backup.BackupManagerService.MORE_DEBUG;
+import static com.android.server.backup.BackupManagerService.OP_TYPE_RESTORE_WAIT;
+import static com.android.server.backup.BackupManagerService.PACKAGE_MANAGER_SENTINEL;
+import static com.android.server.backup.BackupManagerService.SETTINGS_PACKAGE;
+import static com.android.server.backup.BackupManagerService.TAG;
 import static com.android.server.backup.internal.BackupHandler.MSG_BACKUP_RESTORE_STEP;
 import static com.android.server.backup.internal.BackupHandler.MSG_RESTORE_OPERATION_TIMEOUT;
 import static com.android.server.backup.internal.BackupHandler.MSG_RESTORE_SESSION_TIMEOUT;
 
+import android.annotation.Nullable;
 import android.app.ApplicationThreadConstants;
 import android.app.IBackupAgent;
 import android.app.backup.BackupDataInput;
@@ -42,6 +40,7 @@ import android.app.backup.RestoreDescription;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.content.pm.PackageManagerInternal;
 import android.content.pm.PackageManager.NameNotFoundException;
 import android.os.Bundle;
 import android.os.Message;
@@ -54,13 +53,16 @@ import android.util.EventLog;
 import android.util.Slog;
 
 import com.android.internal.backup.IBackupTransport;
+import com.android.internal.util.Preconditions;
 import com.android.server.AppWidgetBackupBridge;
 import com.android.server.EventLogTags;
+import com.android.server.LocalServices;
+import com.android.server.backup.BackupAgentTimeoutParameters;
 import com.android.server.backup.BackupRestoreTask;
 import com.android.server.backup.BackupUtils;
 import com.android.server.backup.PackageManagerBackupAgent;
 import com.android.server.backup.PackageManagerBackupAgent.Metadata;
-import com.android.server.backup.RefactoredBackupManagerService;
+import com.android.server.backup.BackupManagerService;
 import com.android.server.backup.TransportManager;
 import com.android.server.backup.internal.OnTaskFinishedListener;
 import com.android.server.backup.transport.TransportClient;
@@ -78,7 +80,7 @@ import java.util.List;
 
 public class PerformUnifiedRestoreTask implements BackupRestoreTask {
 
-    private RefactoredBackupManagerService backupManagerService;
+    private BackupManagerService backupManagerService;
     private final TransportManager mTransportManager;
     // Transport client we're working with to do the restore
     private final TransportClient mTransportClient;
@@ -157,13 +159,20 @@ public class PerformUnifiedRestoreTask implements BackupRestoreTask {
     ParcelFileDescriptor mNewState;
 
     private final int mEphemeralOpToken;
+    private final BackupAgentTimeoutParameters mAgentTimeoutParameters;
 
-    // Invariant: mWakelock is already held, and this task is responsible for
-    // releasing it at the end of the restore operation.
-    public PerformUnifiedRestoreTask(RefactoredBackupManagerService backupManagerService,
-            TransportClient transportClient, IRestoreObserver observer,
-            IBackupManagerMonitor monitor, long restoreSetToken, PackageInfo targetPackage,
-            int pmToken, boolean isFullSystemRestore, String[] filterSet,
+    // This task can assume that the wakelock is properly held for it and doesn't have to worry
+    // about releasing it.
+    public PerformUnifiedRestoreTask(
+            BackupManagerService backupManagerService,
+            TransportClient transportClient,
+            IRestoreObserver observer,
+            IBackupManagerMonitor monitor,
+            long restoreSetToken,
+            @Nullable PackageInfo targetPackage,
+            int pmToken,
+            boolean isFullSystemRestore,
+            @Nullable String[] filterSet,
             OnTaskFinishedListener listener) {
         this.backupManagerService = backupManagerService;
         mTransportManager = backupManagerService.getTransportManager();
@@ -181,6 +190,9 @@ public class PerformUnifiedRestoreTask implements BackupRestoreTask {
         mFinished = false;
         mDidLaunch = false;
         mListener = listener;
+        mAgentTimeoutParameters = Preconditions.checkNotNull(
+                backupManagerService.getAgentTimeoutParameters(),
+                "Timeout parameters cannot be null");
 
         if (targetPackage != null) {
             // Single package restore
@@ -336,7 +348,7 @@ public class PerformUnifiedRestoreTask implements BackupRestoreTask {
      *
      *   [ state change => FINAL ]
      *
-     * 7. t.finishRestore(), release wakelock, etc.
+     * 7. t.finishRestore(), call listeners, etc.
      *
      *
      */
@@ -497,7 +509,7 @@ public class PerformUnifiedRestoreTask implements BackupRestoreTask {
 
             try {
                 mCurrentPackage = backupManagerService.getPackageManager().getPackageInfo(
-                        pkgName, PackageManager.GET_SIGNATURES);
+                        pkgName, PackageManager.GET_SIGNING_CERTIFICATES);
             } catch (NameNotFoundException e) {
                 // Whoops, we thought we could restore this package but it
                 // turns out not to be present.  Skip it.
@@ -612,7 +624,8 @@ public class PerformUnifiedRestoreTask implements BackupRestoreTask {
         }
 
         Metadata metaInfo = mPmAgent.getRestoredMetadata(packageName);
-        if (!BackupUtils.signaturesMatch(metaInfo.sigHashes, mCurrentPackage)) {
+        PackageManagerInternal pmi = LocalServices.getService(PackageManagerInternal.class);
+        if (!BackupUtils.signaturesMatch(metaInfo.sigHashes, mCurrentPackage, pmi)) {
             Slog.w(TAG, "Signature mismatch restoring " + packageName);
             mMonitor = BackupManagerMonitorUtils.monitorEvent(mMonitor,
                     BackupManagerMonitor.LOG_EVENT_ID_SIGNATURE_MISMATCH, mCurrentPackage,
@@ -750,8 +763,9 @@ public class PerformUnifiedRestoreTask implements BackupRestoreTask {
             // Kick off the restore, checking for hung agents.  The timeout or
             // the operationComplete() callback will schedule the next step,
             // so we do not do that here.
+            long restoreAgentTimeoutMillis = mAgentTimeoutParameters.getRestoreAgentTimeoutMillis();
             backupManagerService.prepareOperationTimeout(
-                    mEphemeralOpToken, TIMEOUT_RESTORE_INTERVAL, this, OP_TYPE_RESTORE_WAIT);
+                    mEphemeralOpToken, restoreAgentTimeoutMillis, this, OP_TYPE_RESTORE_WAIT);
             mAgent.doRestore(mBackupData, appVersionCode, mNewState,
                     mEphemeralOpToken, backupManagerService.getBackupManagerBinder());
         } catch (Exception e) {
@@ -803,9 +817,11 @@ public class PerformUnifiedRestoreTask implements BackupRestoreTask {
             Slog.d(TAG, "restoreFinished packageName=" + mCurrentPackage.packageName);
         }
         try {
+            long restoreAgentFinishedTimeoutMillis =
+                    mAgentTimeoutParameters.getRestoreAgentFinishedTimeoutMillis();
             backupManagerService
                     .prepareOperationTimeout(mEphemeralOpToken,
-                            TIMEOUT_RESTORE_FINISHED_INTERVAL, this,
+                            restoreAgentFinishedTimeoutMillis, this,
                             OP_TYPE_RESTORE_WAIT);
             mAgent.doRestoreFinished(mEphemeralOpToken,
                     backupManagerService.getBackupManagerBinder());
@@ -1099,9 +1115,10 @@ public class PerformUnifiedRestoreTask implements BackupRestoreTask {
         } else {
             // We were invoked via an active restore session, not by the Package
             // Manager, so start up the session timeout again.
+            long restoreAgentTimeoutMillis = mAgentTimeoutParameters.getRestoreAgentTimeoutMillis();
             backupManagerService.getBackupHandler().sendEmptyMessageDelayed(
                     MSG_RESTORE_SESSION_TIMEOUT,
-                    TIMEOUT_RESTORE_INTERVAL);
+                    restoreAgentTimeoutMillis);
         }
 
         // Kick off any work that may be needed regarding app widget restores

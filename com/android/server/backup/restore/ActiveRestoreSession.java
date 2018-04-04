@@ -16,12 +16,13 @@
 
 package com.android.server.backup.restore;
 
-import static com.android.server.backup.RefactoredBackupManagerService.DEBUG;
-import static com.android.server.backup.RefactoredBackupManagerService.MORE_DEBUG;
+import static com.android.server.backup.BackupManagerService.DEBUG;
+import static com.android.server.backup.BackupManagerService.MORE_DEBUG;
 import static com.android.server.backup.internal.BackupHandler.MSG_RESTORE_SESSION_TIMEOUT;
 import static com.android.server.backup.internal.BackupHandler.MSG_RUN_GET_RESTORE_SETS;
 import static com.android.server.backup.internal.BackupHandler.MSG_RUN_RESTORE;
 
+import android.annotation.Nullable;
 import android.app.backup.IBackupManagerMonitor;
 import android.app.backup.IRestoreObserver;
 import android.app.backup.IRestoreSession;
@@ -30,13 +31,13 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.PackageManager.NameNotFoundException;
 import android.os.Binder;
+import android.os.Handler;
 import android.os.Message;
 import android.os.PowerManager;
 import android.util.Slog;
 
-import com.android.server.backup.RefactoredBackupManagerService;
+import com.android.server.backup.BackupManagerService;
 import com.android.server.backup.TransportManager;
-import com.android.server.backup.internal.BackupHandler;
 import com.android.server.backup.internal.OnTaskFinishedListener;
 import com.android.server.backup.params.RestoreGetSetsParams;
 import com.android.server.backup.params.RestoreParams;
@@ -52,14 +53,16 @@ public class ActiveRestoreSession extends IRestoreSession.Stub {
 
     private final TransportManager mTransportManager;
     private final String mTransportName;
-    private final RefactoredBackupManagerService mBackupManagerService;
-    private final String mPackageName;
+    private final BackupManagerService mBackupManagerService;
+    @Nullable private final String mPackageName;
     public RestoreSet[] mRestoreSets = null;
     boolean mEnded = false;
     boolean mTimedOut = false;
 
-    public ActiveRestoreSession(RefactoredBackupManagerService backupManagerService,
-            String packageName, String transportName) {
+    public ActiveRestoreSession(
+            BackupManagerService backupManagerService,
+            @Nullable String packageName,
+            String transportName) {
         mBackupManagerService = backupManagerService;
         mPackageName = packageName;
         mTransportManager = backupManagerService.getTransportManager();
@@ -360,6 +363,10 @@ public class ActiveRestoreSession extends IRestoreSession.Stub {
         }
     }
 
+    public void setRestoreSets(RestoreSet[] restoreSets) {
+        mRestoreSets = restoreSets;
+    }
+
     /**
      * Returns 0 if operation sent or -1 otherwise.
      */
@@ -374,7 +381,7 @@ public class ActiveRestoreSession extends IRestoreSession.Stub {
         }
 
         // Stop the session timeout until we finalize the restore
-        BackupHandler backupHandler = mBackupManagerService.getBackupHandler();
+        Handler backupHandler = mBackupManagerService.getBackupHandler();
         backupHandler.removeMessages(MSG_RESTORE_SESSION_TIMEOUT);
 
         PowerManager.WakeLock wakelock = mBackupManagerService.getWakelock();
@@ -398,11 +405,10 @@ public class ActiveRestoreSession extends IRestoreSession.Stub {
     // Posted to the handler to tear down a restore session in a cleanly synchronized way
     public class EndRestoreRunnable implements Runnable {
 
-        RefactoredBackupManagerService mBackupManager;
+        BackupManagerService mBackupManager;
         ActiveRestoreSession mSession;
 
-        public EndRestoreRunnable(RefactoredBackupManagerService manager,
-                ActiveRestoreSession session) {
+        public EndRestoreRunnable(BackupManagerService manager, ActiveRestoreSession session) {
             mBackupManager = manager;
             mSession = session;
         }

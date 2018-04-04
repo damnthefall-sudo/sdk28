@@ -17,6 +17,7 @@
 package com.android.server;
 
 import static android.Manifest.permission.RECEIVE_DATA_ACTIVITY_CHANGE;
+import static android.content.pm.PackageManager.PERMISSION_GRANTED;
 import static android.net.ConnectivityManager.CONNECTIVITY_ACTION;
 import static android.net.ConnectivityManager.NETID_UNSET;
 import static android.net.ConnectivityManager.TYPE_ETHERNET;
@@ -30,6 +31,7 @@ import static android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET;
 import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED;
 import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED;
 import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_ROAMING;
+import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_SUSPENDED;
 import static android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN;
 import static android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED;
 import static android.net.NetworkCapabilities.TRANSPORT_VPN;
@@ -99,6 +101,8 @@ import android.os.RemoteException;
 import android.os.ResultReceiver;
 import android.os.ServiceManager;
 import android.os.ServiceSpecificException;
+import android.os.ShellCallback;
+import android.os.ShellCommand;
 import android.os.SystemClock;
 import android.os.UserHandle;
 import android.os.UserManager;
@@ -906,7 +910,12 @@ public class ConnectivityService extends IConnectivityManager.Stub
 
     private Tethering makeTethering() {
         // TODO: Move other elements into @Overridden getters.
-        final TetheringDependencies deps = new TetheringDependencies();
+        final TetheringDependencies deps = new TetheringDependencies() {
+            @Override
+            public boolean isTetheringSupported() {
+                return ConnectivityService.this.isTetheringSupported();
+            }
+        };
         return new Tethering(mContext, mNetd, mStatsService, mPolicyManager,
                 IoThread.get().getLooper(), new MockableSystemProperties(),
                 deps);
@@ -1290,11 +1299,7 @@ public class ConnectivityService extends IConnectivityManager.Stub
                         for (Network network : networks) {
                             nai = getNetworkAgentInfoForNetwork(network);
                             nc = getNetworkCapabilitiesInternal(nai);
-                            // nc is a copy of the capabilities in nai, so it's fine to mutate it
-                            // TODO : don't remove the UIDs when communicating with processes
-                            // that have the NETWORK_SETTINGS permission.
                             if (nc != null) {
-                                nc.setSingleUid(userId);
                                 result.put(network, nc);
                             }
                         }
@@ -1362,7 +1367,8 @@ public class ConnectivityService extends IConnectivityManager.Stub
         if (nai != null) {
             synchronized (nai) {
                 if (nai.networkCapabilities != null) {
-                    return new NetworkCapabilities(nai.networkCapabilities);
+                    return networkCapabilitiesWithoutUidsUnlessAllowed(nai.networkCapabilities,
+                            Binder.getCallingPid(), Binder.getCallingUid());
                 }
             }
         }
@@ -1375,6 +1381,24 @@ public class ConnectivityService extends IConnectivityManager.Stub
         return getNetworkCapabilitiesInternal(getNetworkAgentInfoForNetwork(network));
     }
 
+    private NetworkCapabilities networkCapabilitiesWithoutUidsUnlessAllowed(
+            NetworkCapabilities nc, int callerPid, int callerUid) {
+        if (checkSettingsPermission(callerPid, callerUid)) return new NetworkCapabilities(nc);
+        return new NetworkCapabilities(nc).setUids(null);
+    }
+
+    private void restrictRequestUidsForCaller(NetworkCapabilities nc) {
+        if (!checkSettingsPermission()) {
+            nc.setSingleUid(Binder.getCallingUid());
+        }
+    }
+
+    private void restrictBackgroundRequestForCaller(NetworkCapabilities nc) {
+        if (!mPermissionMonitor.hasUseBackgroundNetworksPermission(Binder.getCallingUid())) {
+            nc.addCapability(NET_CAPABILITY_FOREGROUND);
+        }
+    }
+
     @Override
     public NetworkState[] getAllNetworkState() {
         // Require internal since we're handing out IMSI details
@@ -1384,6 +1408,10 @@ public class ConnectivityService extends IConnectivityManager.Stub
         for (Network network : getAllNetworks()) {
             final NetworkAgentInfo nai = getNetworkAgentInfoForNetwork(network);
             if (nai != null) {
+                // TODO (b/73321673) : NetworkState contains a copy of the
+                // NetworkCapabilities, which may contain UIDs of apps to which the
+                // network applies. Should the UIDs be cleared so as not to leak or
+                // interfere ?
                 result.add(nai.getNetworkState());
             }
         }
@@ -1402,7 +1430,8 @@ public class ConnectivityService extends IConnectivityManager.Stub
     public boolean isActiveNetworkMetered() {
         enforceAccessPermission();
 
-        final NetworkCapabilities caps = getNetworkCapabilities(getActiveNetwork());
+        final int uid = Binder.getCallingUid();
+        final NetworkCapabilities caps = getUnfilteredActiveNetworkState(uid).networkCapabilities;
         if (caps != null) {
             return !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
         } else {
@@ -1569,6 +1598,16 @@ public class ConnectivityService extends IConnectivityManager.Stub
                 "ConnectivityService");
     }
 
+    private boolean checkSettingsPermission() {
+        return PERMISSION_GRANTED == mContext.checkCallingOrSelfPermission(
+                android.Manifest.permission.NETWORK_SETTINGS);
+    }
+
+    private boolean checkSettingsPermission(int pid, int uid) {
+        return PERMISSION_GRANTED == mContext.checkPermission(
+                android.Manifest.permission.NETWORK_SETTINGS, pid, uid);
+    }
+
     private void enforceTetherAccessPermission() {
         mContext.enforceCallingOrSelfPermission(
                 android.Manifest.permission.ACCESS_NETWORK_STATE,
@@ -1679,6 +1718,7 @@ public class ConnectivityService extends IConnectivityManager.Stub
                             ni != null ? ni.getState().toString() : "?");
                 } catch (RemoteException e) {
                 }
+                intent.addFlags(Intent.FLAG_RECEIVER_VISIBLE_TO_INSTANT_APPS);
             }
             try {
                 mContext.sendStickyBroadcastAsUser(intent, UserHandle.ALL, options);
@@ -4250,13 +4290,12 @@ public class ConnectivityService extends IConnectivityManager.Stub
             enforceMeteredApnPolicy(networkCapabilities);
         }
         ensureRequestableCapabilities(networkCapabilities);
-        // Set the UID range for this request to the single UID of the requester.
+        // Set the UID range for this request to the single UID of the requester, or to an empty
+        // set of UIDs if the caller has the appropriate permission and UIDs have not been set.
         // This will overwrite any allowed UIDs in the requested capabilities. Though there
         // are no visible methods to set the UIDs, an app could use reflection to try and get
         // networks for other apps so it's essential that the UIDs are overwritten.
-        // TODO : don't forcefully set the UID when communicating with processes
-        // that have the NETWORK_SETTINGS permission.
-        networkCapabilities.setSingleUid(Binder.getCallingUid());
+        restrictRequestUidsForCaller(networkCapabilities);
 
         if (timeoutMs < 0) {
             throw new IllegalArgumentException("Bad timeout specified");
@@ -4330,9 +4369,7 @@ public class ConnectivityService extends IConnectivityManager.Stub
         enforceMeteredApnPolicy(networkCapabilities);
         ensureRequestableCapabilities(networkCapabilities);
         ensureValidNetworkSpecifier(networkCapabilities);
-        // TODO : don't forcefully set the UID when communicating with processes
-        // that have the NETWORK_SETTINGS permission.
-        networkCapabilities.setSingleUid(Binder.getCallingUid());
+        restrictRequestUidsForCaller(networkCapabilities);
 
         NetworkRequest networkRequest = new NetworkRequest(networkCapabilities, TYPE_NONE,
                 nextNetworkRequestId(), NetworkRequest.Type.REQUEST);
@@ -4386,18 +4423,14 @@ public class ConnectivityService extends IConnectivityManager.Stub
         }
 
         NetworkCapabilities nc = new NetworkCapabilities(networkCapabilities);
-        // TODO : don't forcefully set the UIDs when communicating with processes
-        // that have the NETWORK_SETTINGS permission.
-        nc.setSingleUid(Binder.getCallingUid());
-        if (!ConnectivityManager.checkChangePermission(mContext)) {
-            // Apps without the CHANGE_NETWORK_STATE permission can't use background networks, so
-            // make all their listens include NET_CAPABILITY_FOREGROUND. That way, they will get
-            // onLost and onAvailable callbacks when networks move in and out of the background.
-            // There is no need to do this for requests because an app without CHANGE_NETWORK_STATE
-            // can't request networks.
-            nc.addCapability(NET_CAPABILITY_FOREGROUND);
-        }
-        ensureValidNetworkSpecifier(networkCapabilities);
+        restrictRequestUidsForCaller(nc);
+        // Apps without the CHANGE_NETWORK_STATE permission can't use background networks, so
+        // make all their listens include NET_CAPABILITY_FOREGROUND. That way, they will get
+        // onLost and onAvailable callbacks when networks move in and out of the background.
+        // There is no need to do this for requests because an app without CHANGE_NETWORK_STATE
+        // can't request networks.
+        restrictBackgroundRequestForCaller(nc);
+        ensureValidNetworkSpecifier(nc);
 
         NetworkRequest networkRequest = new NetworkRequest(nc, TYPE_NONE, nextNetworkRequestId(),
                 NetworkRequest.Type.LISTEN);
@@ -4418,9 +4451,7 @@ public class ConnectivityService extends IConnectivityManager.Stub
         ensureValidNetworkSpecifier(networkCapabilities);
 
         final NetworkCapabilities nc = new NetworkCapabilities(networkCapabilities);
-        // TODO : don't forcefully set the UIDs when communicating with processes
-        // that have the NETWORK_SETTINGS permission.
-        nc.setSingleUid(Binder.getCallingUid());
+        restrictRequestUidsForCaller(nc);
 
         NetworkRequest networkRequest = new NetworkRequest(nc, TYPE_NONE, nextNetworkRequestId(),
                 NetworkRequest.Type.LISTEN);
@@ -4541,10 +4572,12 @@ public class ConnectivityService extends IConnectivityManager.Stub
         lp.ensureDirectlyConnectedRoutes();
         // TODO: Instead of passing mDefaultRequest, provide an API to determine whether a Network
         // satisfies mDefaultRequest.
+        final NetworkCapabilities nc = new NetworkCapabilities(networkCapabilities);
         final NetworkAgentInfo nai = new NetworkAgentInfo(messenger, new AsyncChannel(),
-                new Network(reserveNetId()), new NetworkInfo(networkInfo), lp,
-                new NetworkCapabilities(networkCapabilities), currentScore,
+                new Network(reserveNetId()), new NetworkInfo(networkInfo), lp, nc, currentScore,
                 mContext, mTrackerHandler, new NetworkMisc(networkMisc), mDefaultRequest, this);
+        // Make sure the network capabilities reflect what the agent info says.
+        nai.networkCapabilities = mixInCapabilities(nai, nc);
         synchronized (this) {
             nai.networkMonitor.systemReady = mSystemReady;
         }
@@ -4555,17 +4588,17 @@ public class ConnectivityService extends IConnectivityManager.Stub
         return nai.network.netId;
     }
 
-    private void handleRegisterNetworkAgent(NetworkAgentInfo na) {
+    private void handleRegisterNetworkAgent(NetworkAgentInfo nai) {
         if (VDBG) log("Got NetworkAgent Messenger");
-        mNetworkAgentInfos.put(na.messenger, na);
+        mNetworkAgentInfos.put(nai.messenger, nai);
         synchronized (mNetworkForNetId) {
-            mNetworkForNetId.put(na.network.netId, na);
+            mNetworkForNetId.put(nai.network.netId, nai);
         }
-        na.asyncChannel.connect(mContext, mTrackerHandler, na.messenger);
-        NetworkInfo networkInfo = na.networkInfo;
-        na.networkInfo = null;
-        updateNetworkInfo(na, networkInfo);
-        updateUids(na, null, na.networkCapabilities);
+        nai.asyncChannel.connect(mContext, mTrackerHandler, nai.messenger);
+        NetworkInfo networkInfo = nai.networkInfo;
+        nai.networkInfo = null;
+        updateNetworkInfo(nai, networkInfo);
+        updateUids(nai, null, nai.networkCapabilities);
     }
 
     private void updateLinkProperties(NetworkAgentInfo networkAgent, LinkProperties oldLp) {
@@ -4773,6 +4806,11 @@ public class ConnectivityService extends IConnectivityManager.Stub
         } else {
             newNc.addCapability(NET_CAPABILITY_FOREGROUND);
         }
+        if (nai.isSuspended()) {
+            newNc.removeCapability(NET_CAPABILITY_NOT_SUSPENDED);
+        } else {
+            newNc.addCapability(NET_CAPABILITY_NOT_SUSPENDED);
+        }
 
         return newNc;
     }
@@ -4953,7 +4991,7 @@ public class ConnectivityService extends IConnectivityManager.Stub
         releasePendingNetworkRequestWithDelay(pendingIntent);
     }
 
-    private static void callCallbackForRequest(NetworkRequestInfo nri,
+    private void callCallbackForRequest(NetworkRequestInfo nri,
             NetworkAgentInfo networkAgent, int notificationType, int arg1) {
         if (nri.messenger == null) {
             return;  // Default request has no msgr
@@ -4966,16 +5004,19 @@ public class ConnectivityService extends IConnectivityManager.Stub
             putParcelable(bundle, networkAgent.network);
         }
         switch (notificationType) {
+            case ConnectivityManager.CALLBACK_AVAILABLE: {
+                putParcelable(bundle, new NetworkCapabilities(networkAgent.networkCapabilities));
+                putParcelable(bundle, new LinkProperties(networkAgent.linkProperties));
+                break;
+            }
             case ConnectivityManager.CALLBACK_LOSING: {
                 msg.arg1 = arg1;
                 break;
             }
             case ConnectivityManager.CALLBACK_CAP_CHANGED: {
-                final NetworkCapabilities nc =
-                        new NetworkCapabilities(networkAgent.networkCapabilities);
-                // TODO : don't remove the UIDs when communicating with processes
-                // that have the NETWORK_SETTINGS permission.
-                nc.setSingleUid(nri.mUid);
+                // networkAgent can't be null as it has been accessed a few lines above.
+                final NetworkCapabilities nc = networkCapabilitiesWithoutUidsUnlessAllowed(
+                        networkAgent.networkCapabilities, nri.mPid, nri.mUid);
                 putParcelable(bundle, nc);
                 break;
             }
@@ -5284,7 +5325,6 @@ public class ConnectivityService extends IConnectivityManager.Stub
                 for (LinkProperties stacked : newNetwork.linkProperties.getStackedLinks()) {
                     final String stackedIface = stacked.getInterfaceName();
                     bs.noteNetworkInterfaceType(stackedIface, type);
-                    NetworkStatsFactory.noteStackedIface(stackedIface, baseIface);
                 }
             } catch (RemoteException ignored) {
             }
@@ -5508,6 +5548,10 @@ public class ConnectivityService extends IConnectivityManager.Stub
             if (networkAgent.getCurrentScore() != oldScore) {
                 rematchAllNetworksAndRequests(networkAgent, oldScore);
             }
+            updateCapabilities(networkAgent.getCurrentScore(), networkAgent,
+                    networkAgent.networkCapabilities);
+            // TODO (b/73132094) : remove this call once the few users of onSuspended and
+            // onResumed have been removed.
             notifyNetworkCallbacks(networkAgent, (state == NetworkInfo.State.SUSPENDED ?
                     ConnectivityManager.CALLBACK_SUSPENDED :
                     ConnectivityManager.CALLBACK_RESUMED));
@@ -5544,14 +5588,6 @@ public class ConnectivityService extends IConnectivityManager.Stub
         }
 
         callCallbackForRequest(nri, nai, ConnectivityManager.CALLBACK_AVAILABLE, 0);
-        // Whether a network is currently suspended is also an important
-        // element of state to be transferred (it would not otherwise be
-        // delivered by any currently available mechanism).
-        if (nai.networkInfo.getState() == NetworkInfo.State.SUSPENDED) {
-            callCallbackForRequest(nri, nai, ConnectivityManager.CALLBACK_SUSPENDED, 0);
-        }
-        callCallbackForRequest(nri, nai, ConnectivityManager.CALLBACK_CAP_CHANGED, 0);
-        callCallbackForRequest(nri, nai, ConnectivityManager.CALLBACK_IP_CHANGED, 0);
     }
 
     private void sendLegacyNetworkBroadcast(NetworkAgentInfo nai, DetailedState state, int type) {
@@ -5817,5 +5853,62 @@ public class ConnectivityService extends IConnectivityManager.Stub
 
     private static int encodeBool(boolean b) {
         return b ? 1 : 0;
+    }
+
+    @Override
+    public void onShellCommand(FileDescriptor in, FileDescriptor out,
+            FileDescriptor err, String[] args, ShellCallback callback,
+            ResultReceiver resultReceiver) {
+        (new ShellCmd()).exec(this, in, out, err, args, callback, resultReceiver);
+    }
+
+    private class ShellCmd extends ShellCommand {
+
+        @Override
+        public int onCommand(String cmd) {
+            if (cmd == null) {
+                return handleDefaultCommands(cmd);
+            }
+            final PrintWriter pw = getOutPrintWriter();
+            try {
+                switch (cmd) {
+                    case "airplane-mode":
+                        final String action = getNextArg();
+                        if ("enable".equals(action)) {
+                            setAirplaneMode(true);
+                            return 0;
+                        } else if ("disable".equals(action)) {
+                            setAirplaneMode(false);
+                            return 0;
+                        } else if (action == null) {
+                            final ContentResolver cr = mContext.getContentResolver();
+                            final int enabled = Settings.Global.getInt(cr,
+                                    Settings.Global.AIRPLANE_MODE_ON);
+                            pw.println(enabled == 0 ? "disabled" : "enabled");
+                            return 0;
+                        } else {
+                            onHelp();
+                            return -1;
+                        }
+                    default:
+                        return handleDefaultCommands(cmd);
+                }
+            } catch (Exception e) {
+                pw.println(e);
+            }
+            return -1;
+        }
+
+        @Override
+        public void onHelp() {
+            PrintWriter pw = getOutPrintWriter();
+            pw.println("Connectivity service commands:");
+            pw.println("  help");
+            pw.println("    Print this help text.");
+            pw.println("  airplane-mode [enable|disable]");
+            pw.println("    Turn airplane mode on or off.");
+            pw.println("  airplane-mode");
+            pw.println("    Get airplane mode.");
+        }
     }
 }

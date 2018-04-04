@@ -41,7 +41,7 @@ import java.util.Objects;
  */
 public class RecurrenceRule implements Parcelable {
     private static final String TAG = "RecurrenceRule";
-    private static final boolean DEBUG = true;
+    private static final boolean LOGD = Log.isLoggable(TAG, Log.DEBUG);
 
     private static final int VERSION_INIT = 0;
 
@@ -99,6 +99,7 @@ public class RecurrenceRule implements Parcelable {
                 start = convertZonedDateTime(BackupUtils.readString(in));
                 end = convertZonedDateTime(BackupUtils.readString(in));
                 period = convertPeriod(BackupUtils.readString(in));
+                break;
             default:
                 throw new ProtocolException("Unknown version " + version);
         }
@@ -192,7 +193,7 @@ public class RecurrenceRule implements Parcelable {
         public RecurringIterator() {
             final ZonedDateTime anchor = (end != null) ? end
                     : ZonedDateTime.now(sClock).withZoneSameInstant(start.getZone());
-            if (DEBUG) Log.d(TAG, "Resolving using anchor " + anchor);
+            if (LOGD) Log.d(TAG, "Resolving using anchor " + anchor);
 
             updateCycle();
 
@@ -231,7 +232,7 @@ public class RecurrenceRule implements Parcelable {
 
         @Override
         public Pair<ZonedDateTime, ZonedDateTime> next() {
-            if (DEBUG) Log.d(TAG, "Cycle " + i + " from " + cycleStart + " to " + cycleEnd);
+            if (LOGD) Log.d(TAG, "Cycle " + i + " from " + cycleStart + " to " + cycleEnd);
             Pair<ZonedDateTime, ZonedDateTime> p = new Pair<>(cycleStart, cycleEnd);
             i--;
             updateCycle();

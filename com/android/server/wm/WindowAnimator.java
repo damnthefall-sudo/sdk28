@@ -30,6 +30,7 @@ import android.util.Slog;
 import android.util.SparseArray;
 import android.util.TimeUtils;
 import android.view.Choreographer;
+import android.view.SurfaceControl;
 
 import com.android.server.AnimationThread;
 import com.android.server.policy.WindowManagerPolicy;
@@ -92,6 +93,9 @@ public class WindowAnimator {
      * executed and the corresponding transaction is closed and applied.
      */
     private final ArrayList<Runnable> mAfterPrepareSurfacesRunnables = new ArrayList<>();
+    private boolean mInExecuteAfterPrepareSurfacesRunnables;
+
+    private final SurfaceControl.Transaction mTransaction = new SurfaceControl.Transaction();
 
     WindowAnimator(final WindowManagerService service) {
         mService = service;
@@ -161,7 +165,7 @@ public class WindowAnimator {
                 final int numDisplays = mDisplayContentsAnimators.size();
                 for (int i = 0; i < numDisplays; i++) {
                     final int displayId = mDisplayContentsAnimators.keyAt(i);
-                    final DisplayContent dc = mService.mRoot.getDisplayContentOrCreate(displayId);
+                    final DisplayContent dc = mService.mRoot.getDisplayContent(displayId);
                     DisplayContentsAnimator displayAnimator = mDisplayContentsAnimators.valueAt(i);
 
                     final ScreenRotationAnimation screenRotationAnimation =
@@ -195,14 +199,14 @@ public class WindowAnimator {
 
                 for (int i = 0; i < numDisplays; i++) {
                     final int displayId = mDisplayContentsAnimators.keyAt(i);
-                    final DisplayContent dc = mService.mRoot.getDisplayContentOrCreate(displayId);
+                    final DisplayContent dc = mService.mRoot.getDisplayContent(displayId);
 
                     dc.checkAppWindowsReadyToShow();
 
                     final ScreenRotationAnimation screenRotationAnimation =
                             mDisplayContentsAnimators.valueAt(i).mScreenRotationAnimation;
                     if (screenRotationAnimation != null) {
-                        screenRotationAnimation.updateSurfacesInTransaction();
+                        screenRotationAnimation.updateSurfaces(mTransaction);
                     }
                     orAnimating(dc.getDockedDividerController().animate(mCurrentTime));
                     //TODO (multidisplay): Magnification is supported only for the default display.
@@ -218,18 +222,13 @@ public class WindowAnimator {
                 if (mService.mWatermark != null) {
                     mService.mWatermark.drawIfNeeded();
                 }
+
+                SurfaceControl.mergeToGlobalTransaction(mTransaction);
             } catch (RuntimeException e) {
                 Slog.wtf(TAG, "Unhandled exception in Window Manager", e);
             } finally {
                 mService.closeSurfaceTransaction("WindowAnimator");
                 if (SHOW_TRANSACTIONS) Slog.i(TAG, "<<< CLOSE TRANSACTION animate");
-            }
-
-            final int numDisplays = mDisplayContentsAnimators.size();
-            for (int i = 0; i < numDisplays; i++) {
-                final int displayId = mDisplayContentsAnimators.keyAt(i);
-                final DisplayContent dc = mService.mRoot.getDisplayContentOrCreate(displayId);
-                dc.onPendingTransactionApplied();
             }
 
             boolean hasPendingLayoutChanges = mService.mRoot.hasPendingLayoutChanges(this);
@@ -265,7 +264,6 @@ public class WindowAnimator {
             }
 
             mService.destroyPreservedSurfaceLocked();
-            mService.mWindowPlacerLocked.destroyPendingSurfaces();
 
             executeAfterPrepareSurfacesRunnables();
 
@@ -305,7 +303,7 @@ public class WindowAnimator {
                     pw.println(":");
             final DisplayContentsAnimator displayAnimator = mDisplayContentsAnimators.valueAt(i);
             final DisplayContent dc =
-                    mService.mRoot.getDisplayContentOrCreate(mDisplayContentsAnimators.keyAt(i));
+                    mService.mRoot.getDisplayContent(mDisplayContentsAnimators.keyAt(i));
             dc.dumpWindowAnimators(pw, subPrefix);
             if (displayAnimator.mScreenRotationAnimation != null) {
                 pw.print(subPrefix); pw.println("mScreenRotationAnimation:");
@@ -339,7 +337,7 @@ public class WindowAnimator {
         if (displayId < 0) {
             return 0;
         }
-        final DisplayContent displayContent = mService.mRoot.getDisplayContentOrCreate(displayId);
+        final DisplayContent displayContent = mService.mRoot.getDisplayContent(displayId);
         return (displayContent != null) ? displayContent.pendingLayoutChanges : 0;
     }
 
@@ -347,7 +345,7 @@ public class WindowAnimator {
         if (displayId < 0) {
             return;
         }
-        final DisplayContent displayContent = mService.mRoot.getDisplayContentOrCreate(displayId);
+        final DisplayContent displayContent = mService.mRoot.getDisplayContent(displayId);
         if (displayContent != null) {
             displayContent.pendingLayoutChanges |= changes;
         }
@@ -434,11 +432,24 @@ public class WindowAnimator {
      * the corresponding transaction is closed and applied.
      */
     void addAfterPrepareSurfacesRunnable(Runnable r) {
+        // If runnables are already being handled in executeAfterPrepareSurfacesRunnable, then just
+        // immediately execute the runnable passed in.
+        if (mInExecuteAfterPrepareSurfacesRunnables) {
+            r.run();
+            return;
+        }
+
         mAfterPrepareSurfacesRunnables.add(r);
         scheduleAnimation();
     }
 
-    private void executeAfterPrepareSurfacesRunnables() {
+    void executeAfterPrepareSurfacesRunnables() {
+
+        // Don't even think about to start recursing!
+        if (mInExecuteAfterPrepareSurfacesRunnables) {
+            return;
+        }
+        mInExecuteAfterPrepareSurfacesRunnables = true;
 
         // Traverse in order they were added.
         final int size = mAfterPrepareSurfacesRunnables.size();
@@ -446,5 +457,6 @@ public class WindowAnimator {
             mAfterPrepareSurfacesRunnables.get(i).run();
         }
         mAfterPrepareSurfacesRunnables.clear();
+        mInExecuteAfterPrepareSurfacesRunnables = false;
     }
 }

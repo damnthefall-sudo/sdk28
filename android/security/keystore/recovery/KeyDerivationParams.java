@@ -22,7 +22,6 @@ import android.annotation.SystemApi;
 import android.os.Parcel;
 import android.os.Parcelable;
 
-
 import com.android.internal.util.Preconditions;
 
 import java.lang.annotation.Retention;
@@ -30,47 +29,88 @@ import java.lang.annotation.RetentionPolicy;
 
 /**
  * Collection of parameters which define a key derivation function.
- * Currently only supports salted SHA-256
+ * Currently only supports salted SHA-256.
  *
  * @hide
  */
 @SystemApi
 public final class KeyDerivationParams implements Parcelable {
+
+    // IMPORTANT! PLEASE READ!
+    // -----------------------
+    // If you edit this file (e.g., to add new fields), please MAKE SURE to also do the following:
+    // - Update the #writeToParcel(Parcel) method below
+    // - Update the #(Parcel) constructor below
+    // - Update android.security.keystore.recovery.KeyChainSnapshotTest to make sure nobody
+    //     accidentally breaks your fields in the Parcel in the future.
+    // - Update com.android.server.locksettings.recoverablekeystore.serialization
+    //     .KeyChainSnapshotSerializer to correctly serialize your new field
+    // - Update com.android.server.locksettings.recoverablekeystore.serialization
+    //     .KeyChainSnapshotSerializer to correctly deserialize your new field
+    // - Update com.android.server.locksettings.recoverablekeystore.serialization
+    //     .KeychainSnapshotSerializerTest to make sure nobody breaks serialization of your field
+    //     in the future.
+
     private final int mAlgorithm;
-    private byte[] mSalt;
+    private final byte[] mSalt;
+    private final int mMemoryDifficulty;
 
     /** @hide */
     @Retention(RetentionPolicy.SOURCE)
-    @IntDef(prefix = {"ALGORITHM_"}, value = {ALGORITHM_SHA256, ALGORITHM_ARGON2ID})
+    @IntDef(prefix = {"ALGORITHM_"}, value = {ALGORITHM_SHA256, ALGORITHM_SCRYPT})
     public @interface KeyDerivationAlgorithm {
     }
 
     /**
-     * Salted SHA256
+     * Salted SHA256.
      */
     public static final int ALGORITHM_SHA256 = 1;
 
     /**
-     * Argon2ID
-     * @hide
+     * SCRYPT.
      */
-    // TODO: add Argon2ID support.
-    public static final int ALGORITHM_ARGON2ID = 2;
+    public static final int ALGORITHM_SCRYPT = 2;
 
     /**
-     * Creates instance of the class to to derive key using salted SHA256 hash.
+     * Creates instance of the class to to derive keys using salted SHA256 hash.
+     *
+     * <p>The salted SHA256 hash is computed over the concatenation of four byte strings, salt_len +
+     * salt + key_material_len + key_material, where salt_len and key_material_len are 4-byte, and
+     * denote the number of bytes for salt and key_material, respectively.
      */
-    public static KeyDerivationParams createSha256Params(@NonNull byte[] salt) {
+    public static @NonNull KeyDerivationParams createSha256Params(@NonNull byte[] salt) {
         return new KeyDerivationParams(ALGORITHM_SHA256, salt);
+    }
+
+    /**
+     * Creates instance of the class to to derive keys using the password hashing algorithm SCRYPT.
+     *
+     * <p>We expose only one tuning parameter of SCRYPT, which is the memory cost parameter (i.e. N
+     * in <a href="https://www.tarsnap.com/scrypt/scrypt.pdf">the SCRYPT paper</a>). Regular/default
+     * values are used for the other parameters, to keep the overall running time low. Specifically,
+     * the parallelization parameter p is 1, the block size parameter r is 8, and the hashing output
+     * length is 32-byte.
+     */
+    public static @NonNull KeyDerivationParams createScryptParams(
+            @NonNull byte[] salt, int memoryDifficulty) {
+        return new KeyDerivationParams(ALGORITHM_SCRYPT, salt, memoryDifficulty);
     }
 
     /**
      * @hide
      */
-    // TODO: Make private once legacy API is removed
-    public KeyDerivationParams(@KeyDerivationAlgorithm int algorithm, @NonNull byte[] salt) {
+    private KeyDerivationParams(@KeyDerivationAlgorithm int algorithm, @NonNull byte[] salt) {
+        this(algorithm, salt, /*memoryDifficulty=*/ -1);
+    }
+
+    /**
+     * @hide
+     */
+    private KeyDerivationParams(@KeyDerivationAlgorithm int algorithm, @NonNull byte[] salt,
+            int memoryDifficulty) {
         mAlgorithm = algorithm;
         mSalt = Preconditions.checkNotNull(salt);
+        mMemoryDifficulty = memoryDifficulty;
     }
 
     /**
@@ -85,6 +125,19 @@ public final class KeyDerivationParams implements Parcelable {
      */
     public @NonNull byte[] getSalt() {
         return mSalt;
+    }
+
+    /**
+     * Gets the memory difficulty parameter for the hashing algorithm.
+     *
+     * <p>The effect of this parameter depends on the algorithm in use. For example, please see
+     * {@link #createScryptParams(byte[], int)} for choosing the parameter for SCRYPT.
+     *
+     * <p>If the specific algorithm does not support such a memory difficulty parameter, its value
+     * should be -1.
+     */
+    public int getMemoryDifficulty() {
+        return mMemoryDifficulty;
     }
 
     public static final Parcelable.Creator<KeyDerivationParams> CREATOR =
@@ -102,6 +155,7 @@ public final class KeyDerivationParams implements Parcelable {
     public void writeToParcel(Parcel out, int flags) {
         out.writeInt(mAlgorithm);
         out.writeByteArray(mSalt);
+        out.writeInt(mMemoryDifficulty);
     }
 
     /**
@@ -110,6 +164,7 @@ public final class KeyDerivationParams implements Parcelable {
     protected KeyDerivationParams(Parcel in) {
         mAlgorithm = in.readInt();
         mSalt = in.createByteArray();
+        mMemoryDifficulty = in.readInt();
     }
 
     @Override

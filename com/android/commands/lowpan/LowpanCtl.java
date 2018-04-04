@@ -331,24 +331,37 @@ public class LowpanCtl extends BaseCommand {
 
         sb.append(iface.getName())
                 .append("\t")
-                .append(iface.getState() + " (" + iface.getRole() + ")");
+                .append(iface.getState());
 
-        if (iface.isUp()) {
-            sb.append(" UP");
-        }
+        if (!iface.isEnabled()) {
+            sb.append(" DISABLED");
 
-        if (iface.isConnected()) {
-            sb.append(" CONNECTED");
-        }
+        } else if (iface.getState() != LowpanInterface.STATE_FAULT) {
+            sb.append(" (" + iface.getRole() + ")");
 
-        if (iface.isCommissioned()) {
-            sb.append(" COMMISSIONED");
-        }
+            if (iface.isUp()) {
+                sb.append(" UP");
+            }
 
-        sb.append("\n\t").append(getLowpanInterface().getLowpanIdentity());
+            if (iface.isConnected()) {
+                sb.append(" CONNECTED");
+            }
 
-        for (LinkAddress addr : iface.getLinkAddresses()) {
-            sb.append("\n\t").append(addr);
+            if (iface.isCommissioned()) {
+                sb.append(" COMMISSIONED");
+
+                LowpanIdentity identity = getLowpanInterface().getLowpanIdentity();
+
+                if (identity != null) {
+                    sb.append("\n\t").append(identity);
+                }
+            }
+
+            if (iface.isUp()) {
+                for (LinkAddress addr : iface.getLinkAddresses()) {
+                    sb.append("\n\t").append(addr);
+                }
+            }
         }
 
         sb.append("\n");

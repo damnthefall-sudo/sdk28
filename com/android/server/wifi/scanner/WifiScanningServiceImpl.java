@@ -39,7 +39,6 @@ import android.os.Looper;
 import android.os.Message;
 import android.os.Messenger;
 import android.os.RemoteException;
-import android.os.UserHandle;
 import android.os.WorkSource;
 import android.util.ArrayMap;
 import android.util.LocalLog;
@@ -62,6 +61,7 @@ import com.android.server.wifi.WifiNative;
 import com.android.server.wifi.WifiStateMachine;
 import com.android.server.wifi.nano.WifiMetricsProto;
 import com.android.server.wifi.scanner.ChannelHelper.ChannelCollection;
+import com.android.server.wifi.util.ScanResultUtil;
 import com.android.server.wifi.util.WifiHandler;
 
 import java.io.FileDescriptor;
@@ -141,6 +141,10 @@ public class WifiScanningServiceImpl extends IWifiScanner.Stub {
             super.handleMessage(msg);
             switch (msg.what) {
                 case AsyncChannel.CMD_CHANNEL_FULL_CONNECTION: {
+                    if (msg.replyTo == null) {
+                        logw("msg.replyTo is null");
+                        return;
+                    }
                     ExternalClientInfo client = (ExternalClientInfo) mClients.get(msg.replyTo);
                     if (client != null) {
                         logw("duplicate client connection: " + msg.sendingUid + ", messenger="
@@ -702,7 +706,6 @@ public class WifiScanningServiceImpl extends IWifiScanner.Stub {
                     case CMD_SCAN_FAILED:
                         mWifiMetrics.incrementScanReturnEntry(
                                 WifiMetricsProto.WifiLog.SCAN_UNKNOWN, mActiveScans.size());
-                        sendScanResultBroadcast(false);
                         sendOpFailedToAllAndClear(mActiveScans, WifiScanner.REASON_UNSPECIFIED,
                                 "Scan failed");
                         transitionTo(mIdleState);
@@ -946,13 +949,6 @@ public class WifiScanningServiceImpl extends IWifiScanner.Stub {
             }
         }
 
-        private void sendScanResultBroadcast(boolean scanSucceeded) {
-            Intent intent = new Intent(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION);
-            intent.addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT);
-            intent.putExtra(WifiManager.EXTRA_RESULTS_UPDATED, scanSucceeded);
-            mContext.sendBroadcastAsUser(intent, UserHandle.ALL);
-        }
-
         void reportScanResults(ScanData results) {
             if (results != null && results.getResults() != null) {
                 if (results.getResults().length > 0) {
@@ -985,7 +981,6 @@ public class WifiScanningServiceImpl extends IWifiScanner.Stub {
             if (results.isAllChannelsScanned()) {
                 mCachedScanResults.clear();
                 mCachedScanResults.addAll(Arrays.asList(results.getResults()));
-                sendScanResultBroadcast(true);
             }
         }
 
@@ -2107,31 +2102,7 @@ public class WifiScanningServiceImpl extends IWifiScanner.Stub {
             pw.println("Latest scan results:");
             List<ScanResult> scanResults = mSingleScanStateMachine.getCachedScanResultsAsList();
             long nowMs = mClock.getElapsedSinceBootMillis();
-            if (scanResults != null && scanResults.size() != 0) {
-                pw.println("    BSSID              Frequency  RSSI  Age(sec)   SSID "
-                        + "                                Flags");
-                for (ScanResult r : scanResults) {
-                    long timeStampMs = r.timestamp / 1000;
-                    String age;
-                    if (timeStampMs <= 0) {
-                        age = "___?___";
-                    } else if (nowMs < timeStampMs) {
-                        age = "  0.000";
-                    } else if (timeStampMs < nowMs - 1000000) {
-                        age = ">1000.0";
-                    } else {
-                        age = String.format("%3.3f", (nowMs - timeStampMs) / 1000.0);
-                    }
-                    String ssid = r.SSID == null ? "" : r.SSID;
-                    pw.printf("  %17s  %9d  %5d   %7s    %-32s  %s\n",
-                              r.BSSID,
-                              r.frequency,
-                              r.level,
-                              age,
-                              String.format("%1.32s", ssid),
-                              r.capabilities);
-                }
-            }
+            ScanResultUtil.dumpScanResults(pw, scanResults, nowMs);
             pw.println();
         }
         if (mScannerImpl != null) {

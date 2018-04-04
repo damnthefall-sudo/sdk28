@@ -31,7 +31,6 @@ import android.graphics.drawable.TransitionDrawable;
 import android.os.Bundle;
 import android.os.Debug;
 import android.os.Handler;
-import android.os.LocaleList;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.os.StrictMode;
@@ -90,7 +89,7 @@ import java.util.List;
 
 /**
  * Base class that can be used to implement virtualized lists of items. A list does
- * not have a spatial definition here. For instance, subclases of this class can
+ * not have a spatial definition here. For instance, subclasses of this class can
  * display the content of the list in a grid, in a carousel, as stack, etc.
  *
  * @attr ref android.R.styleable#AbsListView_listSelector
@@ -6036,11 +6035,6 @@ public abstract class AbsListView extends AdapterView<ListAdapter> implements Te
         public boolean commitContent(InputContentInfo inputContentInfo, int flags, Bundle opts) {
             return getTarget().commitContent(inputContentInfo, flags, opts);
         }
-
-        @Override
-        public void reportLanguageHint(@NonNull LocaleList languageHint) {
-            getTarget().reportLanguageHint(languageHint);
-        }
     }
 
     /**
@@ -6864,7 +6858,7 @@ public abstract class AbsListView extends AdapterView<ListAdapter> implements Te
             // detached and we do not allow detached views to fire accessibility
             // events. So we are announcing that the subtree changed giving a chance
             // to clients holding on to a view in this subtree to refresh it.
-            notifyAccessibilityStateChanged(
+            notifyViewAccessibilityStateChangedIfNeeded(
                     AccessibilityEvent.CONTENT_CHANGE_TYPE_SUBTREE);
 
             // Don't scrap views that have transient state.

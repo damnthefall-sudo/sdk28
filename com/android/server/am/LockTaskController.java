@@ -62,6 +62,7 @@ import android.util.SparseArray;
 import android.util.SparseIntArray;
 
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.internal.policy.IKeyguardDismissCallback;
 import com.android.internal.statusbar.IStatusBarService;
 import com.android.internal.widget.LockPatternUtils;
 import com.android.server.LocalServices;
@@ -113,7 +114,7 @@ public class LockTaskController {
         STATUS_BAR_FLAG_MAP_LOCKED.append(DevicePolicyManager.LOCK_TASK_FEATURE_HOME,
                 new Pair<>(StatusBarManager.DISABLE_HOME, StatusBarManager.DISABLE2_NONE));
 
-        STATUS_BAR_FLAG_MAP_LOCKED.append(DevicePolicyManager.LOCK_TASK_FEATURE_RECENTS,
+        STATUS_BAR_FLAG_MAP_LOCKED.append(DevicePolicyManager.LOCK_TASK_FEATURE_OVERVIEW,
                 new Pair<>(StatusBarManager.DISABLE_RECENT, StatusBarManager.DISABLE2_NONE));
 
         STATUS_BAR_FLAG_MAP_LOCKED.append(DevicePolicyManager.LOCK_TASK_FEATURE_GLOBAL_ACTIONS,
@@ -140,14 +141,6 @@ public class LockTaskController {
     LockPatternUtils mLockPatternUtils;
     @VisibleForTesting
     TelecomManager mTelecomManager;
-
-    /**
-     * Helper that is responsible for showing the right toast when a disallowed activity operation
-     * occurred. In pinned mode, we show instructions on how to break out of this mode, whilst in
-     * fully locked mode we only show that unlocking is blocked.
-     */
-    @VisibleForTesting
-    LockTaskNotify mLockTaskNotify;
 
     /**
      * The chain of tasks in LockTask mode, in the order of when they first entered LockTask mode.
@@ -292,6 +285,16 @@ public class LockTaskController {
         return false;
     }
 
+    /**
+     * @return the root task of the lock task.
+     */
+    TaskRecord getRootTask() {
+        if (mLockTaskModeTasks.isEmpty()) {
+            return null;
+        }
+        return mLockTaskModeTasks.get(0);
+    }
+
     private boolean isLockTaskModeViolationInternal(TaskRecord task, boolean isNewClearTask) {
         // TODO: Double check what's going on here. If the task is already in lock task mode, it's
         // likely whitelisted, so will return false below.
@@ -315,7 +318,7 @@ public class LockTaskController {
 
     private boolean isRecentsAllowed(int userId) {
         return (getLockTaskFeaturesForUser(userId)
-                & DevicePolicyManager.LOCK_TASK_FEATURE_RECENTS) != 0;
+                & DevicePolicyManager.LOCK_TASK_FEATURE_OVERVIEW) != 0;
     }
 
     private boolean isKeyguardAllowed(int userId) {
@@ -475,8 +478,9 @@ public class LockTaskController {
                 getDevicePolicyManager().notifyLockTaskModeChanged(false, null, userId);
             }
             if (mLockTaskModeState == LOCK_TASK_MODE_PINNED) {
-                getLockTaskNotify().showPinningExitToast();
+                getStatusBarService().showPinningEnterExitToast(false /* entering */);
             }
+            mWindowManager.onLockTaskStateChanged(LOCK_TASK_MODE_NONE);
         } catch (RemoteException ex) {
             throw new RuntimeException(ex);
         } finally {
@@ -490,7 +494,11 @@ public class LockTaskController {
      */
     void showLockTaskToast() {
         if (mLockTaskModeState == LOCK_TASK_MODE_PINNED) {
-            mHandler.post(() -> getLockTaskNotify().showEscapeToast());
+            try {
+                getStatusBarService().showPinningEscapeToast();
+            } catch (RemoteException e) {
+                Slog.e(TAG, "Failed to send pinning escape toast", e);
+            }
         }
     }
 
@@ -582,8 +590,9 @@ public class LockTaskController {
         // When lock task starts, we disable the status bars.
         try {
             if (lockTaskModeState == LOCK_TASK_MODE_PINNED) {
-                getLockTaskNotify().showPinningStartToast();
+                getStatusBarService().showPinningEnterExitToast(true /* entering */);
             }
+            mWindowManager.onLockTaskStateChanged(lockTaskModeState);
             mLockTaskModeState = lockTaskModeState;
             setStatusBarState(lockTaskModeState, userId);
             setKeyguardState(lockTaskModeState, userId);
@@ -732,7 +741,29 @@ public class LockTaskController {
             if (isKeyguardAllowed(userId)) {
                 mWindowManager.reenableKeyguard(mToken);
             } else {
-                mWindowManager.disableKeyguard(mToken, LOCK_TASK_TAG);
+                // If keyguard is not secure and it is locked, dismiss the keyguard before
+                // disabling it, which avoids the platform to think the keyguard is still on.
+                if (mWindowManager.isKeyguardLocked() && !mWindowManager.isKeyguardSecure()) {
+                    mWindowManager.dismissKeyguard(new IKeyguardDismissCallback.Stub() {
+                        @Override
+                        public void onDismissError() throws RemoteException {
+                            Slog.i(TAG, "setKeyguardState: failed to dismiss keyguard");
+                        }
+
+                        @Override
+                        public void onDismissSucceeded() throws RemoteException {
+                            mHandler.post(
+                                    () -> mWindowManager.disableKeyguard(mToken, LOCK_TASK_TAG));
+                        }
+
+                        @Override
+                        public void onDismissCancelled() throws RemoteException {
+                            Slog.i(TAG, "setKeyguardState: dismiss cancelled");
+                        }
+                    }, null);
+                } else {
+                    mWindowManager.disableKeyguard(mToken, LOCK_TASK_TAG);
+                }
             }
 
         } else { // lockTaskModeState == LOCK_TASK_MODE_PINNED
@@ -833,15 +864,6 @@ public class LockTaskController {
             return mContext.getSystemService(TelecomManager.class);
         }
         return mTelecomManager;
-    }
-
-    // Should only be called on the handler thread
-    @NonNull
-    private LockTaskNotify getLockTaskNotify() {
-        if (mLockTaskNotify == null) {
-            mLockTaskNotify = new LockTaskNotify(mContext);
-        }
-        return mLockTaskNotify;
     }
 
     public void dump(PrintWriter pw, String prefix) {

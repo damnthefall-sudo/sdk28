@@ -79,12 +79,13 @@ public class ViewGroup_Delegate {
         }
         Bitmap bitmap = Bitmap_Delegate.createBitmap(shadow, false,
                 Density.getEnum(canvas.getDensity()));
+        canvas.save();
         Rect clipBounds = canvas.getClipBounds();
         Rect newBounds = new Rect(clipBounds);
         newBounds.inset((int)-elevation, (int)-elevation);
         canvas.clipRect(newBounds, Op.REPLACE);
         canvas.drawBitmap(bitmap, 0, 0, null);
-        canvas.clipRect(clipBounds, Op.REPLACE);
+        canvas.restore();
     }
 
     private static float getElevation(View child, ViewGroup parent) {
@@ -145,11 +146,11 @@ public class ViewGroup_Delegate {
                         canvas.concat(transformToApply.getMatrix());
                         canvas.translate(transX, transY);
                     }
-                    if (!childHasIdentityMatrix) {
-                        canvas.translate(-transX, -transY);
-                        canvas.concat(child.getMatrix());
-                        canvas.translate(transX, transY);
-                    }
+                }
+                if (!childHasIdentityMatrix) {
+                    canvas.translate(-transX, -transY);
+                    canvas.concat(child.getMatrix());
+                    canvas.translate(transX, transY);
                 }
 
             }

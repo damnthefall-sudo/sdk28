@@ -20,9 +20,12 @@ import static android.Manifest.permission.WRITE_SECURE_SETTINGS;
 
 import android.annotation.NonNull;
 import android.annotation.Nullable;
+import android.annotation.RequiresFeature;
 import android.annotation.RequiresPermission;
 import android.annotation.SystemService;
+import android.annotation.TestApi;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.graphics.Rect;
 import android.inputmethodservice.InputMethodService;
 import android.net.Uri;
@@ -212,6 +215,7 @@ import java.util.concurrent.TimeUnit;
  * </ul>
  */
 @SystemService(Context.INPUT_METHOD_SERVICE)
+@RequiresFeature(PackageManager.FEATURE_INPUT_METHODS)
 public final class InputMethodManager {
     static final boolean DEBUG = false;
     static final String TAG = "InputMethodManager";
@@ -1178,8 +1182,9 @@ public final class InputMethodManager {
         }
     }
 
-    /*
+    /**
      * This method toggles the input method window display.
+     *
      * If the input window is already displayed, it gets hidden.
      * If not the input window will be displayed.
      * @param showFlags Provides additional operating flags.  May be
@@ -1188,7 +1193,6 @@ public final class InputMethodManager {
      * @param hideFlags Provides additional operating flags.  May be
      * 0 or have the {@link #HIDE_IMPLICIT_ONLY},
      * {@link #HIDE_NOT_ALWAYS} bit set.
-     * @hide
      */
     public void toggleSoftInput(int showFlags, int hideFlags) {
         if (mCurMethod != null) {
@@ -1808,9 +1812,9 @@ public final class InputMethodManager {
      * when it was started, which allows it to perform this operation on
      * itself.
      * @param id The unique identifier for the new input method to be switched to.
-     * @deprecated Use {@link InputMethodService#setInputMethod(String)} instead. This method
-     * was intended for IME developers who should be accessing APIs through the service. APIs in
-     * this class are intended for app developers interacting with the IME.
+     * @deprecated Use {@link InputMethodService#switchInputMethod(String)}
+     * instead. This method was intended for IME developers who should be accessing APIs through
+     * the service. APIs in this class are intended for app developers interacting with the IME.
      */
     @Deprecated
     public void setInputMethod(IBinder token, String id) {
@@ -1837,7 +1841,7 @@ public final class InputMethodManager {
      * @param id The unique identifier for the new input method to be switched to.
      * @param subtype The new subtype of the new input method to be switched to.
      * @deprecated Use
-     * {@link InputMethodService#setInputMethodAndSubtype(String, InputMethodSubtype)}
+     * {@link InputMethodService#switchInputMethod(String, InputMethodSubtype)}
      * instead. This method was intended for IME developers who should be accessing APIs through
      * the service. APIs in this class are intended for app developers interacting with the IME.
      */
@@ -2137,6 +2141,26 @@ public final class InputMethodManager {
     }
 
     /**
+     * A test API for CTS to make sure that {@link #showInputMethodPicker()} works as expected.
+     *
+     * <p>When customizing the implementation of {@link #showInputMethodPicker()} API, make sure
+     * that this test API returns when and only while and only while
+     * {@link #showInputMethodPicker()} is showing UI. Otherwise your OS implementation may not
+     * pass CTS.</p>
+     *
+     * @return {@code true} while and only while {@link #showInputMethodPicker()} is showing UI.
+     * @hide
+     */
+    @TestApi
+    public boolean isInputMethodPickerShown() {
+        try {
+            return mService.isInputMethodPickerShownForTest();
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+
+    /**
      * Show the settings for enabling subtypes of the specified input method.
      * @param imiId An input method, whose subtypes settings will be shown. If imiId is null,
      * subtypes of all input methods will be shown.
@@ -2293,22 +2317,22 @@ public final class InputMethodManager {
      * which allows it to perform this operation on itself.
      * @return true if the current input method and subtype was successfully switched to the last
      * used input method and subtype.
-     * @deprecated Use {@link InputMethodService#switchToLastInputMethod()} instead. This method
+     * @deprecated Use {@link InputMethodService#switchToPreviousInputMethod()} instead. This method
      * was intended for IME developers who should be accessing APIs through the service. APIs in
      * this class are intended for app developers interacting with the IME.
      */
     @Deprecated
     public boolean switchToLastInputMethod(IBinder imeToken) {
-        return switchToLastInputMethodInternal(imeToken);
+        return switchToPreviousInputMethodInternal(imeToken);
     }
 
     /**
      * @hide
      */
-    public boolean switchToLastInputMethodInternal(IBinder imeToken) {
+    public boolean switchToPreviousInputMethodInternal(IBinder imeToken) {
         synchronized (mH) {
             try {
-                return mService.switchToLastInputMethod(imeToken);
+                return mService.switchToPreviousInputMethod(imeToken);
             } catch (RemoteException e) {
                 throw e.rethrowFromSystemServer();
             }

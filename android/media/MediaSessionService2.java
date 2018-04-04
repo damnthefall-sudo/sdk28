@@ -23,12 +23,13 @@ import android.app.Notification;
 import android.app.Service;
 import android.content.Intent;
 import android.media.MediaSession2.ControllerInfo;
-import android.media.session.PlaybackState;
 import android.media.update.ApiLoader;
 import android.media.update.MediaSessionService2Provider;
+import android.media.update.MediaSessionService2Provider.MediaNotificationProvider;
 import android.os.IBinder;
 
 /**
+ * @hide
  * Base class for media session services, which is the service version of the {@link MediaSession2}.
  * <p>
  * It's highly recommended for an app to use this instead of {@link MediaSession2} if it wants
@@ -84,12 +85,13 @@ import android.os.IBinder;
  * session service, the controller binds to the session service. {@link #onCreateSession(String)}
  * may be called after the {@link #onCreate} if the service hasn't created yet.
  * <p>
- * After the binding, session's {@link MediaSession2.SessionCallback#onConnect(ControllerInfo)}
+ * After the binding, session's {@link MediaSession2.SessionCallback#onConnect(MediaSession2, ControllerInfo)}
+ *
  * will be called to accept or reject connection request from a controller. If the connection is
  * rejected, the controller will unbind. If it's accepted, the controller will be available to use
  * and keep binding.
  * <p>
- * When playback is started for this session service, {@link #onUpdateNotification(PlaybackState)}
+ * When playback is started for this session service, {@link #onUpdateNotification()}
  * is called and service would become a foreground service. It's needed to keep playback after the
  * controller is destroyed. The session service becomes background service when the playback is
  * stopped.
@@ -98,21 +100,8 @@ import android.os.IBinder;
  * <p>
  * Any app can bind to the session service with controller, but the controller can be used only if
  * the session service accepted the connection request through
- * {@link MediaSession2.SessionCallback#onConnect(ControllerInfo)}.
- *
- * @hide
+ * {@link MediaSession2.SessionCallback#onConnect(MediaSession2, ControllerInfo)}.
  */
-// TODO(jaewan): Unhide
-// TODO(jaewan): Can we clean up sessions in onDestroy() automatically instead?
-//               What about currently running SessionCallback when the onDestroy() is called?
-// TODO(jaewan): Protect this with system|privilleged permission - Q.
-// TODO(jaewan): Add permission check for the service to know incoming connection request.
-//               Follow-up questions: What about asking a XML for list of white/black packages for
-//                                    allowing enumeration?
-//                                    We can read the information even when the service is started,
-//                                    so SessionManager.getXXXXService() can only return apps
-//                                    TODO(jaewan): Will be the black/white listing persistent?
-//                                                  In other words, can we cache the rejection?
 public abstract class MediaSessionService2 extends Service {
     private final MediaSessionService2Provider mProvider;
 
@@ -134,7 +123,7 @@ public abstract class MediaSessionService2 extends Service {
     }
 
     MediaSessionService2Provider createProvider() {
-        return ApiLoader.getProvider(this).createMediaSessionService2(this);
+        return ApiLoader.getProvider().createMediaSessionService2(this);
     }
 
     /**
@@ -169,27 +158,27 @@ public abstract class MediaSessionService2 extends Service {
     public @NonNull abstract MediaSession2 onCreateSession(String sessionId);
 
     /**
-     * Called when the playback state of this session is changed, and notification needs update.
-     * Override this method to show your own notification UI.
+     * Called when the playback state of this session is changed so notification needs update.
+     * Override this method to show or cancel your own notification UI.
      * <p>
      * With the notification returned here, the service become foreground service when the playback
      * is started. It becomes background service after the playback is stopped.
      *
-     * @param state playback state
      * @return a {@link MediaNotification}. If it's {@code null}, notification wouldn't be shown.
      */
-    // TODO(jaewan): Also add metadata
-    public MediaNotification onUpdateNotification(PlaybackState2 state) {
-        return mProvider.onUpdateNotification_impl(state);
+    public @Nullable MediaNotification onUpdateNotification() {
+        return mProvider.onUpdateNotification_impl();
     }
 
     /**
      * Get instance of the {@link MediaSession2} that you've previously created with the
      * {@link #onCreateSession} for this service.
+     * <p>
+     * This may be {@code null} before the {@link #onCreate()} is finished.
      *
      * @return created session
      */
-    public final MediaSession2 getSession() {
+    public final @Nullable MediaSession2 getSession() {
         return mProvider.getSession_impl();
     }
 
@@ -213,35 +202,32 @@ public abstract class MediaSessionService2 extends Service {
     }
 
     /**
-     * Returned by {@link #onUpdateNotification(PlaybackState)} for making session service
-     * foreground service to keep playback running in the background. It's highly recommended to
-     * show media style notification here.
+     * Returned by {@link #onUpdateNotification()} for making session service foreground service
+     * to keep playback running in the background. It's highly recommended to show media style
+     * notification here.
      */
-    // TODO(jaewan): Should we also move this to updatable?
     public static class MediaNotification {
-        public final int id;
-        public final Notification notification;
-
-        private MediaNotification(int id, @NonNull Notification notification) {
-            this.id = id;
-            this.notification = notification;
-        }
+        private final MediaNotificationProvider mProvider;
 
         /**
-         * Create a {@link MediaNotification}.
+         * Default constructor
          *
          * @param notificationId notification id to be used for
          *      {@link android.app.NotificationManager#notify(int, Notification)}.
          * @param notification a notification to make session service foreground service. Media
          *      style notification is recommended here.
-         * @return
          */
-        public static MediaNotification create(int notificationId,
-                @NonNull Notification notification) {
-            if (notification == null) {
-                throw new IllegalArgumentException("Notification cannot be null");
-            }
-            return new MediaNotification(notificationId, notification);
+        public MediaNotification(int notificationId, @NonNull Notification notification) {
+            mProvider = ApiLoader.getProvider().createMediaSessionService2MediaNotification(
+                    this, notificationId, notification);
+        }
+
+        public int getNotificationId() {
+            return mProvider.getNotificationId_impl();
+        }
+
+        public @NonNull Notification getNotification() {
+            return mProvider.getNotification_impl();
         }
     }
 }

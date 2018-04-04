@@ -51,15 +51,13 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.DeadSystemException;
+import android.os.FileUtils;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
-import android.os.ServiceManager;
 import android.os.SystemProperties;
-import android.os.UserHandle;
-import android.service.wallpaper.WallpaperService;
 import android.text.TextUtils;
 import android.util.Log;
 import android.util.Pair;
@@ -443,6 +441,9 @@ public class WallpaperManager {
             synchronized (this) {
                 mCachedWallpaper = null;
                 mCachedWallpaperUserId = 0;
+                if (mDefaultWallpaper != null) {
+                    mDefaultWallpaper.recycle();
+                }
                 mDefaultWallpaper = null;
             }
         }
@@ -914,9 +915,14 @@ public class WallpaperManager {
     /**
      * Get the primary colors of a wallpaper.
      *
-     * <p>You can expect null if:
-     * • Colors are still being processed by the system.
-     * • A live wallpaper doesn't implement {@link WallpaperService.Engine#onComputeColors()}.
+     * <p>This method can return {@code null} when:
+     * <ul>
+     * <li>Colors are still being processed by the system.</li>
+     * <li>The user has chosen to use a live wallpaper:  live wallpapers might not
+     * implement
+     * {@link android.service.wallpaper.WallpaperService.Engine#onComputeColors()
+     *     WallpaperService.Engine#onComputeColors()}.</li>
+     * </ul>
      *
      * @param which Wallpaper type. Must be either {@link #FLAG_SYSTEM} or
      *     {@link #FLAG_LOCK}.
@@ -928,7 +934,7 @@ public class WallpaperManager {
     }
 
     /**
-     * Get the primary colors of a wallpaper
+     * Get the primary colors of the wallpaper configured in the given user.
      * @param which wallpaper type. Must be either {@link #FLAG_SYSTEM} or
      *     {@link #FLAG_LOCK}
      * @param userId Owner of the wallpaper.
@@ -1002,7 +1008,7 @@ public class WallpaperManager {
                 Log.w(TAG, "WallpaperService not running");
                 throw new RuntimeException(new DeadSystemException());
             } else {
-                return sGlobals.mService.getWallpaperInfo(UserHandle.myUserId());
+                return sGlobals.mService.getWallpaperInfo(mContext.getUserId());
             }
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
@@ -1150,7 +1156,7 @@ public class WallpaperManager {
             ParcelFileDescriptor fd = sGlobals.mService.setWallpaper(
                     "res:" + resources.getResourceName(resid),
                     mContext.getOpPackageName(), null, false, result, which, completion,
-                    UserHandle.myUserId());
+                    mContext.getUserId());
             if (fd != null) {
                 FileOutputStream fos = null;
                 boolean ok = false;
@@ -1255,7 +1261,7 @@ public class WallpaperManager {
             boolean allowBackup, @SetWallpaperFlags int which)
             throws IOException {
         return setBitmap(fullImage, visibleCropHint, allowBackup, which,
-                UserHandle.myUserId());
+                mContext.getUserId());
     }
 
     /**
@@ -1329,11 +1335,7 @@ public class WallpaperManager {
 
     private void copyStreamToWallpaperFile(InputStream data, FileOutputStream fos)
             throws IOException {
-        byte[] buffer = new byte[32768];
-        int amt;
-        while ((amt=data.read(buffer)) > 0) {
-            fos.write(buffer, 0, amt);
-        }
+        FileUtils.copy(data, fos);
     }
 
     /**
@@ -1406,7 +1408,7 @@ public class WallpaperManager {
         try {
             ParcelFileDescriptor fd = sGlobals.mService.setWallpaper(null,
                     mContext.getOpPackageName(), visibleCropHint, allowBackup,
-                    result, which, completion, UserHandle.myUserId());
+                    result, which, completion, mContext.getUserId());
             if (fd != null) {
                 FileOutputStream fos = null;
                 try {
@@ -1562,11 +1564,13 @@ public class WallpaperManager {
      * Specify extra padding that the wallpaper should have outside of the display.
      * That is, the given padding supplies additional pixels the wallpaper should extend
      * outside of the display itself.
+     *
+     * <p>This method requires the caller to hold the permission
+     * {@link android.Manifest.permission#SET_WALLPAPER_HINTS}.
+     *
      * @param padding The number of pixels the wallpaper should extend beyond the display,
      * on its left, top, right, and bottom sides.
-     * @hide
      */
-    @SystemApi
     @RequiresPermission(android.Manifest.permission.SET_WALLPAPER_HINTS)
     public void setDisplayPadding(Rect padding) {
         try {
@@ -1603,11 +1607,11 @@ public class WallpaperManager {
     }
 
     /**
-     * Clear the wallpaper.
+     * Reset all wallpaper to the factory default.
      *
-     * @hide
+     * <p>This method requires the caller to hold the permission
+     * {@link android.Manifest.permission#SET_WALLPAPER}.
      */
-    @SystemApi
     @RequiresPermission(android.Manifest.permission.SET_WALLPAPER)
     public void clearWallpaper() {
         clearWallpaper(FLAG_LOCK, mContext.getUserId());
@@ -1643,7 +1647,7 @@ public class WallpaperManager {
     @SystemApi
     @RequiresPermission(android.Manifest.permission.SET_WALLPAPER_COMPONENT)
     public boolean setWallpaperComponent(ComponentName name) {
-        return setWallpaperComponent(name, UserHandle.myUserId());
+        return setWallpaperComponent(name, mContext.getUserId());
     }
 
     /**

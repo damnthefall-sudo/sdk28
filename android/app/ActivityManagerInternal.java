@@ -27,6 +27,7 @@ import android.os.IBinder;
 import android.os.SystemClock;
 import android.service.voice.IVoiceInteractionSession;
 import android.util.SparseIntArray;
+import android.view.RemoteAnimationAdapter;
 
 import com.android.internal.app.IVoiceInteractor;
 
@@ -43,25 +44,36 @@ public abstract class ActivityManagerInternal {
      * Type for {@link #notifyAppTransitionStarting}: The transition was started because we drew
      * the splash screen.
      */
-    public static final int APP_TRANSITION_SPLASH_SCREEN = 1;
+    public static final int APP_TRANSITION_SPLASH_SCREEN =
+              AppProtoEnums.APP_TRANSITION_SPLASH_SCREEN; // 1
 
     /**
      * Type for {@link #notifyAppTransitionStarting}: The transition was started because we all
      * app windows were drawn
      */
-    public static final int APP_TRANSITION_WINDOWS_DRAWN = 2;
+    public static final int APP_TRANSITION_WINDOWS_DRAWN =
+              AppProtoEnums.APP_TRANSITION_WINDOWS_DRAWN; // 2
 
     /**
      * Type for {@link #notifyAppTransitionStarting}: The transition was started because of a
      * timeout.
      */
-    public static final int APP_TRANSITION_TIMEOUT = 3;
+    public static final int APP_TRANSITION_TIMEOUT =
+              AppProtoEnums.APP_TRANSITION_TIMEOUT; // 3
 
     /**
      * Type for {@link #notifyAppTransitionStarting}: The transition was started because of a
      * we drew a task snapshot.
      */
-    public static final int APP_TRANSITION_SNAPSHOT = 4;
+    public static final int APP_TRANSITION_SNAPSHOT =
+              AppProtoEnums.APP_TRANSITION_SNAPSHOT; // 4
+
+    /**
+     * Type for {@link #notifyAppTransitionStarting}: The transition was started because it was a
+     * recents animation and we only needed to wait on the wallpaper.
+     */
+    public static final int APP_TRANSITION_RECENTS_ANIM =
+            AppProtoEnums.APP_TRANSITION_RECENTS_ANIM; // 5
 
     /**
      * The bundle key to extract the assist data.
@@ -150,8 +162,8 @@ public abstract class ActivityManagerInternal {
      * Callback for window manager to let activity manager know that we are finally starting the
      * app transition;
      *
-     * @param reasons A map from stack id to a reason integer why the transition was started,, which
-     *                must be one of the APP_TRANSITION_* values.
+     * @param reasons A map from windowing mode to a reason integer why the transition was started,
+     *                which must be one of the APP_TRANSITION_* values.
      * @param timestamp The time at which the app transition started in
      *                  {@link SystemClock#uptimeMillis()} timebase.
      */
@@ -215,6 +227,9 @@ public abstract class ActivityManagerInternal {
     /**
      * Start activity {@code intents} as if {@code packageName} on user {@code userId} did it.
      *
+     * - DO NOT call it with the calling UID cleared.
+     * - All the necessary caller permission checks must be done at callsites.
+     *
      * @return error codes used by {@link IActivityManager#startActivity} and its siblings.
      */
     public abstract int startActivitiesAsPackage(String packageName,
@@ -255,6 +270,17 @@ public abstract class ActivityManagerInternal {
      * @see android.view.WindowManager.LayoutParams#TYPE_APPLICATION_OVERLAY
      */
     public abstract void setHasOverlayUi(int pid, boolean hasOverlayUi);
+
+    /**
+     * Sets if the given pid is currently running a remote animation, which is taken a signal for
+     * determining oom adjustment and scheduling behavior.
+     *
+     * @param pid The pid we are setting overlay UI for.
+     * @param runningRemoteAnimation True if the process is running a remote animation, false
+     *                               otherwise.
+     * @see RemoteAnimationAdapter
+     */
+    public abstract void setRunningRemoteAnimation(int pid, boolean runningRemoteAnimation);
 
     /**
      * Called after the network policy rules are updated by
@@ -344,4 +370,25 @@ public abstract class ActivityManagerInternal {
      * Returns is the caller has the same uid as the Recents component
      */
     public abstract boolean isCallerRecents(int callingUid);
+
+    /**
+     * Returns whether the recents component is the home activity for the given user.
+     */
+    public abstract boolean isRecentsComponentHomeActivity(int userId);
+
+    /**
+     * Whether an UID is active or idle.
+     */
+    public abstract boolean isUidActive(int uid);
+
+    /**
+     * Returns a list that contains the memory stats for currently running processes.
+     */
+    public abstract List<ProcessMemoryState> getMemoryStateForProcesses();
+
+    /**
+     * This enforces {@code func} can only be called if either the caller is Recents activity or
+     * has {@code permission}.
+     */
+    public abstract void enforceCallerIsRecentsOrHasPermission(String permission, String func);
 }

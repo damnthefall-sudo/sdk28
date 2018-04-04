@@ -20,8 +20,10 @@ import android.app.ActivityManager;
 import android.app.job.JobParameters;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
+import android.server.ServerProtoEnums;
 import android.service.batterystats.BatteryStatsServiceDumpProto;
 import android.telephony.SignalStrength;
+import android.telephony.TelephonyManager;
 import android.text.format.DateFormat;
 import android.util.ArrayMap;
 import android.util.LongSparseArray;
@@ -239,8 +241,11 @@ public abstract class BatteryStats implements Parcelable {
      * New in version 30:
      *   - Uid.PROCESS_STATE_FOREGROUND_SERVICE only tracks
      *   ActivityManager.PROCESS_STATE_FOREGROUND_SERVICE.
+     * New in version 31:
+     *   - New cellular network types.
+     *   - Deferred job metrics.
      */
-    static final int CHECKIN_VERSION = 30;
+    static final int CHECKIN_VERSION = 31;
 
     /**
      * Old version, we hit 9 and ran out of room, need to remove.
@@ -286,6 +291,16 @@ public abstract class BatteryStats implements Parcelable {
     private static final String SYNC_DATA = "sy";
     private static final String JOB_DATA = "jb";
     private static final String JOB_COMPLETION_DATA = "jbc";
+
+    /**
+     * jbd line is:
+     * BATTERY_STATS_CHECKIN_VERSION, uid, which, "jbd",
+     * jobsDeferredEventCount, jobsDeferredCount, totalLatencyMillis,
+     * count at latency < 1 hr, count at latency 1 to 2 hrs, 2 to 4 hrs, 4 to 8 hrs, and past 8 hrs
+     * <p>
+     * @see #JOB_FRESHNESS_BUCKETS
+     */
+    private static final String JOBS_DEFERRED_DATA = "jbd";
     private static final String KERNEL_WAKELOCK_DATA = "kwl";
     private static final String WAKEUP_REASON_DATA = "wr";
     private static final String NETWORK_DATA = "nt";
@@ -346,6 +361,20 @@ public abstract class BatteryStats implements Parcelable {
      */
     @VisibleForTesting
     public static final String UID_TIMES_TYPE_ALL = "A";
+
+    /**
+     * These are the thresholds for bucketing last time since a job was run for an app
+     * that just moved to ACTIVE due to a launch. So if the last time a job ran was less
+     * than 1 hour ago, then it's reasonably fresh, 2 hours ago, not so fresh and so
+     * on.
+     */
+    public static final long[] JOB_FRESHNESS_BUCKETS = {
+            1 * 60 * 60 * 1000L,
+            2 * 60 * 60 * 1000L,
+            4 * 60 * 60 * 1000L,
+            8 * 60 * 60 * 1000L,
+            Long.MAX_VALUE
+    };
 
     /**
      * State for keeping track of counting information.
@@ -420,6 +449,11 @@ public abstract class BatteryStats implements Parcelable {
          */
         public abstract LongCounter getScanTimeCounter();
 
+        /**
+         * @return a non-null {@link LongCounter} representing time spent (milliseconds) in the
+         * sleep state.
+         */
+        public abstract LongCounter getSleepTimeCounter();
 
         /**
          * @return a non-null {@link LongCounter} representing time spent (milliseconds) in the
@@ -844,6 +878,20 @@ public abstract class BatteryStats implements Parcelable {
          * @param which one of STATS_SINCE_CHARGED, STATS_SINCE_UNPLUGGED, or STATS_CURRENT.
          */
         public abstract long getWifiRadioApWakeupCount(int which);
+
+        /**
+         * Appends the deferred jobs data to the StringBuilder passed in, in checkin format
+         * @param sb StringBuilder that can be overwritten with the deferred jobs data
+         * @param which one of STATS_*
+         */
+        public abstract void getDeferredJobsCheckinLineLocked(StringBuilder sb, int which);
+
+        /**
+         * Appends the deferred jobs data to the StringBuilder passed in
+         * @param sb StringBuilder that can be overwritten with the deferred jobs data
+         * @param which one of STATS_*
+         */
+        public abstract void getDeferredJobsLineLocked(StringBuilder sb, int which);
 
         public static abstract class Sensor {
             /*
@@ -1536,6 +1584,8 @@ public abstract class BatteryStats implements Parcelable {
         public static final int STATE2_BLUETOOTH_ON_FLAG = 1<<22;
         public static final int STATE2_CAMERA_FLAG = 1<<21;
         public static final int STATE2_BLUETOOTH_SCAN_FLAG = 1 << 20;
+        public static final int STATE2_CELLULAR_HIGH_TX_POWER_FLAG = 1 << 19;
+        public static final int STATE2_USB_DATA_LINK_FLAG = 1 << 18;
 
         public static final int MOST_INTERESTING_STATES2 =
                 STATE2_POWER_SAVE_FLAG | STATE2_WIFI_ON_FLAG | STATE2_DEVICE_IDLE_MASK
@@ -2054,17 +2104,17 @@ public abstract class BatteryStats implements Parcelable {
     /**
      * Constant for device idle mode: not active.
      */
-    public static final int DEVICE_IDLE_MODE_OFF = 0;
+    public static final int DEVICE_IDLE_MODE_OFF = ServerProtoEnums.DEVICE_IDLE_MODE_OFF; // 0
 
     /**
      * Constant for device idle mode: active in lightweight mode.
      */
-    public static final int DEVICE_IDLE_MODE_LIGHT = 1;
+    public static final int DEVICE_IDLE_MODE_LIGHT = ServerProtoEnums.DEVICE_IDLE_MODE_LIGHT; // 1
 
     /**
      * Constant for device idle mode: active in full mode.
      */
-    public static final int DEVICE_IDLE_MODE_DEEP = 2;
+    public static final int DEVICE_IDLE_MODE_DEEP = ServerProtoEnums.DEVICE_IDLE_MODE_DEEP; // 2
 
     /**
      * Returns the time in microseconds that device has been in idle mode while
@@ -2223,27 +2273,12 @@ public abstract class BatteryStats implements Parcelable {
     public abstract int getMobileRadioActiveUnknownCount(int which);
 
     public static final int DATA_CONNECTION_NONE = 0;
-    public static final int DATA_CONNECTION_GPRS = 1;
-    public static final int DATA_CONNECTION_EDGE = 2;
-    public static final int DATA_CONNECTION_UMTS = 3;
-    public static final int DATA_CONNECTION_CDMA = 4;
-    public static final int DATA_CONNECTION_EVDO_0 = 5;
-    public static final int DATA_CONNECTION_EVDO_A = 6;
-    public static final int DATA_CONNECTION_1xRTT = 7;
-    public static final int DATA_CONNECTION_HSDPA = 8;
-    public static final int DATA_CONNECTION_HSUPA = 9;
-    public static final int DATA_CONNECTION_HSPA = 10;
-    public static final int DATA_CONNECTION_IDEN = 11;
-    public static final int DATA_CONNECTION_EVDO_B = 12;
-    public static final int DATA_CONNECTION_LTE = 13;
-    public static final int DATA_CONNECTION_EHRPD = 14;
-    public static final int DATA_CONNECTION_HSPAP = 15;
-    public static final int DATA_CONNECTION_OTHER = 16;
+    public static final int DATA_CONNECTION_OTHER = TelephonyManager.MAX_NETWORK_TYPE + 1;
 
     static final String[] DATA_CONNECTION_NAMES = {
         "none", "gprs", "edge", "umts", "cdma", "evdo_0", "evdo_A",
         "1xrtt", "hsdpa", "hsupa", "hspa", "iden", "evdo_b", "lte",
-        "ehrpd", "hspap", "other"
+        "ehrpd", "hspap", "gsm", "td_scdma", "iwlan", "lte_ca", "other"
     };
 
     public static final int NUM_DATA_CONNECTION_TYPES = DATA_CONNECTION_OTHER+1;
@@ -2329,8 +2364,7 @@ public abstract class BatteryStats implements Parcelable {
                 SCREEN_BRIGHTNESS_NAMES, SCREEN_BRIGHTNESS_SHORT_NAMES),
     };
 
-    public static final BitDescription[] HISTORY_STATE2_DESCRIPTIONS
-            = new BitDescription[] {
+    public static final BitDescription[] HISTORY_STATE2_DESCRIPTIONS = new BitDescription[] {
         new BitDescription(HistoryItem.STATE2_POWER_SAVE_FLAG, "power_save", "ps"),
         new BitDescription(HistoryItem.STATE2_VIDEO_ON_FLAG, "video", "v"),
         new BitDescription(HistoryItem.STATE2_WIFI_RUNNING_FLAG, "wifi_running", "Ww"),
@@ -2341,6 +2375,7 @@ public abstract class BatteryStats implements Parcelable {
                 new String[] { "off", "light", "full", "???" },
                 new String[] { "off", "light", "full", "???" }),
         new BitDescription(HistoryItem.STATE2_CHARGING_FLAG, "charging", "ch"),
+        new BitDescription(HistoryItem.STATE2_USB_DATA_LINK_FLAG, "usb_data", "Ud"),
         new BitDescription(HistoryItem.STATE2_PHONE_IN_CALL_FLAG, "phone_in_call", "Pcl"),
         new BitDescription(HistoryItem.STATE2_BLUETOOTH_ON_FLAG, "bluetooth", "b"),
         new BitDescription(HistoryItem.STATE2_WIFI_SIGNAL_STRENGTH_MASK,
@@ -2352,9 +2387,11 @@ public abstract class BatteryStats implements Parcelable {
                 WIFI_SUPPL_STATE_NAMES, WIFI_SUPPL_STATE_SHORT_NAMES),
         new BitDescription(HistoryItem.STATE2_CAMERA_FLAG, "camera", "ca"),
         new BitDescription(HistoryItem.STATE2_BLUETOOTH_SCAN_FLAG, "ble_scan", "bles"),
+        new BitDescription(HistoryItem.STATE2_CELLULAR_HIGH_TX_POWER_FLAG,
+                "cellular_high_tx_power", "Chtp"),
         new BitDescription(HistoryItem.STATE2_GPS_SIGNAL_QUALITY_MASK,
             HistoryItem.STATE2_GPS_SIGNAL_QUALITY_SHIFT, "gps_signal_quality", "Gss",
-            new String[] { "poor", "good"}, new String[] { "poor", "good"}),
+            new String[] { "poor", "good"}, new String[] { "poor", "good"})
     };
 
     public static final String[] HISTORY_EVENT_NAMES = new String[] {
@@ -3360,8 +3397,6 @@ public abstract class BatteryStats implements Parcelable {
         for (LongCounter txState : counter.getTxTimeCounters()) {
             totalTxTimeMs += txState.getCountLocked(which);
         }
-        final long sleepTimeMs
-            = totalControllerActivityTimeMs - (idleTimeMs + rxTimeMs + totalTxTimeMs);
 
         if (controllerName.equals(WIFI_CONTROLLER_NAME)) {
             final long scanTimeMs = counter.getScanTimeCounter().getCountLocked(which);
@@ -3375,18 +3410,34 @@ public abstract class BatteryStats implements Parcelable {
             sb.append(formatRatioLocked(scanTimeMs, totalControllerActivityTimeMs));
             sb.append(")");
             pw.println(sb.toString());
+
+            final long sleepTimeMs
+                = totalControllerActivityTimeMs - (idleTimeMs + rxTimeMs + totalTxTimeMs);
+            sb.setLength(0);
+            sb.append(prefix);
+            sb.append("     ");
+            sb.append(controllerName);
+            sb.append(" Sleep time:  ");
+            formatTimeMs(sb, sleepTimeMs);
+            sb.append("(");
+            sb.append(formatRatioLocked(sleepTimeMs, totalControllerActivityTimeMs));
+            sb.append(")");
+            pw.println(sb.toString());
         }
 
-        sb.setLength(0);
-        sb.append(prefix);
-        sb.append("     ");
-        sb.append(controllerName);
-        sb.append(" Sleep time:  ");
-        formatTimeMs(sb, sleepTimeMs);
-        sb.append("(");
-        sb.append(formatRatioLocked(sleepTimeMs, totalControllerActivityTimeMs));
-        sb.append(")");
-        pw.println(sb.toString());
+        if (controllerName.equals(CELLULAR_CONTROLLER_NAME)) {
+            final long sleepTimeMs = counter.getSleepTimeCounter().getCountLocked(which);
+            sb.setLength(0);
+            sb.append(prefix);
+            sb.append("     ");
+            sb.append(controllerName);
+            sb.append(" Sleep time:  ");
+            formatTimeMs(sb, sleepTimeMs);
+            sb.append("(");
+            sb.append(formatRatioLocked(sleepTimeMs, totalControllerActivityTimeMs));
+            sb.append(")");
+            pw.println(sb.toString());
+        }
 
         sb.setLength(0);
         sb.append(prefix);
@@ -4060,6 +4111,12 @@ public abstract class BatteryStats implements Parcelable {
                             types.get(JobParameters.REASON_TIMEOUT, 0),
                             types.get(JobParameters.REASON_DEVICE_IDLE, 0));
                 }
+            }
+
+            // Dump deferred jobs stats
+            u.getDeferredJobsCheckinLineLocked(sb, which);
+            if (sb.length() > 0) {
+                dumpLine(pw, uid, category, JOBS_DEFERRED_DATA, sb.toString());
             }
 
             dumpTimer(pw, uid, category, FLASHLIGHT_DATA, u.getFlashlightTurnedOnTimer(),
@@ -5690,6 +5747,11 @@ public abstract class BatteryStats implements Parcelable {
                 }
             }
 
+            u.getDeferredJobsLineLocked(sb, which);
+            if (sb.length() > 0) {
+                pw.print("    Jobs deferred on launch "); pw.println(sb.toString());
+            }
+
             uidActivity |= printTimer(pw, sb, u.getFlashlightTurnedOnTimer(), rawRealtime, which,
                     prefix, "Flashlight");
             uidActivity |= printTimer(pw, sb, u.getCameraTurnedOnTimer(), rawRealtime, which,
@@ -7077,13 +7139,20 @@ public abstract class BatteryStats implements Parcelable {
 
                 for (int isvc = serviceStats.size() - 1; isvc >= 0; --isvc) {
                     final BatteryStats.Uid.Pkg.Serv ss = serviceStats.valueAt(isvc);
+
+                    final long startTimeMs = roundUsToMs(ss.getStartTime(batteryUptimeUs, which));
+                    final int starts = ss.getStarts(which);
+                    final int launches = ss.getLaunches(which);
+                    if (startTimeMs == 0 && starts == 0 && launches == 0) {
+                        continue;
+                    }
+
                     long sToken = proto.start(UidProto.Package.SERVICES);
 
                     proto.write(UidProto.Package.Service.NAME, serviceStats.keyAt(isvc));
-                    proto.write(UidProto.Package.Service.START_DURATION_MS,
-                            roundUsToMs(ss.getStartTime(batteryUptimeUs, which)));
-                    proto.write(UidProto.Package.Service.START_COUNT, ss.getStarts(which));
-                    proto.write(UidProto.Package.Service.LAUNCH_COUNT, ss.getLaunches(which));
+                    proto.write(UidProto.Package.Service.START_DURATION_MS, startTimeMs);
+                    proto.write(UidProto.Package.Service.START_COUNT, starts);
+                    proto.write(UidProto.Package.Service.LAUNCH_COUNT, launches);
 
                     proto.end(sToken);
                 }
@@ -7534,8 +7603,18 @@ public abstract class BatteryStats implements Parcelable {
 
         // Phone data connection (DATA_CONNECTION_TIME_DATA and DATA_CONNECTION_COUNT_DATA)
         for (int i = 0; i < NUM_DATA_CONNECTION_TYPES; ++i) {
+            // Map OTHER to TelephonyManager.NETWORK_TYPE_UNKNOWN and mark NONE as a boolean.
+            boolean isNone = (i == DATA_CONNECTION_NONE);
+            int telephonyNetworkType = i;
+            if (i == DATA_CONNECTION_OTHER) {
+                telephonyNetworkType = TelephonyManager.NETWORK_TYPE_UNKNOWN;
+            }
             final long pdcToken = proto.start(SystemProto.DATA_CONNECTION);
-            proto.write(SystemProto.DataConnection.NAME, i);
+            if (isNone) {
+                proto.write(SystemProto.DataConnection.IS_NONE, isNone);
+            } else {
+                proto.write(SystemProto.DataConnection.NAME, telephonyNetworkType);
+            }
             dumpTimer(proto, SystemProto.DataConnection.TOTAL, getPhoneDataConnectionTimer(i),
                     rawRealtimeUs, which);
             proto.end(pdcToken);

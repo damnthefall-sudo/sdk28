@@ -36,6 +36,7 @@ import com.android.internal.telephony.CommandException;
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -250,6 +251,16 @@ public class UiccCarrierPrivilegeRules extends Handler {
     }
 
     /**
+     * Returns list of access rules.
+     */
+    public List<UiccAccessRule> getAccessRules() {
+        if (mAccessRules == null) {
+            return Collections.emptyList();
+        }
+        return Collections.unmodifiableList(mAccessRules);
+    }
+
+    /**
      * Returns the status of the carrier privileges for the input certificate and package name.
      *
      * @param signature The signature of the certificate.
@@ -302,7 +313,7 @@ public class UiccCarrierPrivilegeRules extends Handler {
                             | PackageManager.MATCH_DISABLED_UNTIL_USED_COMPONENTS);
             return getCarrierPrivilegeStatus(pInfo);
         } catch (PackageManager.NameNotFoundException ex) {
-            Rlog.e(LOG_TAG, "NameNotFoundException", ex);
+            log("Package " + packageName + " not found for carrier privilege status check");
         }
         return TelephonyManager.CARRIER_PRIVILEGE_STATUS_NO_ACCESS;
     }
@@ -337,7 +348,18 @@ public class UiccCarrierPrivilegeRules extends Handler {
      * @return Access status.
      */
     public int getCarrierPrivilegeStatusForCurrentTransaction(PackageManager packageManager) {
-        String[] packages = packageManager.getPackagesForUid(Binder.getCallingUid());
+        return getCarrierPrivilegeStatusForUid(packageManager, Binder.getCallingUid());
+    }
+
+    /**
+     * Returns the status of the carrier privileges for the caller of the current transaction.
+     *
+     * @param packageManager PackageManager for getting signatures and package names.
+     * @return Access status.
+     */
+    public int getCarrierPrivilegeStatusForUid(
+            PackageManager packageManager, int uid) {
+        String[] packages = packageManager.getPackagesForUid(uid);
 
         for (String pkg : packages) {
             int accessStatus = getCarrierPrivilegeStatus(packageManager, pkg);

@@ -82,6 +82,7 @@ import com.android.internal.os.AtomicFile;
 import com.android.internal.os.BackgroundThread;
 import com.android.internal.util.DumpUtils;
 import com.android.internal.util.FastXmlSerializer;
+import com.android.internal.util.Preconditions;
 import com.android.internal.util.XmlUtils;
 import com.android.server.am.BatteryStatsService;
 import com.android.server.net.NetworkPolicyManagerInternal;
@@ -128,6 +129,7 @@ public class DeviceIdleController extends SystemService
     private Intent mIdleIntent;
     private Intent mLightIdleIntent;
     private AnyMotionDetector mAnyMotionDetector;
+    private final AppStateTracker mAppStateTracker;
     private boolean mLightEnabled;
     private boolean mDeepEnabled;
     private boolean mForceIdle;
@@ -141,6 +143,8 @@ public class DeviceIdleController extends SystemService
     private boolean mHasNetworkLocation;
     private Location mLastGenericLocation;
     private Location mLastGpsLocation;
+    // Current locked state of the screen
+    private boolean mScreenLocked;
 
     /** Device is currently active. */
     private static final int STATE_ACTIVE = 0;
@@ -156,6 +160,7 @@ public class DeviceIdleController extends SystemService
     private static final int STATE_IDLE = 5;
     /** Device is in the idle state, but temporarily out of idle to do regular maintenance. */
     private static final int STATE_IDLE_MAINTENANCE = 6;
+
     private static String stateToString(int state) {
         switch (state) {
             case STATE_ACTIVE: return "ACTIVE";
@@ -547,6 +552,11 @@ public class DeviceIdleController extends SystemService
                 "sms_temp_app_whitelist_duration";
         private static final String KEY_NOTIFICATION_WHITELIST_DURATION =
                 "notification_whitelist_duration";
+        /**
+         * Whether to wait for the user to unlock the device before causing screen-on to
+         * exit doze. Default = true
+         */
+        private static final String KEY_WAIT_FOR_UNLOCK = "wait_for_unlock";
 
         /**
          * This is the time, after becoming inactive, that we go in to the first
@@ -765,6 +775,8 @@ public class DeviceIdleController extends SystemService
          */
         public long NOTIFICATION_WHITELIST_DURATION;
 
+        public boolean WAIT_FOR_UNLOCK;
+
         private final ContentResolver mResolver;
         private final boolean mSmallBatteryDevice;
         private final KeyValueListParser mParser = new KeyValueListParser(',');
@@ -855,6 +867,7 @@ public class DeviceIdleController extends SystemService
                         KEY_SMS_TEMP_APP_WHITELIST_DURATION, 20 * 1000L);
                 NOTIFICATION_WHITELIST_DURATION = mParser.getDurationMillis(
                         KEY_NOTIFICATION_WHITELIST_DURATION, 30 * 1000L);
+                WAIT_FOR_UNLOCK = mParser.getBoolean(KEY_WAIT_FOR_UNLOCK, false);
             }
         }
 
@@ -962,6 +975,9 @@ public class DeviceIdleController extends SystemService
             pw.print("    "); pw.print(KEY_NOTIFICATION_WHITELIST_DURATION); pw.print("=");
             TimeUtils.formatDuration(NOTIFICATION_WHITELIST_DURATION, pw);
             pw.println();
+
+            pw.print("    "); pw.print(KEY_WAIT_FOR_UNLOCK); pw.print("=");
+            pw.println(WAIT_FOR_UNLOCK);
         }
     }
 
@@ -1340,10 +1356,25 @@ public class DeviceIdleController extends SystemService
         }
     }
 
+    private ActivityManagerInternal.ScreenObserver mScreenObserver =
+            new ActivityManagerInternal.ScreenObserver() {
+                @Override
+                public void onAwakeStateChanged(boolean isAwake) { }
+
+                @Override
+                public void onKeyguardStateChanged(boolean isShowing) {
+                    synchronized (DeviceIdleController.this) {
+                        DeviceIdleController.this.keyguardShowingLocked(isShowing);
+                    }
+                }
+            };
+
     public DeviceIdleController(Context context) {
         super(context);
         mConfigFile = new AtomicFile(new File(getSystemDir(), "deviceidle.xml"));
         mHandler = new MyHandler(BackgroundThread.getHandler().getLooper());
+        mAppStateTracker = new AppStateTracker(context, FgThread.get().getLooper());
+        LocalServices.addService(AppStateTracker.class, mAppStateTracker);
     }
 
     boolean isAppOnWhitelistInternal(int appid) {
@@ -1406,6 +1437,7 @@ public class DeviceIdleController extends SystemService
 
             mNetworkConnected = true;
             mScreenOn = true;
+            mScreenLocked = false;
             // Start out assuming we are charging.  If we aren't, we will at least get
             // a battery update the next time the level drops.
             mCharging = true;
@@ -1473,6 +1505,8 @@ public class DeviceIdleController extends SystemService
                         (PowerManager) getContext().getSystemService(Context.POWER_SERVICE),
                         mHandler, mSensorManager, this, angleThreshold);
 
+                mAppStateTracker.onSystemServicesReady();
+
                 mIdleIntent = new Intent(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED);
                 mIdleIntent.addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY
                         | Intent.FLAG_RECEIVER_FOREGROUND);
@@ -1500,6 +1534,8 @@ public class DeviceIdleController extends SystemService
 
                 mLocalActivityManager.setDeviceIdleWhitelist(mPowerSaveWhitelistAllAppIdArray);
                 mLocalPowerManager.setDeviceIdleWhitelist(mPowerSaveWhitelistAllAppIdArray);
+
+                mLocalActivityManager.registerScreenObserver(mScreenObserver);
 
                 passWhiteListToForceAppStandbyTrackerLocked();
                 updateInteractivityLocked();
@@ -1976,7 +2012,7 @@ public class DeviceIdleController extends SystemService
             }
         } else if (screenOn) {
             mScreenOn = true;
-            if (!mForceIdle) {
+            if (!mForceIdle && (!mScreenLocked || !mConstants.WAIT_FOR_UNLOCK)) {
                 becomeActiveLocked("screen", Process.myUid());
             }
         }
@@ -1993,6 +2029,16 @@ public class DeviceIdleController extends SystemService
             mCharging = charging;
             if (!mForceIdle) {
                 becomeActiveLocked("charging", Process.myUid());
+            }
+        }
+    }
+
+    void keyguardShowingLocked(boolean showing) {
+        if (DEBUG) Slog.i(TAG, "keyguardShowing=" + showing);
+        if (mScreenLocked != showing) {
+            mScreenLocked = showing;
+            if (mScreenOn && !mForceIdle && !mScreenLocked) {
+                becomeActiveLocked("unlocked", Process.myUid());
             }
         }
     }
@@ -2575,7 +2621,7 @@ public class DeviceIdleController extends SystemService
     }
 
     private void passWhiteListToForceAppStandbyTrackerLocked() {
-        ForceAppStandbyTracker.getInstance(getContext()).setPowerSaveWhitelistAppIds(
+        mAppStateTracker.setPowerSaveWhitelistAppIds(
                 mPowerSaveWhitelistExceptIdleAppIdArray,
                 mTempWhitelistAppIdArray);
     }
@@ -3308,6 +3354,7 @@ public class DeviceIdleController extends SystemService
             pw.print("  mForceIdle="); pw.println(mForceIdle);
             pw.print("  mMotionSensor="); pw.println(mMotionSensor);
             pw.print("  mScreenOn="); pw.println(mScreenOn);
+            pw.print("  mScreenLocked="); pw.println(mScreenLocked);
             pw.print("  mNetworkConnected="); pw.println(mNetworkConnected);
             pw.print("  mCharging="); pw.println(mCharging);
             pw.print("  mMotionActive="); pw.println(mMotionListener.active);

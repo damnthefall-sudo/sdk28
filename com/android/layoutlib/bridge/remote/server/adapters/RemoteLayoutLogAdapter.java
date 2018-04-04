@@ -39,9 +39,10 @@ public class RemoteLayoutLogAdapter extends LayoutLog {
     }
 
     @Override
-    public void fidelityWarning(String tag, String message, Throwable throwable, Object data) {
+    public void fidelityWarning(String tag, String message, Throwable throwable, Object viewCookie,
+            Object data) {
         try {
-            mLog.fidelityWarning(tag, message, throwable, null);
+            mLog.fidelityWarning(tag, message, throwable, viewCookie, data);
         } catch (RemoteException e) {
             throw new RuntimeException(e);
         }

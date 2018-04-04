@@ -44,10 +44,11 @@ public interface RemoteLayoutLog extends Remote {
      * @param tag a tag describing the type of the warning
      * @param message the message of the warning
      * @param throwable an optional Throwable that triggered the warning
+     * @param viewCookie optional cookie of the view associated to this error
      * @param data an optional data bundle that the client can use to improve the warning display.
      */
-    void fidelityWarning(String tag, String message, Throwable throwable, Serializable data)
-            throws RemoteException;
+    void fidelityWarning(String tag, String message, Throwable throwable, Object viewCookie,
+            Object data) throws RemoteException;
 
     /**
      * Logs an error.

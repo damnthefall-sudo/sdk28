@@ -29,6 +29,7 @@ import static android.view.WindowManager.LayoutParams.TYPE_VOLUME_OVERLAY;
 import android.Manifest;
 import android.animation.LayoutTransition;
 import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.app.ActivityManager;
 import android.app.ActivityThread;
 import android.app.ResourcesManager;
@@ -71,6 +72,7 @@ import android.os.Trace;
 import android.util.AndroidRuntimeException;
 import android.util.DisplayMetrics;
 import android.util.Log;
+import android.util.LongArray;
 import android.util.MergedConfiguration;
 import android.util.Slog;
 import android.util.SparseArray;
@@ -89,13 +91,12 @@ import android.view.accessibility.AccessibilityManager.HighTextContrastChangeLis
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction;
 import android.view.accessibility.AccessibilityNodeProvider;
-import android.view.accessibility.AccessibilityViewHierarchyState;
 import android.view.accessibility.AccessibilityWindowInfo;
 import android.view.accessibility.IAccessibilityInteractionConnection;
 import android.view.accessibility.IAccessibilityInteractionConnectionCallback;
-import android.view.accessibility.ThrottlingAccessibilityEventSender;
 import android.view.animation.AccelerateDecelerateInterpolator;
 import android.view.animation.Interpolator;
+import android.view.autofill.AutofillManager;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Scroller;
 
@@ -115,6 +116,9 @@ import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.Queue;
 import java.util.concurrent.CountDownLatch;
 
 /**
@@ -376,7 +380,7 @@ public final class ViewRootImpl implements ViewParent,
     InputStage mFirstPostImeInputStage;
     InputStage mSyntheticInputStage;
 
-    private final KeyFallbackManager mKeyFallbackManager = new KeyFallbackManager();
+    private final UnhandledKeyManager mUnhandledKeyManager = new UnhandledKeyManager();
 
     boolean mWindowAttributesChanged = false;
     int mWindowAttributesChangesFlag = 0;
@@ -461,6 +465,10 @@ public final class ViewRootImpl implements ViewParent,
             new AccessibilityInteractionConnectionManager();
     final HighContrastTextManager mHighContrastTextManager;
 
+    SendWindowContentChangedAccessibilityEvent mSendWindowContentChangedAccessibilityEvent;
+
+    HashSet<View> mTempHashSet;
+
     private final int mDensity;
     private final int mNoncompatDensity;
 
@@ -474,8 +482,6 @@ public final class ViewRootImpl implements ViewParent,
     private boolean mRemoved;
 
     private boolean mNeedsRendererSetup;
-
-    protected AccessibilityViewHierarchyState mAccessibilityState;
 
     /**
      * Consistency verifier for debugging purposes.
@@ -748,7 +754,7 @@ public final class ViewRootImpl implements ViewParent,
                     mAttachInfo.mRecomputeGlobalAttributes = true;
                     collectViewAttributes();
                     res = mWindowSession.addToDisplay(mWindow, mSeq, mWindowAttributes,
-                            getHostVisibility(), mDisplay.getDisplayId(),
+                            getHostVisibility(), mDisplay.getDisplayId(), mWinFrame,
                             mAttachInfo.mContentInsets, mAttachInfo.mStableInsets,
                             mAttachInfo.mOutsets, mAttachInfo.mDisplayCutout, mInputChannel);
                 } catch (RemoteException e) {
@@ -893,6 +899,26 @@ public final class ViewRootImpl implements ViewParent,
 
     public CharSequence getTitle() {
         return mWindowAttributes.getTitle();
+    }
+
+    /**
+     * @return the width of the root view. Note that this will return {@code -1} until the first
+     *         layout traversal, when the width is set.
+     *
+     * @hide
+     */
+    public int getWidth() {
+        return mWidth;
+    }
+
+    /**
+     * @return the height of the root view. Note that this will return {@code -1} until the first
+     *         layout traversal, when the height is set.
+     *
+     * @hide
+     */
+    public int getHeight() {
+        return mHeight;
     }
 
     void destroyHardwareResources() {
@@ -1686,8 +1712,8 @@ public final class ViewRootImpl implements ViewParent,
                 desiredWindowWidth = size.x;
                 desiredWindowHeight = size.y;
             } else {
-                desiredWindowWidth = dipToPx(config.screenWidthDp);
-                desiredWindowHeight = dipToPx(config.screenHeightDp);
+                desiredWindowWidth = mWinFrame.width();
+                desiredWindowHeight = mWinFrame.height();
             }
 
             // We used to use the following condition to choose 32 bits drawing caches:
@@ -1974,6 +2000,7 @@ public final class ViewRootImpl implements ViewParent,
                 final boolean outsetsChanged = !mPendingOutsets.equals(mAttachInfo.mOutsets);
                 final boolean surfaceSizeChanged = (relayoutResult
                         & WindowManagerGlobal.RELAYOUT_RES_SURFACE_RESIZED) != 0;
+                surfaceChanged |= surfaceSizeChanged;
                 final boolean alwaysConsumeNavBarChanged =
                         mPendingAlwaysConsumeNavBar != mAttachInfo.mAlwaysConsumeNavBar;
                 if (contentInsetsChanged) {
@@ -2547,6 +2574,10 @@ public final class ViewRootImpl implements ViewParent,
                         ~WindowManager.LayoutParams
                                 .SOFT_INPUT_IS_FORWARD_NAVIGATION;
                 mHasHadWindowFocus = true;
+
+                // Refocusing a window that has a focused view should fire a
+                // focus event for the view since the global focused view changed.
+                fireAccessibilityFocusEventIfHasFocusedNode();
             } else {
                 if (mPointerCapture) {
                     handlePointerCaptureChanged(false);
@@ -2554,6 +2585,86 @@ public final class ViewRootImpl implements ViewParent,
             }
         }
         mFirstInputStage.onWindowFocusChanged(hasWindowFocus);
+    }
+
+    private void fireAccessibilityFocusEventIfHasFocusedNode() {
+        if (!AccessibilityManager.getInstance(mContext).isEnabled()) {
+            return;
+        }
+        final View focusedView = mView.findFocus();
+        if (focusedView == null) {
+            return;
+        }
+        final AccessibilityNodeProvider provider = focusedView.getAccessibilityNodeProvider();
+        if (provider == null) {
+            focusedView.sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_FOCUSED);
+        } else {
+            final AccessibilityNodeInfo focusedNode = findFocusedVirtualNode(provider);
+            if (focusedNode != null) {
+                final int virtualId = AccessibilityNodeInfo.getVirtualDescendantId(
+                        focusedNode.getSourceNodeId());
+                // This is a best effort since clearing and setting the focus via the
+                // provider APIs could have side effects. We don't have a provider API
+                // similar to that on View to ask a given event to be fired.
+                final AccessibilityEvent event = AccessibilityEvent.obtain(
+                        AccessibilityEvent.TYPE_VIEW_FOCUSED);
+                event.setSource(focusedView, virtualId);
+                event.setPackageName(focusedNode.getPackageName());
+                event.setChecked(focusedNode.isChecked());
+                event.setContentDescription(focusedNode.getContentDescription());
+                event.setPassword(focusedNode.isPassword());
+                event.getText().add(focusedNode.getText());
+                event.setEnabled(focusedNode.isEnabled());
+                focusedView.getParent().requestSendAccessibilityEvent(focusedView, event);
+                focusedNode.recycle();
+            }
+        }
+    }
+
+    private AccessibilityNodeInfo findFocusedVirtualNode(AccessibilityNodeProvider provider) {
+        AccessibilityNodeInfo focusedNode = provider.findFocus(
+                AccessibilityNodeInfo.FOCUS_INPUT);
+        if (focusedNode != null) {
+            return focusedNode;
+        }
+
+        if (!mContext.isAutofillCompatibilityEnabled()) {
+            return null;
+        }
+
+        // Unfortunately some provider implementations don't properly
+        // implement AccessibilityNodeProvider#findFocus
+        AccessibilityNodeInfo current = provider.createAccessibilityNodeInfo(
+                AccessibilityNodeProvider.HOST_VIEW_ID);
+        if (current.isFocused()) {
+            return current;
+        }
+
+        final Queue<AccessibilityNodeInfo> fringe = new LinkedList<>();
+        fringe.offer(current);
+
+        while (!fringe.isEmpty()) {
+            current = fringe.poll();
+            final LongArray childNodeIds = current.getChildNodeIds();
+            if (childNodeIds== null || childNodeIds.size() <= 0) {
+                continue;
+            }
+            final int childCount = childNodeIds.size();
+            for (int i = 0; i < childCount; i++) {
+                final int virtualId = AccessibilityNodeInfo.getVirtualDescendantId(
+                        childNodeIds.get(i));
+                final AccessibilityNodeInfo child = provider.createAccessibilityNodeInfo(virtualId);
+                if (child != null) {
+                    if (child.isFocused()) {
+                        return child;
+                    }
+                    fringe.offer(child);
+                }
+            }
+            current.recycle();
+        }
+
+        return null;
     }
 
     private void handleOutOfResourcesException(Surface.OutOfResourcesException e) {
@@ -3816,6 +3927,7 @@ public final class ViewRootImpl implements ViewParent,
     private final static int MSG_DISPATCH_APP_VISIBILITY = 8;
     private final static int MSG_DISPATCH_GET_NEW_SURFACE = 9;
     private final static int MSG_DISPATCH_KEY_FROM_IME = 11;
+    private final static int MSG_DISPATCH_KEY_FROM_AUTOFILL = 12;
     private final static int MSG_CHECK_FOCUS = 13;
     private final static int MSG_CLOSE_SYSTEM_DIALOGS = 14;
     private final static int MSG_DISPATCH_DRAG_EVENT = 15;
@@ -3857,6 +3969,8 @@ public final class ViewRootImpl implements ViewParent,
                     return "MSG_DISPATCH_GET_NEW_SURFACE";
                 case MSG_DISPATCH_KEY_FROM_IME:
                     return "MSG_DISPATCH_KEY_FROM_IME";
+                case MSG_DISPATCH_KEY_FROM_AUTOFILL:
+                    return "MSG_DISPATCH_KEY_FROM_AUTOFILL";
                 case MSG_CHECK_FOCUS:
                     return "MSG_CHECK_FOCUS";
                 case MSG_CLOSE_SYSTEM_DIALOGS:
@@ -4033,6 +4147,13 @@ public final class ViewRootImpl implements ViewParent,
                                 event.getFlags() & ~KeyEvent.FLAG_FROM_SYSTEM);
                     }
                     enqueueInputEvent(event, null, QueuedInputEvent.FLAG_DELIVER_POST_IME, true);
+                } break;
+                case MSG_DISPATCH_KEY_FROM_AUTOFILL: {
+                    if (LOCAL_LOGV) {
+                        Log.v(TAG, "Dispatching key " + msg.obj + " from Autofill to " + mView);
+                    }
+                    KeyEvent event = (KeyEvent) msg.obj;
+                    enqueueInputEvent(event, null, 0, true);
                 } break;
                 case MSG_CHECK_FOCUS: {
                     InputMethodManager imm = InputMethodManager.peekInstance();
@@ -4324,7 +4445,8 @@ public final class ViewRootImpl implements ViewParent,
                 Slog.w(mTag, "Dropping event due to root view being removed: " + q.mEvent);
                 return true;
             } else if ((!mAttachInfo.mHasWindowFocus
-                    && !q.mEvent.isFromSource(InputDevice.SOURCE_CLASS_POINTER)) || mStopped
+                    && !q.mEvent.isFromSource(InputDevice.SOURCE_CLASS_POINTER)
+                    && !isAutofillUiShowing()) || mStopped
                     || (mIsAmbientMode && !q.mEvent.isFromSource(InputDevice.SOURCE_CLASS_BUTTON))
                     || (mPausedForTransition && !isBack(q.mEvent))) {
                 // This is a focus event and the window doesn't currently have input focus or
@@ -4659,6 +4781,14 @@ public final class ViewRootImpl implements ViewParent,
                 ensureTouchMode(event.isFromSource(InputDevice.SOURCE_TOUCHSCREEN));
             }
 
+            if (action == MotionEvent.ACTION_DOWN) {
+                // Upon motion event within app window, close autofill ui.
+                AutofillManager afm = getAutofillManager();
+                if (afm != null) {
+                    afm.requestHideFillUi();
+                }
+            }
+
             if (action == MotionEvent.ACTION_DOWN && mAttachInfo.mTooltipHost != null) {
                 mAttachInfo.mTooltipHost.hideTooltip();
             }
@@ -4845,10 +4975,10 @@ public final class ViewRootImpl implements ViewParent,
         private int processKeyEvent(QueuedInputEvent q) {
             final KeyEvent event = (KeyEvent)q.mEvent;
 
-            mKeyFallbackManager.mDispatched = false;
+            mUnhandledKeyManager.mDispatched = false;
 
-            if (mKeyFallbackManager.hasFocus()
-                    && mKeyFallbackManager.dispatchUnique(mView, event)) {
+            if (mUnhandledKeyManager.hasFocus()
+                    && mUnhandledKeyManager.dispatchUnique(mView, event)) {
                 return FINISH_HANDLED;
             }
 
@@ -4861,7 +4991,7 @@ public final class ViewRootImpl implements ViewParent,
                 return FINISH_NOT_HANDLED;
             }
 
-            if (mKeyFallbackManager.dispatchUnique(mView, event)) {
+            if (mUnhandledKeyManager.dispatchUnique(mView, event)) {
                 return FINISH_HANDLED;
             }
 
@@ -6297,6 +6427,28 @@ public final class ViewRootImpl implements ViewParent,
         return mAudioManager;
     }
 
+    private @Nullable AutofillManager getAutofillManager() {
+        if (mView instanceof ViewGroup) {
+            ViewGroup decorView = (ViewGroup) mView;
+            if (decorView.getChildCount() > 0) {
+                // We cannot use decorView's Context for querying AutofillManager: DecorView's
+                // context is based on Application Context, it would allocate a different
+                // AutofillManager instance.
+                return decorView.getChildAt(0).getContext()
+                        .getSystemService(AutofillManager.class);
+            }
+        }
+        return null;
+    }
+
+    private boolean isAutofillUiShowing() {
+        AutofillManager afm = getAutofillManager();
+        if (afm == null) {
+            return false;
+        }
+        return afm.isAutofillUiShowing();
+    }
+
     public AccessibilityInteractionController getAccessibilityInteractionController() {
         if (mView == null) {
             throw new IllegalStateException("getAccessibilityInteractionController"
@@ -6318,18 +6470,24 @@ public final class ViewRootImpl implements ViewParent,
             params.backup();
             mTranslator.translateWindowLayout(params);
         }
+
         if (params != null) {
             if (DBG) Log.d(mTag, "WindowLayout in layoutWindow:" + params);
-        }
 
-        if (params != null && mOrigWindowType != params.type) {
-            // For compatibility with old apps, don't crash here.
-            if (mTargetSdkVersion < Build.VERSION_CODES.ICE_CREAM_SANDWICH) {
-                Slog.w(mTag, "Window type can not be changed after "
-                        + "the window is added; ignoring change of " + mView);
-                params.type = mOrigWindowType;
+            if (mOrigWindowType != params.type) {
+                // For compatibility with old apps, don't crash here.
+                if (mTargetSdkVersion < Build.VERSION_CODES.ICE_CREAM_SANDWICH) {
+                    Slog.w(mTag, "Window type can not be changed after "
+                            + "the window is added; ignoring change of " + mView);
+                    params.type = mOrigWindowType;
+                }
+            }
+
+            if (mSurface.isValid()) {
+                params.frameNumber = mSurface.getNextFrameNumber();
             }
         }
+
         int relayoutResult = mWindowSession.relayout(
                 mWindow, mSeq, params,
                 (int) (mView.getMeasuredWidth() * appScale + 0.5f),
@@ -7153,6 +7311,12 @@ public final class ViewRootImpl implements ViewParent,
         mHandler.sendMessage(msg);
     }
 
+    public void dispatchKeyFromAutofill(KeyEvent event) {
+        Message msg = mHandler.obtainMessage(MSG_DISPATCH_KEY_FROM_AUTOFILL, event);
+        msg.setAsynchronous(true);
+        mHandler.sendMessage(msg);
+    }
+
     /**
      * Reinject unhandled {@link InputEvent}s in order to synthesize fallbacks events.
      *
@@ -7258,9 +7422,11 @@ public final class ViewRootImpl implements ViewParent,
      * {@link ViewConfiguration#getSendRecurringAccessibilityEventsInterval()}.
      */
     private void postSendWindowContentChangedCallback(View source, int changeType) {
-        getAccessibilityState()
-                .getSendWindowContentChangedAccessibilityEvent()
-                .runOrPost(source, changeType);
+        if (mSendWindowContentChangedAccessibilityEvent == null) {
+            mSendWindowContentChangedAccessibilityEvent =
+                new SendWindowContentChangedAccessibilityEvent();
+        }
+        mSendWindowContentChangedAccessibilityEvent.runOrPost(source, changeType);
     }
 
     /**
@@ -7268,18 +7434,9 @@ public final class ViewRootImpl implements ViewParent,
      * {@link AccessibilityEvent#TYPE_WINDOW_CONTENT_CHANGED} event.
      */
     private void removeSendWindowContentChangedCallback() {
-        if (mAccessibilityState != null
-                && mAccessibilityState.isWindowContentChangedEventSenderInitialized()) {
-            ThrottlingAccessibilityEventSender.cancelIfPending(
-                    mAccessibilityState.getSendWindowContentChangedAccessibilityEvent());
+        if (mSendWindowContentChangedAccessibilityEvent != null) {
+            mHandler.removeCallbacks(mSendWindowContentChangedAccessibilityEvent);
         }
-    }
-
-    AccessibilityViewHierarchyState getAccessibilityState() {
-        if (mAccessibilityState == null) {
-            mAccessibilityState = new AccessibilityViewHierarchyState();
-        }
-        return mAccessibilityState;
     }
 
     @Override
@@ -7317,8 +7474,12 @@ public final class ViewRootImpl implements ViewParent,
             return false;
         }
 
-        // Send any pending event to prevent reordering
-        flushPendingAccessibilityEvents();
+        // Immediately flush pending content changed event (if any) to preserve event order
+        if (event.getEventType() != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+                && mSendWindowContentChangedAccessibilityEvent != null
+                && mSendWindowContentChangedAccessibilityEvent.mSource != null) {
+            mSendWindowContentChangedAccessibilityEvent.removeCallbacksAndRun();
+        }
 
         // Intercept accessibility focus events fired by virtual nodes to keep
         // track of accessibility focus position in such nodes.
@@ -7360,19 +7521,6 @@ public final class ViewRootImpl implements ViewParent,
         }
         mAccessibilityManager.sendAccessibilityEvent(event);
         return true;
-    }
-
-    /** @hide */
-    public void flushPendingAccessibilityEvents() {
-        if (mAccessibilityState != null) {
-            if (mAccessibilityState.isScrollEventSenderInitialized()) {
-                mAccessibilityState.getSendViewScrolledAccessibilityEvent().sendNowIfPending();
-            }
-            if (mAccessibilityState.isWindowContentChangedEventSenderInitialized()) {
-                mAccessibilityState.getSendWindowContentChangedAccessibilityEvent()
-                        .sendNowIfPending();
-            }
-        }
     }
 
     /**
@@ -7509,6 +7657,39 @@ public final class ViewRootImpl implements ViewParent,
         return View.TEXT_ALIGNMENT_RESOLVED_DEFAULT;
     }
 
+    private View getCommonPredecessor(View first, View second) {
+        if (mTempHashSet == null) {
+            mTempHashSet = new HashSet<View>();
+        }
+        HashSet<View> seen = mTempHashSet;
+        seen.clear();
+        View firstCurrent = first;
+        while (firstCurrent != null) {
+            seen.add(firstCurrent);
+            ViewParent firstCurrentParent = firstCurrent.mParent;
+            if (firstCurrentParent instanceof View) {
+                firstCurrent = (View) firstCurrentParent;
+            } else {
+                firstCurrent = null;
+            }
+        }
+        View secondCurrent = second;
+        while (secondCurrent != null) {
+            if (seen.contains(secondCurrent)) {
+                seen.clear();
+                return secondCurrent;
+            }
+            ViewParent secondCurrentParent = secondCurrent.mParent;
+            if (secondCurrentParent instanceof View) {
+                secondCurrent = (View) secondCurrentParent;
+            } else {
+                secondCurrent = null;
+            }
+        }
+        seen.clear();
+        return null;
+    }
+
     void checkThread() {
         if (mThread != Thread.currentThread()) {
             throw new CalledFromWrongThreadException(
@@ -7617,7 +7798,7 @@ public final class ViewRootImpl implements ViewParent,
      * @return {@code true} if the event was handled, {@code false} otherwise.
      */
     public boolean dispatchKeyFallbackEvent(KeyEvent event) {
-        return mKeyFallbackManager.dispatch(mView, event);
+        return mUnhandledKeyManager.dispatch(mView, event);
     }
 
     class TakenSurfaceHolder extends BaseSurfaceHolder {
@@ -8119,18 +8300,91 @@ public final class ViewRootImpl implements ViewParent,
         }
     }
 
-    private static class KeyFallbackManager {
+    private class SendWindowContentChangedAccessibilityEvent implements Runnable {
+        private int mChangeTypes = 0;
 
-        // This is used to ensure that key-fallback events are only dispatched once. We attempt
+        public View mSource;
+        public long mLastEventTimeMillis;
+
+        @Override
+        public void run() {
+            // Protect against re-entrant code and attempt to do the right thing in the case that
+            // we're multithreaded.
+            View source = mSource;
+            mSource = null;
+            if (source == null) {
+                Log.e(TAG, "Accessibility content change has no source");
+                return;
+            }
+            // The accessibility may be turned off while we were waiting so check again.
+            if (AccessibilityManager.getInstance(mContext).isEnabled()) {
+                mLastEventTimeMillis = SystemClock.uptimeMillis();
+                AccessibilityEvent event = AccessibilityEvent.obtain();
+                event.setEventType(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
+                event.setContentChangeTypes(mChangeTypes);
+                source.sendAccessibilityEventUnchecked(event);
+            } else {
+                mLastEventTimeMillis = 0;
+            }
+            // In any case reset to initial state.
+            source.resetSubtreeAccessibilityStateChanged();
+            mChangeTypes = 0;
+        }
+
+        public void runOrPost(View source, int changeType) {
+            if (mHandler.getLooper() != Looper.myLooper()) {
+                CalledFromWrongThreadException e = new CalledFromWrongThreadException("Only the "
+                        + "original thread that created a view hierarchy can touch its views.");
+                // TODO: Throw the exception
+                Log.e(TAG, "Accessibility content change on non-UI thread. Future Android "
+                        + "versions will throw an exception.", e);
+                // Attempt to recover. This code does not eliminate the thread safety issue, but
+                // it should force any issues to happen near the above log.
+                mHandler.removeCallbacks(this);
+                if (mSource != null) {
+                    // Dispatch whatever was pending. It's still possible that the runnable started
+                    // just before we removed the callbacks, and bad things will happen, but at
+                    // least they should happen very close to the logged error.
+                    run();
+                }
+            }
+            if (mSource != null) {
+                // If there is no common predecessor, then mSource points to
+                // a removed view, hence in this case always prefer the source.
+                View predecessor = getCommonPredecessor(mSource, source);
+                mSource = (predecessor != null) ? predecessor : source;
+                mChangeTypes |= changeType;
+                return;
+            }
+            mSource = source;
+            mChangeTypes = changeType;
+            final long timeSinceLastMillis = SystemClock.uptimeMillis() - mLastEventTimeMillis;
+            final long minEventIntevalMillis =
+                    ViewConfiguration.getSendRecurringAccessibilityEventsInterval();
+            if (timeSinceLastMillis >= minEventIntevalMillis) {
+                removeCallbacksAndRun();
+            } else {
+                mHandler.postDelayed(this, minEventIntevalMillis - timeSinceLastMillis);
+            }
+        }
+
+        public void removeCallbacksAndRun() {
+            mHandler.removeCallbacks(this);
+            run();
+        }
+    }
+
+    private static class UnhandledKeyManager {
+
+        // This is used to ensure that unhandled events are only dispatched once. We attempt
         // to dispatch more than once in order to achieve a certain order. Specifically, if we
-        // are in an Activity or Dialog (and have a Window.Callback), the keyfallback events should
+        // are in an Activity or Dialog (and have a Window.Callback), the unhandled events should
         // be dispatched after the view hierarchy, but before the Activity. However, if we aren't
-        // in an activity, we still want key fallbacks to be dispatched.
+        // in an activity, we still want unhandled keys to be dispatched.
         boolean mDispatched = false;
 
         SparseBooleanArray mCapturedKeys = new SparseBooleanArray();
-        WeakReference<View> mFallbackReceiver = null;
-        int mVisitCount = 0;
+        WeakReference<View> mCurrentReceiver = null;
 
         private void updateCaptureState(KeyEvent event) {
             if (event.getAction() == KeyEvent.ACTION_DOWN) {
@@ -8147,56 +8401,28 @@ public final class ViewRootImpl implements ViewParent,
 
             updateCaptureState(event);
 
-            if (mFallbackReceiver != null) {
-                View target = mFallbackReceiver.get();
+            if (mCurrentReceiver != null) {
+                View target = mCurrentReceiver.get();
                 if (mCapturedKeys.size() == 0) {
-                    mFallbackReceiver = null;
+                    mCurrentReceiver = null;
                 }
                 if (target != null && target.isAttachedToWindow()) {
-                    return target.onKeyFallback(event);
+                    target.onUnhandledKeyEvent(event);
                 }
                 // consume anyways so that we don't feed uncaptured key events to other views
                 return true;
             }
 
-            boolean result = dispatchInZOrder(root, event);
+            View consumer = root.dispatchUnhandledKeyEvent(event);
+            if (consumer != null) {
+                mCurrentReceiver = new WeakReference<>(consumer);
+            }
             Trace.traceEnd(Trace.TRACE_TAG_VIEW);
-            return result;
-        }
-
-        private boolean dispatchInZOrder(View view, KeyEvent evt) {
-            if (view instanceof ViewGroup) {
-                ViewGroup vg = (ViewGroup) view;
-                ArrayList<View> orderedViews = vg.buildOrderedChildList();
-                if (orderedViews != null) {
-                    try {
-                        for (int i = orderedViews.size() - 1; i >= 0; --i) {
-                            View v = orderedViews.get(i);
-                            if (dispatchInZOrder(v, evt)) {
-                                return true;
-                            }
-                        }
-                    } finally {
-                        orderedViews.clear();
-                    }
-                } else {
-                    for (int i = vg.getChildCount() - 1; i >= 0; --i) {
-                        View v = vg.getChildAt(i);
-                        if (dispatchInZOrder(v, evt)) {
-                            return true;
-                        }
-                    }
-                }
-            }
-            if (view.onKeyFallback(evt)) {
-                mFallbackReceiver = new WeakReference<>(view);
-                return true;
-            }
-            return false;
+            return consumer != null;
         }
 
         boolean hasFocus() {
-            return mFallbackReceiver != null;
+            return mCurrentReceiver != null;
         }
 
         boolean dispatchUnique(View root, KeyEvent event) {

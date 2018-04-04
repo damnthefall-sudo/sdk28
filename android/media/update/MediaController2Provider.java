@@ -17,11 +17,11 @@
 package android.media.update;
 
 import android.app.PendingIntent;
+import android.media.AudioAttributes;
 import android.media.MediaController2.PlaybackInfo;
 import android.media.MediaItem2;
-import android.media.MediaSession2.Command;
-import android.media.MediaSession2.PlaylistParam;
-import android.media.PlaybackState2;
+import android.media.MediaMetadata2;
+import android.media.SessionCommand2;
 import android.media.Rating2;
 import android.media.SessionToken2;
 import android.net.Uri;
@@ -34,12 +34,13 @@ import java.util.List;
  * @hide
  */
 public interface MediaController2Provider extends TransportControlProvider {
+    void initialize();
+
     void close_impl();
     SessionToken2 getSessionToken_impl();
     boolean isConnected_impl();
 
     PendingIntent getSessionActivity_impl();
-    int getRatingType_impl();
 
     void setVolumeTo_impl(int value, int flags);
     void adjustVolume_impl(int direction, int flags);
@@ -47,18 +48,35 @@ public interface MediaController2Provider extends TransportControlProvider {
 
     void prepareFromUri_impl(Uri uri, Bundle extras);
     void prepareFromSearch_impl(String query, Bundle extras);
-    void prepareMediaId_impl(String mediaId, Bundle extras);
+    void prepareFromMediaId_impl(String mediaId, Bundle extras);
     void playFromSearch_impl(String query, Bundle extras);
-    void playFromUri_impl(String uri, Bundle extras);
+    void playFromUri_impl(Uri uri, Bundle extras);
     void playFromMediaId_impl(String mediaId, Bundle extras);
+    void fastForward_impl();
+    void rewind_impl();
 
-    void setRating_impl(Rating2 rating);
-    void sendCustomCommand_impl(Command command, Bundle args, ResultReceiver cb);
+    void setRating_impl(String mediaId, Rating2 rating);
+    void sendCustomCommand_impl(SessionCommand2 command, Bundle args, ResultReceiver cb);
     List<MediaItem2> getPlaylist_impl();
+    void setPlaylist_impl(List<MediaItem2> list, MediaMetadata2 metadata);
+    MediaMetadata2 getPlaylistMetadata_impl();
+    void updatePlaylistMetadata_impl(MediaMetadata2 metadata);
 
-    void removePlaylistItem_impl(MediaItem2 index);
     void addPlaylistItem_impl(int index, MediaItem2 item);
+    void replacePlaylistItem_impl(int index, MediaItem2 item);
+    void removePlaylistItem_impl(MediaItem2 item);
 
-    PlaylistParam getPlaylistParam_impl();
-    PlaybackState2 getPlaybackState_impl();
+    int getPlayerState_impl();
+    long getCurrentPosition_impl();
+    float getPlaybackSpeed_impl();
+    long getBufferedPosition_impl();
+    MediaItem2 getCurrentMediaItem_impl();
+
+    interface PlaybackInfoProvider {
+        int getPlaybackType_impl();
+        AudioAttributes getAudioAttributes_impl();
+        int getControlType_impl();
+        int getMaxVolume_impl();
+        int getCurrentVolume_impl();
+    }
 }

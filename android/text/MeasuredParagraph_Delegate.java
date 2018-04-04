@@ -95,7 +95,7 @@ public class MeasuredParagraph_Delegate {
 
     @LayoutlibDelegate
     /*package*/ static long nBuildNativeMeasuredParagraph(long nativeBuilderPtr,
-            @NonNull char[] text, boolean computeHyphenation) {
+            @NonNull char[] text, boolean computeHyphenation, boolean computeLayout) {
         MeasuredParagraph_Delegate delegate = new MeasuredParagraph_Delegate();
         delegate.mNativeBuilderPtr = nativeBuilderPtr;
         return sManager.addNewDelegate(delegate);
@@ -107,6 +107,12 @@ public class MeasuredParagraph_Delegate {
     }
 
     @LayoutlibDelegate
+    /*package*/ static float nGetWidth(long nativePtr, int start, int end) {
+        // Ignore as it is not used for the layoutlib implementation
+        return 0.0f;
+    }
+
+    @LayoutlibDelegate
     /*package*/ static long nGetReleaseFunc() {
         synchronized (MeasuredParagraph_Delegate.class) {
             if (sFinalizer == -1) {
@@ -115,6 +121,12 @@ public class MeasuredParagraph_Delegate {
             }
         }
         return sFinalizer;
+    }
+
+    @LayoutlibDelegate
+    /*package*/ static int nGetMemoryUsage(long nativePtr) {
+        // Ignore as it is not used for the layoutlib implementation
+        return 0;
     }
 
     private static float measureText(long nativePaint, char[] text, int index, int count,

@@ -18,20 +18,19 @@ package androidx.textclassifier;
 
 import android.os.Parcel;
 import android.os.Parcelable;
-import android.support.annotation.FloatRange;
-import android.support.annotation.IntRange;
-import android.support.annotation.NonNull;
-import android.support.annotation.Nullable;
-import android.support.v4.util.ArrayMap;
-import android.support.v4.util.Preconditions;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
+import androidx.annotation.FloatRange;
+import androidx.annotation.IntRange;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.annotation.RestrictTo;
+import androidx.collection.ArrayMap;
+import androidx.core.os.LocaleListCompat;
+import androidx.core.util.Preconditions;
+import androidx.textclassifier.TextClassifier.EntityType;
+
 import java.util.Locale;
 import java.util.Map;
-
-import androidx.textclassifier.TextClassifier.EntityType;
 
 /**
  * Information about where text selection should be.
@@ -209,7 +208,8 @@ public final class TextSelection implements Parcelable {
      */
     public static final class Options implements Parcelable {
 
-        private @Nullable ArrayList<Locale> mDefaultLocales;
+        private @Nullable LocaleListCompat mDefaultLocales;
+        private @Nullable String mCallingPackageName;
 
         public Options() {}
 
@@ -218,8 +218,19 @@ public final class TextSelection implements Parcelable {
          *      the provided text. If no locale preferences exist, set this to null or an empty
          *      locale list.
          */
-        public Options setDefaultLocales(@Nullable Collection<Locale> defaultLocales) {
-            mDefaultLocales = defaultLocales == null ? null : new ArrayList<>(defaultLocales);
+        public Options setDefaultLocales(@Nullable LocaleListCompat defaultLocales) {
+            mDefaultLocales = defaultLocales;
+            return this;
+        }
+
+        /**
+         * @param packageName name of the package from which the call was made.
+         *
+         * @hide
+         */
+        @RestrictTo(RestrictTo.Scope.LIBRARY)
+        public Options setCallingPackageName(@Nullable String packageName) {
+            mCallingPackageName = packageName;
             return this;
         }
 
@@ -228,8 +239,16 @@ public final class TextSelection implements Parcelable {
          *      the provided text.
          */
         @Nullable
-        public List<Locale> getDefaultLocales() {
+        public LocaleListCompat getDefaultLocales() {
             return mDefaultLocales;
+        }
+
+        /**
+         * @return name of the package from which the call was made.
+         */
+        @Nullable
+        public String getCallingPackageName() {
+            return mCallingPackageName;
         }
 
         @Override
@@ -239,12 +258,11 @@ public final class TextSelection implements Parcelable {
 
         @Override
         public void writeToParcel(Parcel dest, int flags) {
-            dest.writeInt(mDefaultLocales != null ? mDefaultLocales.size() : 0);
+            dest.writeInt(mDefaultLocales != null ? 1 : 0);
             if (mDefaultLocales != null) {
-                for (Locale locale : mDefaultLocales) {
-                    dest.writeSerializable(locale);
-                }
+                dest.writeString(mDefaultLocales.toLanguageTags());
             }
+            dest.writeString(mCallingPackageName);
         }
 
         public static final Parcelable.Creator<Options> CREATOR =
@@ -261,14 +279,10 @@ public final class TextSelection implements Parcelable {
                 };
 
         private Options(Parcel in) {
-            final int numLocales = in.readInt();
-            if (numLocales > 0) {
-                mDefaultLocales = new ArrayList<>();
-                mDefaultLocales.ensureCapacity(numLocales);
-                for (int i = 0; i < numLocales; ++i) {
-                    mDefaultLocales.add((Locale) in.readSerializable());
-                }
+            if (in.readInt() > 0) {
+                mDefaultLocales = LocaleListCompat.forLanguageTags(in.readString());
             }
+            mCallingPackageName = in.readString();
         }
     }
 }

@@ -166,6 +166,15 @@ public abstract class ContentResolver {
     public static final String SYNC_EXTRAS_DISALLOW_METERED = "allow_metered";
 
     /**
+     * {@hide} Integer extra containing a SyncExemption flag.
+     *
+     * Only the system and the shell user can set it.
+     *
+     * This extra is "virtual". Once passed to the system server, it'll be removed from the bundle.
+     */
+    public static final String SYNC_VIRTUAL_EXTRAS_EXEMPTION_FLAG = "v_exemption";
+
+    /**
      * Set by the SyncManager to request that the SyncAdapter initialize itself for
      * the given account/authority pair. One required initialization step is to
      * ensure that {@link #setIsSyncable(android.accounts.Account, String, int)} has been
@@ -504,6 +513,38 @@ public abstract class ContentResolver {
      * when sending the former, so that observers of "X and descendants" only see the latter.
      */
     public static final int NOTIFY_SKIP_NOTIFY_FOR_DESCENDANTS = 1<<1;
+
+    /**
+     * No exception, throttled by app standby normally.
+     * @hide
+     */
+    public static final int SYNC_EXEMPTION_NONE = 0;
+
+    /**
+     * When executing a sync with this exemption, we'll put the target app in the ACTIVE bucket
+     * for 10 minutes. This will allow the sync adapter to schedule/run further syncs and jobs.
+     *
+     * Note this will still *not* let RARE apps to run syncs, because they still won't get network
+     * connection.
+     * @hide
+     */
+    public static final int SYNC_EXEMPTION_ACTIVE = 1;
+
+    /**
+     * In addition to {@link #SYNC_EXEMPTION_ACTIVE}, we put the sync adapter app in the
+     * temp whitelist for 10 minutes, so that even RARE apps can run syncs right away.
+     * @hide
+     */
+    public static final int SYNC_EXEMPTION_ACTIVE_WITH_TEMP = 2;
+
+    /** @hide */
+    @IntDef(flag = false, prefix = { "SYNC_EXEMPTION_" }, value = {
+            SYNC_EXEMPTION_NONE,
+            SYNC_EXEMPTION_ACTIVE,
+            SYNC_EXEMPTION_ACTIVE_WITH_TEMP,
+    })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface SyncExemption {}
 
     // Always log queries which take 500ms+; shorter queries are
     // sampled accordingly.
@@ -2082,7 +2123,23 @@ public abstract class ContentResolver {
         Preconditions.checkNotNull(uri, "uri");
         try {
             ActivityManager.getService().takePersistableUriPermission(
-                    ContentProvider.getUriWithoutUserId(uri), modeFlags, resolveUserId(uri));
+                    ContentProvider.getUriWithoutUserId(uri), modeFlags, /* toPackage= */ null,
+                    resolveUserId(uri));
+        } catch (RemoteException e) {
+        }
+    }
+
+    /**
+     * @hide
+     */
+    public void takePersistableUriPermission(@NonNull String toPackage, @NonNull Uri uri,
+            @Intent.AccessUriMode int modeFlags) {
+        Preconditions.checkNotNull(toPackage, "toPackage");
+        Preconditions.checkNotNull(uri, "uri");
+        try {
+            ActivityManager.getService().takePersistableUriPermission(
+                    ContentProvider.getUriWithoutUserId(uri), modeFlags, toPackage,
+                    resolveUserId(uri));
         } catch (RemoteException e) {
         }
     }
@@ -2100,7 +2157,8 @@ public abstract class ContentResolver {
         Preconditions.checkNotNull(uri, "uri");
         try {
             ActivityManager.getService().releasePersistableUriPermission(
-                    ContentProvider.getUriWithoutUserId(uri), modeFlags, resolveUserId(uri));
+                    ContentProvider.getUriWithoutUserId(uri), modeFlags, /* toPackage= */ null,
+                    resolveUserId(uri));
         } catch (RemoteException e) {
         }
     }
@@ -2427,21 +2485,16 @@ public abstract class ContentResolver {
      * @param account the account to specify in the sync
      * @param authority the provider to specify in the sync request
      * @param extras extra parameters to go along with the sync request
-     * @param pollFrequency how frequently the sync should be performed, in seconds. A minimum value
-     *                      of 1 hour is enforced.
+     * @param pollFrequency how frequently the sync should be performed, in seconds.
+     * On Android API level 24 and above, a minmam interval of 15 minutes is enforced.
+     * On previous versions, the minimum interval is 1 hour.
      * @throws IllegalArgumentException if an illegal extra was set or if any of the parameters
      * are null.
      */
     public static void addPeriodicSync(Account account, String authority, Bundle extras,
             long pollFrequency) {
         validateSyncExtrasBundle(extras);
-        if (extras.getBoolean(SYNC_EXTRAS_MANUAL, false)
-                || extras.getBoolean(SYNC_EXTRAS_DO_NOT_RETRY, false)
-                || extras.getBoolean(SYNC_EXTRAS_IGNORE_BACKOFF, false)
-                || extras.getBoolean(SYNC_EXTRAS_IGNORE_SETTINGS, false)
-                || extras.getBoolean(SYNC_EXTRAS_INITIALIZE, false)
-                || extras.getBoolean(SYNC_EXTRAS_FORCE, false)
-                || extras.getBoolean(SYNC_EXTRAS_EXPEDITED, false)) {
+        if (invalidPeriodicExtras(extras)) {
             throw new IllegalArgumentException("illegal extras were set");
         }
         try {
@@ -2996,6 +3049,11 @@ public abstract class ContentResolver {
     /** @hide */
     public int resolveUserId(Uri uri) {
         return ContentProvider.getUserIdFromUri(uri, mContext.getUserId());
+    }
+
+    /** @hide */
+    public int getUserId() {
+        return mContext.getUserId();
     }
 
     /** @hide */

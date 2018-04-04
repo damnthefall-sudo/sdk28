@@ -41,13 +41,14 @@ public class WifiAwareDiscoverySessionState {
     private static final boolean VDBG = false; // STOPSHIP if true
     /* package */ boolean mDbg = false;
 
-    private int mNextPeerIdToBeAllocated = 100; // used to create a unique peer ID
+    private static int sNextPeerIdToBeAllocated = 100; // used to create a unique peer ID
 
     private final WifiAwareNativeApi mWifiAwareNativeApi;
     private int mSessionId;
     private byte mPubSubId;
     private IWifiAwareDiscoverySessionCallback mCallback;
     private boolean mIsPublishSession;
+    private boolean mIsRangingEnabled;
     private final long mCreationTime;
 
     static class PeerInfo {
@@ -71,12 +72,13 @@ public class WifiAwareDiscoverySessionState {
 
     public WifiAwareDiscoverySessionState(WifiAwareNativeApi wifiAwareNativeApi, int sessionId,
             byte pubSubId, IWifiAwareDiscoverySessionCallback callback, boolean isPublishSession,
-            long creationTime) {
+            boolean isRangingEnabled, long creationTime) {
         mWifiAwareNativeApi = wifiAwareNativeApi;
         mSessionId = sessionId;
         mPubSubId = pubSubId;
         mCallback = callback;
         mIsPublishSession = isPublishSession;
+        mIsRangingEnabled = isRangingEnabled;
         mCreationTime = creationTime;
     }
 
@@ -90,6 +92,10 @@ public class WifiAwareDiscoverySessionState {
 
     public boolean isPublishSession() {
         return mIsPublishSession;
+    }
+
+    public boolean isRangingEnabled() {
+        return mIsRangingEnabled;
     }
 
     public long getCreationTime() {
@@ -292,7 +298,7 @@ public class WifiAwareDiscoverySessionState {
             }
         }
 
-        int newPeerId = mNextPeerIdToBeAllocated++;
+        int newPeerId = sNextPeerIdToBeAllocated++;
         PeerInfo newPeerInfo = new PeerInfo(requestorInstanceId, peerMac);
         mPeerInfoByRequestorInstanceId.put(newPeerId, newPeerInfo);
 

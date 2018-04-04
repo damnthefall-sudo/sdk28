@@ -17,6 +17,7 @@
 package android.content;
 
 import android.annotation.SystemApi;
+import android.annotation.TestApi;
 import android.app.IApplicationThread;
 import android.app.IServiceConnection;
 import android.content.pm.ApplicationInfo;
@@ -418,8 +419,8 @@ public class ContextWrapper extends Context {
 
     /** @hide */
     @Override
-    public void startActivitiesAsUser(Intent[] intents, Bundle options, UserHandle userHandle) {
-        mBase.startActivitiesAsUser(intents, options, userHandle);
+    public int startActivitiesAsUser(Intent[] intents, Bundle options, UserHandle userHandle) {
+        return mBase.startActivitiesAsUser(intents, options, userHandle);
     }
 
     @Override
@@ -993,5 +994,24 @@ public class ContextWrapper extends Context {
     @Override
     public void setAutofillClient(AutofillClient client) {
         mBase.setAutofillClient(client);
+    }
+
+    /**
+     * @hide
+     */
+    @Override
+    public boolean isAutofillCompatibilityEnabled() {
+        return mBase != null && mBase.isAutofillCompatibilityEnabled();
+    }
+
+    /**
+     * @hide
+     */
+    @TestApi
+    @Override
+    public void setAutofillCompatibilityEnabled(boolean  autofillCompatEnabled) {
+        if (mBase != null) {
+            mBase.setAutofillCompatibilityEnabled(autofillCompatEnabled);
+        }
     }
 }

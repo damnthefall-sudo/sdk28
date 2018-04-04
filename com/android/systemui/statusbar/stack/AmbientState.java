@@ -64,10 +64,14 @@ public class AmbientState {
     private boolean mPanelTracking;
     private boolean mExpansionChanging;
     private boolean mPanelFullWidth;
-    private Collection<HeadsUpManager.HeadsUpEntry> mPulsing;
+    private boolean mPulsing;
     private boolean mUnlockHintRunning;
     private boolean mQsCustomizerShowing;
     private int mIntrinsicPadding;
+    private int mExpandAnimationTopChange;
+    private ExpandableNotificationRow mExpandingNotification;
+    private boolean mFullyDark;
+    private int mDarkTopPadding;
 
     public AmbientState(Context context) {
         reload(context);
@@ -77,9 +81,25 @@ public class AmbientState {
      * Reload the dimens e.g. if the density changed.
      */
     public void reload(Context context) {
-        mZDistanceBetweenElements = Math.max(1, context.getResources()
+        mZDistanceBetweenElements = getZDistanceBetweenElements(context);
+        mBaseZHeight = getBaseHeight(mZDistanceBetweenElements);
+    }
+
+    private static int getZDistanceBetweenElements(Context context) {
+        return Math.max(1, context.getResources()
                 .getDimensionPixelSize(R.dimen.z_distance_between_notifications));
-        mBaseZHeight = 4 * mZDistanceBetweenElements;
+    }
+
+    private static int getBaseHeight(int zdistanceBetweenElements) {
+        return 4 * zdistanceBetweenElements;
+    }
+
+    /**
+     * @return the launch height for notifications that are launched
+     */
+    public static int getNotificationLaunchHeight(Context context) {
+        int zDistance = getZDistanceBetweenElements(context);
+        return getBaseHeight(zDistance) * 2;
     }
 
     /**
@@ -296,23 +316,18 @@ public class AmbientState {
     }
 
     public boolean hasPulsingNotifications() {
-        return mPulsing != null;
+        return mPulsing;
     }
 
-    public void setPulsing(Collection<HeadsUpManager.HeadsUpEntry> hasPulsing) {
+    public void setPulsing(boolean hasPulsing) {
         mPulsing = hasPulsing;
     }
 
     public boolean isPulsing(NotificationData.Entry entry) {
-        if (mPulsing == null) {
+        if (!mPulsing || mHeadsUpManager == null) {
             return false;
         }
-        for (HeadsUpManager.HeadsUpEntry e : mPulsing) {
-            if (e.entry == entry) {
-                return true;
-            }
-        }
-        return false;
+        return mHeadsUpManager.getAllEntries().anyMatch(e -> (e == entry));
     }
 
     public boolean isPanelTracking() {
@@ -379,5 +394,43 @@ public class AmbientState {
      */
     public boolean isDozingAndNotPulsing(ExpandableNotificationRow row) {
         return isDark() && !isPulsing(row.getEntry());
+    }
+
+    public void setExpandAnimationTopChange(int expandAnimationTopChange) {
+        mExpandAnimationTopChange = expandAnimationTopChange;
+    }
+
+    public void setExpandingNotification(ExpandableNotificationRow row) {
+        mExpandingNotification = row;
+    }
+
+    public ExpandableNotificationRow getExpandingNotification() {
+        return mExpandingNotification;
+    }
+
+    public int getExpandAnimationTopChange() {
+        return mExpandAnimationTopChange;
+    }
+
+    /**
+     * {@see isFullyDark}
+     */
+    public void setFullyDark(boolean fullyDark) {
+        mFullyDark = fullyDark;
+    }
+
+    /**
+     * @return {@code true } when shade is completely dark: in AOD or ambient display.
+     */
+    public boolean isFullyDark() {
+        return mFullyDark;
+    }
+
+    public void setDarkTopPadding(int darkTopPadding) {
+        mDarkTopPadding = darkTopPadding;
+    }
+
+    public int getDarkTopPadding() {
+        return mDarkTopPadding;
     }
 }

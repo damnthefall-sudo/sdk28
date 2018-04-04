@@ -16,6 +16,8 @@
 
 package android.app;
 
+import android.app.ActivityThread.ActivityClientRecord;
+import android.app.servertransaction.PendingTransactionActions;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.os.Binder;
@@ -141,6 +143,21 @@ public class LocalActivityManager {
             }
             r.window = r.activity.getWindow();
             r.instanceState = null;
+
+            final ActivityClientRecord clientRecord = mActivityThread.getActivityClient(r);
+            final PendingTransactionActions pendingActions;
+
+            if (!r.activity.mFinished) {
+                // This matches pending actions set in ActivityThread#handleLaunchActivity
+                pendingActions = new PendingTransactionActions();
+                pendingActions.setOldState(clientRecord.state);
+                pendingActions.setRestoreInstanceState(true);
+                pendingActions.setCallOnPostCreate(true);
+            } else {
+                pendingActions = null;
+            }
+
+            mActivityThread.handleStartActivity(clientRecord, pendingActions);
             r.curState = STARTED;
             
             if (desiredState == RESUMED) {
@@ -207,8 +224,8 @@ public class LocalActivityManager {
     
     private void performPause(LocalActivityRecord r, boolean finishing) {
         final boolean needState = r.instanceState == null;
-        final Bundle instanceState = mActivityThread.performPauseActivity(
-                r, finishing, needState, "performPause", null /* pendingActions */);
+        final Bundle instanceState = mActivityThread.performPauseActivity(r, finishing,
+                "performPause", null /* pendingActions */);
         if (needState) {
             r.instanceState = instanceState;
         }
@@ -363,7 +380,7 @@ public class LocalActivityManager {
         }
         if (localLOGV) Log.v(TAG, r.id + ": destroying");
         mActivityThread.performDestroyActivity(r, finish, 0 /* configChanges */,
-                false /* getNonConfigInstance */);
+                false /* getNonConfigInstance */, "LocalActivityManager::performDestroy");
         r.activity = null;
         r.window = null;
         if (finish) {
@@ -628,7 +645,7 @@ public class LocalActivityManager {
             LocalActivityRecord r = mActivityArray.get(i);
             if (localLOGV) Log.v(TAG, r.id + ": destroying");
             mActivityThread.performDestroyActivity(r, finishing, 0 /* configChanges */,
-                    false /* getNonConfigInstance */);
+                    false /* getNonConfigInstance */, "LocalActivityManager::dispatchDestroy");
         }
         mActivities.clear();
         mActivityArray.clear();

@@ -22,6 +22,8 @@ import com.android.ide.common.rendering.api.ILayoutPullParser;
 import com.android.ide.common.rendering.api.LayoutLog;
 import com.android.ide.common.rendering.api.LayoutlibCallback;
 import com.android.ide.common.rendering.api.RenderResources;
+import com.android.ide.common.rendering.api.ResourceNamespace;
+import com.android.ide.common.rendering.api.ResourceNamespace.Resolver;
 import com.android.ide.common.rendering.api.ResourceReference;
 import com.android.ide.common.rendering.api.ResourceValue;
 import com.android.ide.common.rendering.api.StyleResourceValue;
@@ -99,6 +101,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -116,6 +119,9 @@ public class BridgeContext extends Context {
 
     private static final Map<String, ResourceValue> FRAMEWORK_PATCHED_VALUES = new HashMap<>(2);
     private static final Map<String, ResourceValue> FRAMEWORK_REPLACE_VALUES = new HashMap<>(3);
+
+    private static final Resolver LEGACY_NAMESPACE_RESOLVER =
+            Collections.singletonMap(SdkConstants.TOOLS_PREFIX, SdkConstants.TOOLS_URI)::get;
 
     static {
         FRAMEWORK_PATCHED_VALUES.put("animateFirstView", new ResourceValue(
@@ -714,6 +720,13 @@ public class BridgeContext extends Context {
         PropertiesMap defaultPropMap = null;
         boolean isPlatformFile = true;
 
+        // TODO(namespaces): We need to figure out how to keep track of the namespace of the current
+        // layout file.
+        ResourceNamespace currentFileNamespace = ResourceNamespace.TODO;
+
+        // TODO(namespaces): get this through the callback, only in non-namespaced projects.
+        ResourceNamespace.Resolver resolver = LEGACY_NAMESPACE_RESOLVER;
+
         // Hint: for XmlPullParser, attach source //DEVICE_SRC/dalvik/libcore/xml/src/java
         if (set instanceof BridgeXmlBlockParser) {
             BridgeXmlBlockParser parser;
@@ -726,6 +739,8 @@ public class BridgeContext extends Context {
                 defaultPropMap = mDefaultPropMaps.computeIfAbsent(key, k -> new PropertiesMap());
             }
 
+            resolver = parser::getNamespace;
+            currentFileNamespace = ResourceNamespace.fromBoolean(parser.isPlatformFile());
         } else if (set instanceof BridgeLayoutParamsMapAttributes) {
             // this is only for temp layout params generated dynamically, so this is never
             // platform content.
@@ -794,15 +809,11 @@ public class BridgeContext extends Context {
                         }
                         defaultPropMap.put("style", new Property(defStyleName, item.getValue()));
                     }
-                } else {
-                    Bridge.getLog().error(LayoutLog.TAG_RESOURCES_RESOLVE_THEME_ATTR,
-                            String.format(
-                                    "Failed to find style '%s' in current theme",
-                                    defStyleAttribute.getFirst()),
-                            null);
                 }
             }
-        } else if (defStyleRes != 0) {
+        }
+
+        if (defStyleValues == null && defStyleRes != 0) {
             StyleResourceValue item = getStyleByDynamicId(defStyleRes);
             if (item != null) {
                 defStyleValues = item;
@@ -955,10 +966,19 @@ public class BridgeContext extends Context {
                     ta.bridgeSetValue(index, attrName, frameworkAttr, attributeHolder.resourceId,
                             defaultValue);
                 } else {
-                    // there is a value in the XML, but we need to resolve it in case it's
+                    // There is a value in the XML, but we need to resolve it in case it's
                     // referencing another resource or a theme value.
-                    ta.bridgeSetValue(index, attrName, frameworkAttr, attributeHolder.resourceId,
-                            mRenderResources.resolveValue(null, attrName, value, isPlatformFile));
+                    ResourceValue dummy =
+                            new ResourceValue(
+                                    currentFileNamespace,
+                                    null,
+                                    attrName,
+                                    value);
+                    dummy.setNamespaceLookup(resolver);
+
+                    ta.bridgeSetValue(
+                            index, attrName, frameworkAttr, attributeHolder.resourceId,
+                            mRenderResources.resolveResValue(dummy));
                 }
             }
         }

@@ -21,6 +21,7 @@ import android.annotation.IntRange;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.graphics.Paint;
+import android.graphics.Rect;
 import android.text.AutoGrowArray.ByteArray;
 import android.text.AutoGrowArray.FloatArray;
 import android.text.AutoGrowArray.IntArray;
@@ -297,6 +298,18 @@ public class MeasuredParagraph {
     }
 
     /**
+     * Retrieves the bounding rectangle that encloses all of the characters, with an implied origin
+     * at (0, 0).
+     *
+     * This is available only if the MeasuredParagraph is computed with buildForStaticLayout.
+     */
+    public void getBounds(@NonNull Paint paint, @IntRange(from = 0) int start,
+            @IntRange(from = 0) int end, @NonNull Rect bounds) {
+        nGetBounds(mNativePtr, mCopiedBuffer, paint.getNativeInstance(), start, end,
+                paint.getBidiFlags(), bounds);
+    }
+
+    /**
      * Generates new MeasuredParagraph for Bidi computation.
      *
      * If recycle is null, this returns new instance. If recycle is not null, this fills computed
@@ -527,9 +540,6 @@ public class MeasuredParagraph {
     private void applyStyleRun(@IntRange(from = 0) int start,  // inclusive, in copied buffer
                                @IntRange(from = 0) int end,  // exclusive, in copied buffer
                                /* Maybe Zero */ long nativeBuilderPtr) {
-        if (nativeBuilderPtr != 0) {
-            mCachedPaint.getFontMetricsInt(mCachedFm);
-        }
 
         if (mLtrWithoutBidi) {
             // If the whole text is LTR direction, just apply whole region.
@@ -600,6 +610,10 @@ public class MeasuredParagraph {
 
         final int startInCopiedBuffer = start - mTextStart;
         final int endInCopiedBuffer = end - mTextStart;
+
+        if (nativeBuilderPtr != 0) {
+            mCachedPaint.getFontMetricsInt(mCachedFm);
+        }
 
         if (replacement != null) {
             applyReplacementRun(replacement, startInCopiedBuffer, endInCopiedBuffer,
@@ -672,6 +686,13 @@ public class MeasuredParagraph {
         return width;
     }
 
+    /**
+     * This only works if the MeasuredParagraph is computed with buildForStaticLayout.
+     */
+    public @IntRange(from = 0) int getMemoryUsage() {
+        return nGetMemoryUsage(mNativePtr);
+    }
+
     private static native /* Non Zero */ long nInitBuilder();
 
     /**
@@ -718,4 +739,10 @@ public class MeasuredParagraph {
 
     @CriticalNative
     private static native /* Non Zero */ long nGetReleaseFunc();
+
+    @CriticalNative
+    private static native int nGetMemoryUsage(/* Non Zero */ long nativePtr);
+
+    private static native void nGetBounds(long nativePtr, char[] buf, long paintPtr, int start,
+            int end, int bidiFlag, Rect rect);
 }

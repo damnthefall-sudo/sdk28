@@ -438,7 +438,7 @@ public final class BluetoothAdapter {
      * Intent used to broadcast the change in connection state of the local
      * Bluetooth adapter to a profile of the remote device. When the adapter is
      * not connected to any profiles of any remote devices and it attempts a
-     * connection to a profile this intent will sent. Once connected, this intent
+     * connection to a profile this intent will be sent. Once connected, this intent
      * will not be sent for any more connection attempts to any profiles of any
      * remote device. When the adapter disconnects from the last profile its
      * connected to of any remote device, this intent will be sent.
@@ -541,13 +541,14 @@ public final class BluetoothAdapter {
             "android.bluetooth.adapter.action.BLE_ACL_DISCONNECTED";
 
     /** The profile is in disconnected state */
-    public static final int STATE_DISCONNECTED = 0;
+    public static final int STATE_DISCONNECTED = BluetoothProtoEnums.CONNECTION_STATE_DISCONNECTED;
     /** The profile is in connecting state */
-    public static final int STATE_CONNECTING = 1;
+    public static final int STATE_CONNECTING = BluetoothProtoEnums.CONNECTION_STATE_CONNECTING;
     /** The profile is in connected state */
-    public static final int STATE_CONNECTED = 2;
+    public static final int STATE_CONNECTED = BluetoothProtoEnums.CONNECTION_STATE_CONNECTED;
     /** The profile is in disconnecting state */
-    public static final int STATE_DISCONNECTING = 3;
+    public static final int STATE_DISCONNECTING =
+            BluetoothProtoEnums.CONNECTION_STATE_DISCONNECTING;
 
     /** @hide */
     public static final String BLUETOOTH_MANAGER_SERVICE = "bluetooth_manager";
@@ -2307,6 +2308,9 @@ public final class BluetoothAdapter {
         } else if (profile == BluetoothProfile.HID_DEVICE) {
             BluetoothHidDevice hidDevice = new BluetoothHidDevice(context, listener);
             return true;
+        } else if (profile == BluetoothProfile.HEARING_AID) {
+            BluetoothHearingAid hearingAid = new BluetoothHearingAid(context, listener);
+            return true;
         } else {
             return false;
         }
@@ -2389,6 +2393,9 @@ public final class BluetoothAdapter {
                 BluetoothHidDevice hidDevice = (BluetoothHidDevice) proxy;
                 hidDevice.close();
                 break;
+            case BluetoothProfile.HEARING_AID:
+                BluetoothHearingAid hearingAid = (BluetoothHearingAid) proxy;
+                hearingAid.close();
         }
     }
 

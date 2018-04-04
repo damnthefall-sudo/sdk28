@@ -18,6 +18,7 @@ package com.android.systemui.statusbar;
 
 import android.content.Context;
 import android.content.res.Resources;
+import android.service.notification.NotificationListenerService;
 import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
@@ -124,24 +125,30 @@ public class NotificationViewHierarchyManager {
 
         }
 
-        ArrayList<ExpandableNotificationRow> toRemove = new ArrayList<>();
+        ArrayList<ExpandableNotificationRow> viewsToRemove = new ArrayList<>();
         for (int i=0; i< mListContainer.getContainerChildCount(); i++) {
             View child = mListContainer.getContainerChildAt(i);
             if (!toShow.contains(child) && child instanceof ExpandableNotificationRow) {
-                toRemove.add((ExpandableNotificationRow) child);
+                ExpandableNotificationRow row = (ExpandableNotificationRow) child;
+
+                // Blocking helper is effectively a detached view. Don't bother removing it from the
+                // layout.
+                if (!row.isBlockingHelperShowing()) {
+                    viewsToRemove.add((ExpandableNotificationRow) child);
+                }
             }
         }
 
-        for (ExpandableNotificationRow remove : toRemove) {
-            if (mGroupManager.isChildInGroupWithSummary(remove.getStatusBarNotification())) {
+        for (ExpandableNotificationRow viewToRemove : viewsToRemove) {
+            if (mGroupManager.isChildInGroupWithSummary(viewToRemove.getStatusBarNotification())) {
                 // we are only transferring this notification to its parent, don't generate an
                 // animation
                 mListContainer.setChildTransferInProgress(true);
             }
-            if (remove.isSummaryWithChildren()) {
-                remove.removeAllChildren();
+            if (viewToRemove.isSummaryWithChildren()) {
+                viewToRemove.removeAllChildren();
             }
-            mListContainer.removeContainerView(remove);
+            mListContainer.removeContainerView(viewToRemove);
             mListContainer.setChildTransferInProgress(false);
         }
 
@@ -165,6 +172,10 @@ public class NotificationViewHierarchyManager {
             View child = mListContainer.getContainerChildAt(i);
             if (!(child instanceof ExpandableNotificationRow)) {
                 // We don't care about non-notification views.
+                continue;
+            }
+            if (((ExpandableNotificationRow) child).isBlockingHelperShowing()) {
+                // Don't count/reorder notifications that are showing the blocking helper!
                 continue;
             }
 
@@ -338,6 +349,8 @@ public class NotificationViewHierarchyManager {
                     stack.push(notificationChildren.get(i));
                 }
             }
+
+            row.showAppOpsIcons(entry.mActiveAppOps);
         }
 
         mPresenter.onUpdateRowStates();

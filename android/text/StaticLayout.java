@@ -651,48 +651,29 @@ public class StaticLayout extends Layout {
                 b.mJustificationMode != Layout.JUSTIFICATION_MODE_NONE,
                 indents, mLeftPaddings, mRightPaddings);
 
-        MeasuredText measured = null;
-        final Spanned spanned;
-        final boolean canUseMeasuredText;
-        if (source instanceof MeasuredText) {
-            measured = (MeasuredText) source;
-
-            if (bufStart != measured.getStart() || bufEnd != measured.getEnd()) {
-                // The buffer position has changed. Re-measure here.
-                canUseMeasuredText = false;
-            } else if (b.mBreakStrategy != measured.getBreakStrategy()
-                    || b.mHyphenationFrequency != measured.getHyphenationFrequency()) {
-                // The computed hyphenation pieces may not be able to used. Re-measure it.
-                canUseMeasuredText = false;
-            } else {
-                // We can use measured information.
-                canUseMeasuredText = true;
+        PrecomputedText.ParagraphInfo[] paragraphInfo = null;
+        final Spanned spanned = (source instanceof Spanned) ? (Spanned) source : null;
+        if (source instanceof PrecomputedText) {
+            PrecomputedText precomputed = (PrecomputedText) source;
+            if (precomputed.canUseMeasuredResult(bufStart, bufEnd, textDir, paint,
+                      b.mBreakStrategy, b.mHyphenationFrequency)) {
+                // Some parameters are different from the ones when measured text is created.
+                paragraphInfo = precomputed.getParagraphInfo();
             }
-        } else {
-            canUseMeasuredText = false;
         }
 
-        if (!canUseMeasuredText) {
-            measured = new MeasuredText.Builder(source, paint)
-                    .setRange(bufStart, bufEnd)
-                    .setTextDirection(textDir)
-                    .setBreakStrategy(b.mBreakStrategy)
-                    .setHyphenationFrequency(b.mHyphenationFrequency)
-                    .build(false /* full layout is not necessary for line breaking */);
-            spanned = (source instanceof Spanned) ? (Spanned) source : null;
-        } else {
-            final CharSequence original = measured.getText();
-            spanned = (original instanceof Spanned) ? (Spanned) original : null;
-            // Overwrite with the one when measured.
-            // TODO: Give an option for developer not to overwrite and measure again here?
-            textDir = measured.getTextDir();
-            paint = measured.getPaint();
+        if (paragraphInfo == null) {
+            final PrecomputedText.Params param = new PrecomputedText.Params(paint, textDir,
+                    b.mBreakStrategy, b.mHyphenationFrequency);
+            paragraphInfo = PrecomputedText.createMeasuredParagraphs(source, param, bufStart,
+                    bufEnd, false /* computeLayout */);
         }
 
         try {
-            for (int paraIndex = 0; paraIndex < measured.getParagraphCount(); paraIndex++) {
-                final int paraStart = measured.getParagraphStart(paraIndex);
-                final int paraEnd = measured.getParagraphEnd(paraIndex);
+            for (int paraIndex = 0; paraIndex < paragraphInfo.length; paraIndex++) {
+                final int paraStart = paraIndex == 0
+                        ? bufStart : paragraphInfo[paraIndex - 1].paragraphEnd;
+                final int paraEnd = paragraphInfo[paraIndex].paragraphEnd;
 
                 int firstWidthLineCount = 1;
                 int firstWidth = outerWidth;
@@ -758,7 +739,7 @@ public class StaticLayout extends Layout {
                     }
                 }
 
-                final MeasuredParagraph measuredPara = measured.getMeasuredParagraph(paraIndex);
+                final MeasuredParagraph measuredPara = paragraphInfo[paraIndex].measured;
                 final char[] chs = measuredPara.getChars();
                 final int[] spanEndCache = measuredPara.getSpanEndCache().getRawArray();
                 final int[] fmCache = measuredPara.getFontMetrics().getRawArray();

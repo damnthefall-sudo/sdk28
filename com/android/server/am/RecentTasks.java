@@ -19,6 +19,7 @@ package com.android.server.am;
 import static android.app.ActivityManager.FLAG_AND_UNLOCKED;
 import static android.app.ActivityManager.RECENT_IGNORE_UNAVAILABLE;
 import static android.app.ActivityManager.RECENT_WITH_EXCLUDED;
+import static android.app.WindowConfiguration.ACTIVITY_TYPE_ASSISTANT;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_HOME;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_RECENTS;
 import static android.app.WindowConfiguration.WINDOWING_MODE_PINNED;
@@ -279,6 +280,16 @@ class RecentTasks {
     }
 
     /**
+     * @return whether the home app is also the active handler of recent tasks.
+     */
+    boolean isRecentsComponentHomeActivity(int userId) {
+        final ComponentName defaultHomeActivity = mService.getPackageManagerInternalLocked()
+                .getDefaultHomeActivity(userId);
+        return defaultHomeActivity != null && mRecentsComponent != null &&
+                defaultHomeActivity.getPackageName().equals(mRecentsComponent.getPackageName());
+    }
+
+    /**
      * @return the recents component.
      */
     ComponentName getRecentsComponent() {
@@ -497,6 +508,10 @@ class RecentTasks {
                     && tr.userId == userId
                     && tr.realActivitySuspended != suspended) {
                tr.realActivitySuspended = suspended;
+               if (suspended) {
+                   mService.mStackSupervisor.removeTaskByIdLocked(tr.taskId, false,
+                           REMOVE_FROM_RECENTS, "suspended-package");
+               }
                notifyTaskPersisterLocked(tr, false);
             }
         }
@@ -585,7 +600,8 @@ class RecentTasks {
                         // activities that are fully runnable based on
                         // current system state.
                         ai = pm.getActivityInfo(task.realActivity,
-                                PackageManager.MATCH_DEBUG_TRIAGED_MISSING, userId);
+                                PackageManager.MATCH_DEBUG_TRIAGED_MISSING
+                                        | ActivityManagerService.STOCK_PM_FLAGS, userId);
                     } catch (RemoteException e) {
                         // Will never happen.
                         continue;
@@ -814,6 +830,25 @@ class RecentTasks {
     @VisibleForTesting
     ArrayList<TaskRecord> getRawTasks() {
         return mTasks;
+    }
+
+    /**
+     * @return ids of tasks that are presented in Recents UI.
+     */
+    SparseBooleanArray getRecentTaskIds() {
+        final SparseBooleanArray res = new SparseBooleanArray();
+        final int size = mTasks.size();
+        int numVisibleTasks = 0;
+        for (int i = 0; i < size; i++) {
+            final TaskRecord tr = mTasks.get(i);
+            if (isVisibleRecentTask(tr)) {
+                numVisibleTasks++;
+                if (isInVisibleRange(tr, numVisibleTasks)) {
+                    res.put(tr.taskId, true);
+                }
+            }
+        }
+        return res;
     }
 
     /**
@@ -1089,13 +1124,22 @@ class RecentTasks {
                 + " sessionDuration=" + mActiveTasksSessionDurationMs
                 + " inactiveDuration=" + task.getInactiveDuration()
                 + " activityType=" + task.getActivityType()
-                + " windowingMode=" + task.getWindowingMode());
+                + " windowingMode=" + task.getWindowingMode()
+                + " intentFlags=" + task.getBaseIntent().getFlags());
 
-        // Ignore certain activity types completely
         switch (task.getActivityType()) {
             case ACTIVITY_TYPE_HOME:
             case ACTIVITY_TYPE_RECENTS:
+                // Ignore certain activity types completely
                 return false;
+            case ACTIVITY_TYPE_ASSISTANT:
+                // Ignore assistant that chose to be excluded from Recents, even if it's a top
+                // task.
+                if ((task.getBaseIntent().getFlags()
+                        & Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS)
+                        == Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS) {
+                    return false;
+                }
         }
 
         // Ignore certain windowing modes
@@ -1109,6 +1153,11 @@ class RecentTasks {
                     // Only the non-top task of the primary split screen mode is visible
                     return false;
                 }
+        }
+
+        // If we're in lock task mode, ignore the root task
+        if (task == mService.mLockTaskController.getRootTask()) {
+            return false;
         }
 
         return true;
@@ -1199,20 +1248,14 @@ class RecentTasks {
      * list (if any).
      */
     private int findRemoveIndexForAddTask(TaskRecord task) {
-        int recentsCount = mTasks.size();
+        final int recentsCount = mTasks.size();
         final Intent intent = task.intent;
         final boolean document = intent != null && intent.isDocument();
         int maxRecents = task.maxRecents - 1;
-        final ActivityStack stack = task.getStack();
         for (int i = 0; i < recentsCount; i++) {
             final TaskRecord tr = mTasks.get(i);
-            final ActivityStack trStack = tr.getStack();
-
             if (task != tr) {
-                if (stack != null && trStack != null && stack != trStack) {
-                    continue;
-                }
-                if (task.userId != tr.userId) {
+                if (!task.hasCompatibleActivityType(tr)) {
                     continue;
                 }
                 final Intent trIntent = tr.intent;

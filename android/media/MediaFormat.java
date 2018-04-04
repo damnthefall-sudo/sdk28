@@ -87,6 +87,7 @@ import java.util.Map;
  * <tr><td>{@link #KEY_AAC_DRC_ATTENUATION_FACTOR}</td><td>Integer</td><td><b>decoder-only</b>, optional, if content is AAC audio, specifies the DRC attenuation factor.</td></tr>
  * <tr><td>{@link #KEY_AAC_DRC_HEAVY_COMPRESSION}</td><td>Integer</td><td><b>decoder-only</b>, optional, if content is AAC audio, specifies whether to use heavy compression.</td></tr>
  * <tr><td>{@link #KEY_AAC_MAX_OUTPUT_CHANNEL_COUNT}</td><td>Integer</td><td><b>decoder-only</b>, optional, if content is AAC audio, specifies the maximum number of channels the decoder outputs.</td></tr>
+ * <tr><td>{@link #KEY_AAC_DRC_EFFECT_TYPE}</td><td>Integer</td><td><b>decoder-only</b>, optional, if content is AAC audio, specifies the DRC effect type to use.</td></tr>
  * <tr><td>{@link #KEY_CHANNEL_MASK}</td><td>Integer</td><td>optional, a mask of audio channel assignments</td></tr>
  * <tr><td>{@link #KEY_FLAC_COMPRESSION_LEVEL}</td><td>Integer</td><td><b>encoder-only</b>, optional, if content is FLAC audio, specifies the desired compression level.</td></tr>
  * </table>
@@ -104,10 +105,10 @@ import java.util.Map;
  * <tr><td>{@link #KEY_HEIGHT}</td><td>Integer</td><td></td></tr>
  * <tr><td>{@link #KEY_COLOR_FORMAT}</td><td>Integer</td><td>set by the user
  *         for encoders, readable in the output format of decoders</b></td></tr>
- * <tr><td>{@link #KEY_GRID_WIDTH}</td><td>Integer</td><td>required if the image has grid</td></tr>
- * <tr><td>{@link #KEY_GRID_HEIGHT}</td><td>Integer</td><td>required if the image has grid</td></tr>
+ * <tr><td>{@link #KEY_TILE_WIDTH}</td><td>Integer</td><td>required if the image has grid</td></tr>
+ * <tr><td>{@link #KEY_TILE_HEIGHT}</td><td>Integer</td><td>required if the image has grid</td></tr>
  * <tr><td>{@link #KEY_GRID_ROWS}</td><td>Integer</td><td>required if the image has grid</td></tr>
- * <tr><td>{@link #KEY_GRID_COLS}</td><td>Integer</td><td>required if the image has grid</td></tr>
+ * <tr><td>{@link #KEY_GRID_COLUMNS}</td><td>Integer</td><td>required if the image has grid</td></tr>
  * </table>
  */
 public final class MediaFormat {
@@ -149,17 +150,17 @@ public final class MediaFormat {
      * The track's MediaFormat will come with {@link #KEY_WIDTH} and
      * {@link #KEY_HEIGHT} keys, which describes the width and height
      * of the image. If the image doesn't contain grid (i.e. none of
-     * {@link #KEY_GRID_WIDTH}, {@link #KEY_GRID_HEIGHT},
-     * {@link #KEY_GRID_ROWS}, {@link #KEY_GRID_COLS} are present}), the
+     * {@link #KEY_TILE_WIDTH}, {@link #KEY_TILE_HEIGHT},
+     * {@link #KEY_GRID_ROWS}, {@link #KEY_GRID_COLUMNS} are present}), the
      * track will contain a single sample of coded data for the entire image,
      * and the image width and height should be used to set up the decoder.
      *
      * If the image does come with grid, each sample from the track will
      * contain one tile in the grid, of which the size is described by
-     * {@link #KEY_GRID_WIDTH} and {@link #KEY_GRID_HEIGHT}. This size
+     * {@link #KEY_TILE_WIDTH} and {@link #KEY_TILE_HEIGHT}. This size
      * (instead of {@link #KEY_WIDTH} and {@link #KEY_HEIGHT}) should be
      * used to set up the decoder. The track contains {@link #KEY_GRID_ROWS}
-     * by {@link #KEY_GRID_COLS} samples in row-major, top-row first,
+     * by {@link #KEY_GRID_COLUMNS} samples in row-major, top-row first,
      * left-to-right order. The output image should be reconstructed by
      * first tiling the decoding results of the tiles in the correct order,
      * then trimming (before rotation is applied) on the bottom and right
@@ -173,9 +174,19 @@ public final class MediaFormat {
     public static final String MIMETYPE_TEXT_VTT = "text/vtt";
 
     /**
+     * MIME type for SubRip (SRT) container.
+     */
+    public static final String MIMETYPE_TEXT_SUBRIP = "application/x-subrip";
+
+    /**
      * MIME type for CEA-608 closed caption data.
      */
     public static final String MIMETYPE_TEXT_CEA_608 = "text/cea-608";
+
+    /**
+     * MIME type for CEA-708 closed caption data.
+     */
+    public static final String MIMETYPE_TEXT_CEA_708 = "text/cea-708";
 
     private Map<String, Object> mMap;
 
@@ -274,28 +285,28 @@ public final class MediaFormat {
     public static final String KEY_FRAME_RATE = "frame-rate";
 
     /**
-     * A key describing the grid width of the content in a {@link #MIMETYPE_IMAGE_ANDROID_HEIC}
-     * track. The associated value is an integer.
+     * A key describing the width (in pixels) of each tile of the content in a
+     * {@link #MIMETYPE_IMAGE_ANDROID_HEIC} track. The associated value is an integer.
      *
      * Refer to {@link #MIMETYPE_IMAGE_ANDROID_HEIC} on decoding instructions of such tracks.
      *
-     * @see #KEY_GRID_HEIGHT
+     * @see #KEY_TILE_HEIGHT
      * @see #KEY_GRID_ROWS
-     * @see #KEY_GRID_COLS
+     * @see #KEY_GRID_COLUMNS
      */
-    public static final String KEY_GRID_WIDTH = "grid-width";
+    public static final String KEY_TILE_WIDTH = "tile-width";
 
     /**
-     * A key describing the grid height of the content in a {@link #MIMETYPE_IMAGE_ANDROID_HEIC}
-     * track. The associated value is an integer.
+     * A key describing the height (in pixels) of each tile of the content in a
+     * {@link #MIMETYPE_IMAGE_ANDROID_HEIC} track. The associated value is an integer.
      *
      * Refer to {@link #MIMETYPE_IMAGE_ANDROID_HEIC} on decoding instructions of such tracks.
      *
-     * @see #KEY_GRID_WIDTH
+     * @see #KEY_TILE_WIDTH
      * @see #KEY_GRID_ROWS
-     * @see #KEY_GRID_COLS
+     * @see #KEY_GRID_COLUMNS
      */
-    public static final String KEY_GRID_HEIGHT = "grid-height";
+    public static final String KEY_TILE_HEIGHT = "tile-height";
 
     /**
      * A key describing the number of grid rows in the content in a
@@ -303,9 +314,9 @@ public final class MediaFormat {
      *
      * Refer to {@link #MIMETYPE_IMAGE_ANDROID_HEIC} on decoding instructions of such tracks.
      *
-     * @see #KEY_GRID_WIDTH
-     * @see #KEY_GRID_HEIGHT
-     * @see #KEY_GRID_COLS
+     * @see #KEY_TILE_WIDTH
+     * @see #KEY_TILE_HEIGHT
+     * @see #KEY_GRID_COLUMNS
      */
     public static final String KEY_GRID_ROWS = "grid-rows";
 
@@ -315,11 +326,11 @@ public final class MediaFormat {
      *
      * Refer to {@link #MIMETYPE_IMAGE_ANDROID_HEIC} on decoding instructions of such tracks.
      *
-     * @see #KEY_GRID_WIDTH
-     * @see #KEY_GRID_HEIGHT
+     * @see #KEY_TILE_WIDTH
+     * @see #KEY_TILE_HEIGHT
      * @see #KEY_GRID_ROWS
      */
-    public static final String KEY_GRID_COLS = "grid-cols";
+    public static final String KEY_GRID_COLUMNS = "grid-cols";
 
     /**
      * A key describing the raw audio sample encoding/format.
@@ -510,6 +521,31 @@ public final class MediaFormat {
      * <p>This key is only used during decoding.
      */
     public static final String KEY_AAC_DRC_TARGET_REFERENCE_LEVEL = "aac-target-ref-level";
+
+    /**
+     * A key describing for selecting the DRC effect type for MPEG-D DRC.
+     * The supported values are defined in ISO/IEC 23003-4:2015 and are described as follows:
+     * <table>
+     * <tr><th>Value</th><th>Effect</th></tr>
+     * <tr><th>-1</th><th>Off</th></tr>
+     * <tr><th>0</th><th>None</th></tr>
+     * <tr><th>1</th><th>Late night</th></tr>
+     * <tr><th>2</th><th>Noisy environment</th></tr>
+     * <tr><th>3</th><th>Limited playback range</th></tr>
+     * <tr><th>4</th><th>Low playback level</th></tr>
+     * <tr><th>5</th><th>Dialog enhancement</th></tr>
+     * <tr><th>6</th><th>General compression</th></tr>
+     * </table>
+     * <p>The value -1 (Off) disables DRC processing, while loudness normalization may still be
+     * active and dependent on KEY_AAC_DRC_TARGET_REFERENCE_LEVEL.<br>
+     * The value 0 (None) automatically enables DRC processing if necessary to prevent signal
+     * clipping<br>
+     * The value 6 (General compression) can be used for enabling MPEG-D DRC without particular
+     * DRC effect type request.<br>
+     * The default is DRC effect type "None".
+     * <p>This key is only used during decoding.
+     */
+    public static final String KEY_AAC_DRC_EFFECT_TYPE = "aac-drc-effect-type";
 
     /**
      * A key describing the target reference level that was assumed at the encoder for

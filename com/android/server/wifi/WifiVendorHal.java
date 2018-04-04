@@ -54,6 +54,7 @@ import android.hardware.wifi.V1_0.WifiDebugTxPacketFateReport;
 import android.hardware.wifi.V1_0.WifiInformationElement;
 import android.hardware.wifi.V1_0.WifiStatus;
 import android.hardware.wifi.V1_0.WifiStatusCode;
+import android.net.MacAddress;
 import android.net.apf.ApfCapabilities;
 import android.net.wifi.RttManager;
 import android.net.wifi.RttManager.ResponderConfig;
@@ -76,6 +77,8 @@ import com.android.internal.util.ArrayUtils;
 import com.android.server.wifi.HalDeviceManager.InterfaceDestroyedListener;
 import com.android.server.wifi.util.BitMask;
 import com.android.server.wifi.util.NativeUtil;
+
+import com.google.errorprone.annotations.CompileTimeConstant;
 
 import libcore.util.NonNull;
 
@@ -187,11 +190,9 @@ public class WifiVendorHal {
      * @param format string with % placeholders
      * @return LogMessage formatter (remember to .flush())
      */
-    private WifiLog.LogMessage enter(String format) {
+    private WifiLog.LogMessage enter(@CompileTimeConstant final String format) {
         if (mVerboseLog == sNoLog) return sNoLog.info(format);
-        Thread cur = Thread.currentThread();
-        StackTraceElement[] trace = cur.getStackTrace();
-        return mVerboseLog.trace("% " + format).c(trace[3].getMethodName());
+        return mVerboseLog.trace(format, 1);
     }
 
     /**
@@ -201,7 +202,7 @@ public class WifiVendorHal {
      *
      * @param trace, fo example obtained by Thread.currentThread().getStackTrace()
      * @param start  frame number to log, typically 3
-     * @return string cotaining the method name and line number
+     * @return string containing the method name and line number
      */
     private static String niceMethodName(StackTraceElement[] trace, int start) {
         if (start >= trace.length) return "";
@@ -317,7 +318,7 @@ public class WifiVendorHal {
             if (!startVendorHal()) {
                 return false;
             }
-            if (TextUtils.isEmpty(createStaIface(null))) {
+            if (TextUtils.isEmpty(createStaIface(false, null))) {
                 stopVendorHal();
                 return false;
             }
@@ -332,10 +333,10 @@ public class WifiVendorHal {
     public boolean startVendorHal() {
         synchronized (sLock) {
             if (!mHalDeviceManager.start()) {
-                mLog.err("Failed to start vendor HAL");
+                mLog.err("Failed to start vendor HAL").flush();
                 return false;
             }
-            mLog.i("Vendor Hal started successfully");
+            mLog.info("Vendor Hal started successfully").flush();
             return true;
         }
     }
@@ -368,37 +369,40 @@ public class WifiVendorHal {
     /**
      * Create a STA iface using {@link HalDeviceManager}.
      *
+     * @param lowPrioritySta The requested STA has a low request priority (lower probability of
+     *                       getting created, higher probability of getting destroyed).
      * @param destroyedListener Listener to be invoked when the interface is destroyed.
      * @return iface name on success, null otherwise.
      */
-    public String createStaIface(InterfaceDestroyedListener destroyedListener) {
+    public String createStaIface(boolean lowPrioritySta,
+            InterfaceDestroyedListener destroyedListener) {
         synchronized (sLock) {
-            IWifiStaIface iface = mHalDeviceManager.createStaIface(
+            IWifiStaIface iface = mHalDeviceManager.createStaIface(lowPrioritySta,
                     new StaInterfaceDestroyedListenerInternal(destroyedListener), null);
             if (iface == null) {
-                mLog.err("Failed to create STA iface");
+                mLog.err("Failed to create STA iface").flush();
                 return stringResult(null);
             }
             String ifaceName = mHalDeviceManager.getName((IWifiIface) iface);
             if (TextUtils.isEmpty(ifaceName)) {
-                mLog.err("Failed to get iface name");
+                mLog.err("Failed to get iface name").flush();
                 return stringResult(null);
             }
             if (!registerStaIfaceCallback(iface)) {
-                mLog.err("Failed to register STA iface callback");
+                mLog.err("Failed to register STA iface callback").flush();
                 return stringResult(null);
             }
             mIWifiRttController = mHalDeviceManager.createRttController();
             if (mIWifiRttController == null) {
-                mLog.err("Failed to create RTT controller");
+                mLog.err("Failed to create RTT controller").flush();
                 return stringResult(null);
             }
             if (!registerRttEventCallback()) {
-                mLog.err("Failed to register RTT controller callback");
+                mLog.err("Failed to register RTT controller callback").flush();
                 return stringResult(null);
             }
             if (!retrieveWifiChip((IWifiIface) iface)) {
-                mLog.err("Failed to get wifi chip");
+                mLog.err("Failed to get wifi chip").flush();
                 return stringResult(null);
             }
             enableLinkLayerStats(iface);
@@ -419,7 +423,7 @@ public class WifiVendorHal {
             if (iface == null) return boolResult(false);
 
             if (!mHalDeviceManager.removeIface((IWifiIface) iface)) {
-                mLog.err("Failed to remove STA iface");
+                mLog.err("Failed to remove STA iface").flush();
                 return boolResult(false);
             }
             mIWifiStaIfaces.remove(ifaceName);
@@ -464,16 +468,16 @@ public class WifiVendorHal {
             IWifiApIface iface = mHalDeviceManager.createApIface(
                     new ApInterfaceDestroyedListenerInternal(destroyedListener), null);
             if (iface == null) {
-                mLog.err("Failed to create AP iface");
+                mLog.err("Failed to create AP iface").flush();
                 return stringResult(null);
             }
             String ifaceName = mHalDeviceManager.getName((IWifiIface) iface);
             if (TextUtils.isEmpty(ifaceName)) {
-                mLog.err("Failed to get iface name");
+                mLog.err("Failed to get iface name").flush();
                 return stringResult(null);
             }
             if (!retrieveWifiChip((IWifiIface) iface)) {
-                mLog.err("Failed to get wifi chip");
+                mLog.err("Failed to get wifi chip").flush();
                 return stringResult(null);
             }
             mIWifiApIfaces.put(ifaceName, iface);
@@ -493,7 +497,7 @@ public class WifiVendorHal {
             if (iface == null) return boolResult(false);
 
             if (!mHalDeviceManager.removeIface((IWifiIface) iface)) {
-                mLog.err("Failed to remove AP iface");
+                mLog.err("Failed to remove AP iface").flush();
                 return boolResult(false);
             }
             mIWifiApIfaces.remove(ifaceName);
@@ -505,11 +509,11 @@ public class WifiVendorHal {
         synchronized (sLock) {
             mIWifiChip = mHalDeviceManager.getChip(iface);
             if (mIWifiChip == null) {
-                mLog.err("Failed to get the chip created for the Iface");
+                mLog.err("Failed to get the chip created for the Iface").flush();
                 return false;
             }
             if (!registerChipCallback()) {
-                mLog.err("Failed to register chip callback");
+                mLog.err("Failed to register chip callback").flush();
                 return false;
             }
             return true;
@@ -580,7 +584,7 @@ public class WifiVendorHal {
         synchronized (sLock) {
             mHalDeviceManager.stop();
             clearState();
-            mLog.i("Vendor Hal stopped");
+            mLog.info("Vendor Hal stopped").flush();
         }
     }
 
@@ -964,7 +968,7 @@ public class WifiVendorHal {
                 WifiStatus status;
                 status = iface.enableLinkLayerStatsCollection(mLinkLayerStatsDebug);
                 if (!ok(status)) {
-                    mLog.e("unable to enable link layer stats collection");
+                    mLog.err("unable to enable link layer stats collection").flush();
                 }
             } catch (RemoteException e) {
                 handleRemoteException(e);
@@ -1577,7 +1581,7 @@ public class WifiVendorHal {
         synchronized (sLock) {
             if (mIWifiRttController == null) return null;
             if (mRttResponderCmdId != 0) {
-                mLog.e("responder mode already enabled - this shouldn't happen");
+                mLog.err("responder mode already enabled - this shouldn't happen").flush();
                 return null;
             }
             ResponderConfig config = null;
@@ -1641,6 +1645,30 @@ public class WifiVendorHal {
                 IWifiStaIface iface = getStaIface(ifaceName);
                 if (iface == null) return boolResult(false);
                 WifiStatus status = iface.setScanningMacOui(oui);
+                if (!ok(status)) return false;
+                return true;
+            } catch (RemoteException e) {
+                handleRemoteException(e);
+                return false;
+            }
+        }
+    }
+
+    /**
+     * Set Mac address on the given interface
+     *
+     * @param ifaceName Name of the interface
+     * @param mac MAC address to change into
+     * @return true for success
+     */
+    public boolean setMacAddress(@NonNull String ifaceName, @NonNull MacAddress mac) {
+        byte[] macByteArray = mac.toByteArray();
+        synchronized (sLock) {
+            try {
+                android.hardware.wifi.V1_2.IWifiStaIface ifaceV12 =
+                        getWifiStaIfaceForV1_2Mockable(ifaceName);
+                if (ifaceV12 == null) return boolResult(false);
+                WifiStatus status = ifaceV12.setMacAddress(macByteArray);
                 if (!ok(status)) return false;
                 return true;
             } catch (RemoteException e) {
@@ -2451,7 +2479,7 @@ public class WifiVendorHal {
                         val = StaRoamingState.ENABLED;
                         break;
                     default:
-                        mLog.e("enableFirmwareRoaming invalid argument " + state);
+                        mLog.err("enableFirmwareRoaming invalid argument %").c(state).flush();
                         return WifiStatusCode.ERROR_INVALID_ARGS;
                 }
 
@@ -2540,6 +2568,21 @@ public class WifiVendorHal {
         if (mIWifiChip == null) return null;
         return android.hardware.wifi.V1_2.IWifiChip.castFrom(mIWifiChip);
     }
+
+    /**
+     * Method to mock out the V1_2 IWifiStaIface retrieval in unit tests.
+     *
+     * @param ifaceName Name of the interface
+     * @return 1.2 IWifiStaIface object if the device is running the 1.2 wifi hal service, null
+     * otherwise.
+     */
+    protected android.hardware.wifi.V1_2.IWifiStaIface getWifiStaIfaceForV1_2Mockable(
+            @NonNull String ifaceName) {
+        IWifiStaIface iface = getStaIface(ifaceName);
+        if (iface == null) return null;
+        return android.hardware.wifi.V1_2.IWifiStaIface.castFrom(iface);
+    }
+
 
     private int frameworkToHalTxPowerScenario(int scenario) {
         switch (scenario) {

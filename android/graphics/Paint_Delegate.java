@@ -1197,6 +1197,11 @@ public class Paint_Delegate {
         return (1.0f / 18.0f) * nGetTextSize(paintPtr);
     }
 
+    @LayoutlibDelegate
+    /*package*/ static boolean nEqualsForTextMeasurement(long leftPaintPtr, long rightPaintPtr) {
+        return leftPaintPtr == rightPaintPtr;
+    }
+
     // ---- Private delegate/helper methods ----
 
     /*package*/ Paint_Delegate() {

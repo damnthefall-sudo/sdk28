@@ -41,6 +41,7 @@ class TunerSession extends ITuner.Stub {
 
     private final Object mLock = new Object();
 
+    private final RadioModule mModule;
     private final ITunerSession mHwSession;
     private final TunerCallback mCallback;
     private boolean mIsClosed = false;
@@ -50,7 +51,9 @@ class TunerSession extends ITuner.Stub {
     // necessary only for older APIs compatibility
     private RadioManager.BandConfig mDummyConfig = null;
 
-    TunerSession(@NonNull ITunerSession hwSession, @NonNull TunerCallback callback) {
+    TunerSession(@NonNull RadioModule module, @NonNull ITunerSession hwSession,
+            @NonNull TunerCallback callback) {
+        mModule = Objects.requireNonNull(module);
         mHwSession = Objects.requireNonNull(hwSession);
         mCallback = Objects.requireNonNull(callback);
         notifyAudioServiceLocked(true);
@@ -87,7 +90,8 @@ class TunerSession extends ITuner.Stub {
         if (ret == AudioSystem.AUDIO_STATUS_OK) {
             mIsAudioConnected = connected;
         } else {
-            Slog.e(TAG, "Failed to notify AudioService about new state: " + connected);
+            Slog.e(TAG, "Failed to notify AudioService about new state: "
+                    + connected + ", response was: " + ret);
         }
     }
 
@@ -128,23 +132,29 @@ class TunerSession extends ITuner.Stub {
     }
 
     @Override
-    public void step(boolean directionDown, boolean skipSubChannel) {
+    public void step(boolean directionDown, boolean skipSubChannel) throws RemoteException {
         synchronized (mLock) {
             checkNotClosedLocked();
+            int halResult = mHwSession.step(!directionDown);
+            Convert.throwOnError("step", halResult);
         }
     }
 
     @Override
-    public void scan(boolean directionDown, boolean skipSubChannel) {
+    public void scan(boolean directionDown, boolean skipSubChannel) throws RemoteException {
         synchronized (mLock) {
             checkNotClosedLocked();
+            int halResult = mHwSession.scan(!directionDown, skipSubChannel);
+            Convert.throwOnError("step", halResult);
         }
     }
 
     @Override
-    public void tune(ProgramSelector selector) {
+    public void tune(ProgramSelector selector) throws RemoteException {
         synchronized (mLock) {
             checkNotClosedLocked();
+            int halResult = mHwSession.tune(Convert.programSelectorToHal(selector));
+            Convert.throwOnError("tune", halResult);
         }
     }
 
@@ -152,36 +162,25 @@ class TunerSession extends ITuner.Stub {
     public void cancel() {
         synchronized (mLock) {
             checkNotClosedLocked();
+            Utils.maybeRethrow(mHwSession::cancel);
         }
     }
 
     @Override
     public void cancelAnnouncement() {
-        synchronized (mLock) {
-            checkNotClosedLocked();
-        }
-    }
-
-    @Override
-    public RadioManager.ProgramInfo getProgramInformation() {
-        synchronized (mLock) {
-            checkNotClosedLocked();
-            return null;
-        }
+        Slog.i(TAG, "Announcements control doesn't involve cancelling at the HAL level in 2.x");
     }
 
     @Override
     public Bitmap getImage(int id) {
-        synchronized (mLock) {
-            checkNotClosedLocked();
-            return null;
-        }
+        return mModule.getImage(id);
     }
 
     @Override
     public boolean startBackgroundScan() {
         Slog.i(TAG, "Explicit background scan trigger is not supported with HAL 2.x");
-        return false;
+        TunerCallback.dispatch(() -> mCallback.mClientCb.onBackgroundScanComplete());
+        return true;
     }
 
     @Override
@@ -240,7 +239,6 @@ class TunerSession extends ITuner.Stub {
         Slog.v(TAG, "setConfigFlag " + ConfigFlag.toString(flag) + " = " + value);
         synchronized (mLock) {
             checkNotClosedLocked();
-
             int halResult = mHwSession.setConfigFlag(flag, value);
             Convert.throwOnError("setConfigFlag", halResult);
         }
@@ -250,7 +248,8 @@ class TunerSession extends ITuner.Stub {
     public Map setParameters(Map parameters) {
         synchronized (mLock) {
             checkNotClosedLocked();
-            return null;
+            return Convert.vendorInfoFromHal(Utils.maybeRethrow(
+                    () -> mHwSession.setParameters(Convert.vendorInfoToHal(parameters))));
         }
     }
 
@@ -258,15 +257,8 @@ class TunerSession extends ITuner.Stub {
     public Map getParameters(List<String> keys) {
         synchronized (mLock) {
             checkNotClosedLocked();
-            return null;
-        }
-    }
-
-    @Override
-    public boolean isAntennaConnected() {
-        synchronized (mLock) {
-            checkNotClosedLocked();
-            return true;
+            return Convert.vendorInfoFromHal(Utils.maybeRethrow(
+                    () -> mHwSession.getParameters(Convert.listToArrayList(keys))));
         }
     }
 }

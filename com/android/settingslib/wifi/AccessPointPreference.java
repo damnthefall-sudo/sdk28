@@ -41,7 +41,7 @@ import com.android.settingslib.TwoTargetPreference;
 import com.android.settingslib.Utils;
 import com.android.settingslib.wifi.AccessPoint.Speed;
 
-public class AccessPointPreference extends TwoTargetPreference {
+public class AccessPointPreference extends Preference {
 
     private static final int[] STATE_SECURED = {
             R.attr.state_encrypted
@@ -68,6 +68,7 @@ public class AccessPointPreference extends TwoTargetPreference {
     private final UserBadgeCache mBadgeCache;
     private final IconInjector mIconInjector;
     private TextView mTitleView;
+    private boolean mShowDivider;
 
     private boolean mForSavedNetworks = false;
     private AccessPoint mAccessPoint;
@@ -76,19 +77,6 @@ public class AccessPointPreference extends TwoTargetPreference {
     private CharSequence mContentDescription;
     private int mDefaultIconResId;
     private int mWifiSpeed = Speed.NONE;
-
-    public static String generatePreferenceKey(AccessPoint accessPoint) {
-        StringBuilder builder = new StringBuilder();
-
-        if (TextUtils.isEmpty(accessPoint.getSsidStr())) {
-            builder.append(accessPoint.getBssid());
-        } else {
-            builder.append(accessPoint.getSsidStr());
-        }
-
-        builder.append(',').append(accessPoint.getSecurity());
-        return builder.toString();
-    }
 
     @Nullable
     private static StateListDrawable getFrictionStateListDrawable(Context context) {
@@ -128,6 +116,8 @@ public class AccessPointPreference extends TwoTargetPreference {
                           int iconResId, boolean forSavedNetworks, StateListDrawable frictionSld,
                           int level, IconInjector iconInjector) {
         super(context);
+        setLayoutResource(R.layout.preference_access_point);
+        setWidgetLayoutResource(getWidgetLayoutResourceId());
         mBadgeCache = cache;
         mAccessPoint = accessPoint;
         mForSavedNetworks = forSavedNetworks;
@@ -138,6 +128,10 @@ public class AccessPointPreference extends TwoTargetPreference {
         mIconInjector = iconInjector;
         mBadgePadding = context.getResources()
                 .getDimensionPixelSize(R.dimen.wifi_preference_badge_padding);
+    }
+
+    protected int getWidgetLayoutResourceId() {
+        return R.layout.access_point_friction_widget;
     }
 
     public AccessPoint getAccessPoint() {
@@ -166,20 +160,18 @@ public class AccessPointPreference extends TwoTargetPreference {
 
         ImageView frictionImageView = (ImageView) view.findViewById(R.id.friction_icon);
         bindFrictionImage(frictionImageView);
-        setDividerVisibility(view, View.GONE);
-    }
 
-    protected void setDividerVisibility(final PreferenceViewHolder view,
-            @View.Visibility int visibility) {
         final View divider = view.findViewById(R.id.two_target_divider);
-        if (divider != null) {
-            divider.setVisibility(visibility);
-        }
+        divider.setVisibility(shouldShowDivider() ? View.VISIBLE : View.INVISIBLE);
     }
 
-    @Override
-    protected int getSecondTargetResId() {
-        return R.layout.access_point_friction_widget;
+    public boolean shouldShowDivider() {
+        return mShowDivider;
+    }
+
+    public void setShowDivider(boolean showDivider) {
+        mShowDivider = showDivider;
+        notifyChanged();
     }
 
     protected void updateIcon(int level, Context context) {

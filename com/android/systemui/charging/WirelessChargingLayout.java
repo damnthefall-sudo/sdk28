@@ -16,13 +16,17 @@
 
 package com.android.systemui.charging;
 
+import android.animation.AnimatorSet;
 import android.animation.ObjectAnimator;
 import android.animation.ValueAnimator;
 import android.content.Context;
+import android.graphics.Color;
 import android.util.AttributeSet;
+import android.view.animation.PathInterpolator;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 
+import com.android.systemui.Interpolators;
 import com.android.systemui.R;
 
 import java.text.NumberFormat;
@@ -35,27 +39,26 @@ public class WirelessChargingLayout extends FrameLayout {
 
     public WirelessChargingLayout(Context context) {
         super(context);
-        init(context, null);
+        init(context, null, false);
     }
 
-    public WirelessChargingLayout(Context context, int batterylLevel) {
+    public WirelessChargingLayout(Context context, int batteryLevel, boolean isDozing) {
         super(context);
-        init(context, null, batterylLevel);
+        init(context, null, batteryLevel, isDozing);
     }
 
     public WirelessChargingLayout(Context context, AttributeSet attrs) {
         super(context, attrs);
-        init(context, attrs);
+        init(context, attrs, false);
     }
 
-    private void init(Context c, AttributeSet attrs) {
-        init(c, attrs, -1);
+    private void init(Context c, AttributeSet attrs, boolean isDozing) {
+        init(c, attrs, -1, false);
     }
 
-    private void init(Context c, AttributeSet attrs, int batteryLevel) {
+    private void init(Context context, AttributeSet attrs, int batteryLevel, boolean isDozing) {
         final int mBatteryLevel = batteryLevel;
-
-        inflate(c, R.layout.wireless_charging_layout, this);
+        inflate(context, R.layout.wireless_charging_layout, this);
 
         // where the circle animation occurs:
         final WirelessChargingView mChargingView = findViewById(R.id.wireless_charging_view);
@@ -63,19 +66,57 @@ public class WirelessChargingLayout extends FrameLayout {
         // amount of battery:
         final TextView mPercentage = findViewById(R.id.wireless_charging_percentage);
 
-        // (optional) time until full charge if available
-        final TextView mSecondaryText = findViewById(R.id.wireless_charging_secondary_text);
+        if (isDozing) {
+            mChargingView.setPaintColor(Color.WHITE);
+            mPercentage.setTextColor(Color.WHITE);
+        }
 
         if (batteryLevel != UNKNOWN_BATTERY_LEVEL) {
             mPercentage.setText(NumberFormat.getPercentInstance().format(mBatteryLevel / 100f));
-
-            ValueAnimator animator = ObjectAnimator.ofFloat(mPercentage, "textSize",
-                    getContext().getResources().getFloat(R.dimen.config_batteryLevelTextSizeStart),
-                    getContext().getResources().getFloat(R.dimen.config_batteryLevelTextSizeEnd));
-
-            animator.setDuration((long) getContext().getResources().getInteger(
-                    R.integer.config_batteryLevelTextAnimationDuration));
-            animator.start();
+            mPercentage.setAlpha(0);
         }
+
+        final long chargingAnimationFadeStartOffset = (long) context.getResources().getInteger(
+                R.integer.wireless_charging_fade_offset);
+        final long chargingAnimationFadeDuration = (long) context.getResources().getInteger(
+                R.integer.wireless_charging_fade_duration);
+        final float batteryLevelTextSizeStart = context.getResources().getFloat(
+                R.dimen.wireless_charging_anim_battery_level_text_size_start);
+        final float batteryLevelTextSizeEnd = context.getResources().getFloat(
+                R.dimen.wireless_charging_anim_battery_level_text_size_end);
+
+        // Animation Scale: battery percentage text scales from 0% to 100%
+        ValueAnimator textSizeAnimator = ObjectAnimator.ofFloat(mPercentage, "textSize",
+                batteryLevelTextSizeStart, batteryLevelTextSizeEnd);
+        textSizeAnimator.setInterpolator(new PathInterpolator(0, 0, 0, 1));
+        textSizeAnimator.setDuration((long) context.getResources().getInteger(
+                R.integer.wireless_charging_battery_level_text_scale_animation_duration));
+
+        // Animation Opacity: battery percentage text transitions from 0 to 1 opacity
+        ValueAnimator textOpacityAnimator = ObjectAnimator.ofFloat(mPercentage, "alpha", 0, 1);
+        textOpacityAnimator.setInterpolator(Interpolators.LINEAR);
+        textOpacityAnimator.setDuration((long) context.getResources().getInteger(
+                R.integer.wireless_charging_battery_level_text_opacity_duration));
+        textOpacityAnimator.setStartDelay((long) context.getResources().getInteger(
+                R.integer.wireless_charging_anim_opacity_offset));
+
+        // Animation Opacity: battery percentage text fades from 1 to 0 opacity
+        ValueAnimator textFadeAnimator = ObjectAnimator.ofFloat(mPercentage, "alpha", 1, 0);
+        textFadeAnimator.setDuration(chargingAnimationFadeDuration);
+        textFadeAnimator.setInterpolator(Interpolators.LINEAR);
+        textFadeAnimator.setStartDelay(chargingAnimationFadeStartOffset);
+
+        // Animation Opacity: wireless charging circle animation fades from 1 to 0 opacity
+        ValueAnimator circleFadeAnimator = ObjectAnimator.ofFloat(mChargingView, "alpha",
+                1, 0);
+        circleFadeAnimator.setDuration(chargingAnimationFadeDuration);
+        circleFadeAnimator.setInterpolator(Interpolators.LINEAR);
+        circleFadeAnimator.setStartDelay(chargingAnimationFadeStartOffset);
+
+        // play all animations together
+        AnimatorSet animatorSet = new AnimatorSet();
+        animatorSet.playTogether(textSizeAnimator, textOpacityAnimator, textFadeAnimator,
+                circleFadeAnimator);
+        animatorSet.start();
     }
 }

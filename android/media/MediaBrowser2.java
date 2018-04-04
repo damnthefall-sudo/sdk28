@@ -16,9 +16,12 @@
 
 package android.media;
 
+import android.annotation.CallbackExecutor;
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.content.Context;
+import android.media.MediaLibraryService2.MediaLibrarySession;
+import android.media.MediaSession2.ControllerInfo;
 import android.media.update.ApiLoader;
 import android.media.update.MediaBrowser2Provider;
 import android.os.Bundle;
@@ -27,8 +30,8 @@ import java.util.List;
 import java.util.concurrent.Executor;
 
 /**
- * Browses media content offered by a {@link MediaLibraryService2}.
  * @hide
+ * Browses media content offered by a {@link MediaLibraryService2}.
  */
 public class MediaBrowser2 extends MediaController2 {
     // Equals to the ((MediaBrowser2Provider) getProvider())
@@ -39,138 +42,197 @@ public class MediaBrowser2 extends MediaController2 {
      */
     public static class BrowserCallback extends MediaController2.ControllerCallback {
         /**
-         * Called with the result of {@link #getBrowserRoot(Bundle)}.
+         * Called with the result of {@link #getLibraryRoot(Bundle)}.
          * <p>
-         * {@code rootMediaId} and {@code rootExtra} can be {@code null} if the browser root isn't
+         * {@code rootMediaId} and {@code rootExtra} can be {@code null} if the library root isn't
          * available.
          *
+         * @param browser the browser for this event
          * @param rootHints rootHints that you previously requested.
-         * @param rootMediaId media id of the browser root. Can be {@code null}
-         * @param rootExtra extra of the browser root. Can be {@code null}
+         * @param rootMediaId media id of the library root. Can be {@code null}
+         * @param rootExtra extra of the library root. Can be {@code null}
          */
-        public void onGetRootResult(Bundle rootHints, @Nullable String rootMediaId,
-                @Nullable Bundle rootExtra) { }
+        public void onGetLibraryRootDone(@NonNull MediaBrowser2 browser, @Nullable Bundle rootHints,
+                @Nullable String rootMediaId, @Nullable Bundle rootExtra) { }
 
         /**
-         * Called when the item has been returned by the library service for the previous
-         * {@link MediaBrowser2#getItem} call.
+         * Called when there's change in the parent's children.
          * <p>
-         * Result can be null if there had been error.
+         * This API is called when the library service called
+         * {@link MediaLibrarySession#notifyChildrenChanged(ControllerInfo, String, int, Bundle)} or
+         * {@link MediaLibrarySession#notifyChildrenChanged(String, int, Bundle)} for the parent.
          *
-         * @param mediaId media id
-         * @param result result. Can be {@code null}
+         * @param browser the browser for this event
+         * @param parentId parent id that you've specified with {@link #subscribe(String, Bundle)}
+         * @param itemCount number of children
+         * @param extras extra bundle from the library service. Can be differ from extras that
+         *               you've specified with {@link #subscribe(String, Bundle)}.
          */
-        public void onItemLoaded(@NonNull String mediaId, @Nullable MediaItem2 result) { }
+        public void onChildrenChanged(@NonNull MediaBrowser2 browser, @NonNull String parentId,
+                int itemCount, @Nullable Bundle extras) { }
 
         /**
          * Called when the list of items has been returned by the library service for the previous
          * {@link MediaBrowser2#getChildren(String, int, int, Bundle)}.
          *
+         * @param browser the browser for this event
          * @param parentId parent id
-         * @param page page number that you've specified
-         * @param pageSize page size that you've specified
-         * @param options optional bundle that you've specified
+         * @param page page number that you've specified with
+         *             {@link #getChildren(String, int, int, Bundle)}
+         * @param pageSize page size that you've specified with
+         *                 {@link #getChildren(String, int, int, Bundle)}
          * @param result result. Can be {@code null}
+         * @param extras extra bundle from the library service
          */
-        public void onChildrenLoaded(@NonNull String parentId, int page, int pageSize,
-                @Nullable Bundle options, @Nullable List<MediaItem2> result) { }
+        public void onGetChildrenDone(@NonNull MediaBrowser2 browser, @NonNull String parentId,
+                int page, int pageSize, @Nullable List<MediaItem2> result,
+                @Nullable Bundle extras) { }
 
         /**
-         * Called when there's change in the parent's children.
-         *
-         * @param parentId parent id that you've specified with subscribe
-         * @param options optional bundle that you've specified with subscribe
-         */
-        public void onChildrenChanged(@NonNull String parentId, @Nullable Bundle options) { }
-
-        /**
-         * Called when the search result has been returned by the library service for the previous
-         * {@link MediaBrowser2#search(String, int, int, Bundle)}.
+         * Called when the item has been returned by the library service for the previous
+         * {@link MediaBrowser2#getItem(String)} call.
          * <p>
          * Result can be null if there had been error.
          *
-         * @param query query string that you've specified
-         * @param page page number that you've specified
-         * @param pageSize page size that you've specified
-         * @param options optional bundle that you've specified
+         * @param browser the browser for this event
+         * @param mediaId media id
          * @param result result. Can be {@code null}
          */
-        public void onSearchResult(@NonNull String query, int page, int pageSize,
-                @Nullable Bundle options, @Nullable List<MediaItem2> result) { }
+        public void onGetItemDone(@NonNull MediaBrowser2 browser, @NonNull String mediaId,
+                @Nullable MediaItem2 result) { }
+
+        /**
+         * Called when there's change in the search result requested by the previous
+         * {@link MediaBrowser2#search(String, Bundle)}.
+         *
+         * @param browser the browser for this event
+         * @param query search query that you've specified with {@link #search(String, Bundle)}
+         * @param itemCount The item count for the search result
+         * @param extras extra bundle from the library service
+         */
+        public void onSearchResultChanged(@NonNull MediaBrowser2 browser, @NonNull String query,
+                int itemCount, @Nullable Bundle extras) { }
+
+        /**
+         * Called when the search result has been returned by the library service for the previous
+         * {@link MediaBrowser2#getSearchResult(String, int, int, Bundle)}.
+         * <p>
+         * Result can be null if there had been error.
+         *
+         * @param browser the browser for this event
+         * @param query search query that you've specified with
+         *              {@link #getSearchResult(String, int, int, Bundle)}
+         * @param page page number that you've specified with
+         *             {@link #getSearchResult(String, int, int, Bundle)}
+         * @param pageSize page size that you've specified with
+         *                 {@link #getSearchResult(String, int, int, Bundle)}
+         * @param result result. Can be {@code null}.
+         * @param extras extra bundle from the library service
+         */
+        public void onGetSearchResultDone(@NonNull MediaBrowser2 browser, @NonNull String query,
+                int page, int pageSize, @Nullable List<MediaItem2> result,
+                @Nullable Bundle extras) { }
     }
 
-    public MediaBrowser2(Context context, SessionToken2 token, BrowserCallback callback,
-            Executor executor) {
-        super(context, token, callback, executor);
+    public MediaBrowser2(@NonNull Context context, @NonNull SessionToken2 token,
+            @NonNull @CallbackExecutor Executor executor, @NonNull BrowserCallback callback) {
+        super(context, token, executor, callback);
         mProvider = (MediaBrowser2Provider) getProvider();
     }
 
     @Override
     MediaBrowser2Provider createProvider(Context context, SessionToken2 token,
-            ControllerCallback callback, Executor executor) {
-        return ApiLoader.getProvider(context)
-                .createMediaBrowser2(this, context, token, (BrowserCallback) callback, executor);
+            Executor executor, ControllerCallback callback) {
+        return ApiLoader.getProvider().createMediaBrowser2(
+                context, this, token, executor, (BrowserCallback) callback);
     }
 
-    public void getBrowserRoot(Bundle rootHints) {
-        mProvider.getBrowserRoot_impl(rootHints);
+    /**
+     * Get the library root. Result would be sent back asynchronously with the
+     * {@link BrowserCallback#onGetLibraryRootDone(MediaBrowser2, Bundle, String, Bundle)}.
+     *
+     * @param rootHints hint for the root
+     * @see BrowserCallback#onGetLibraryRootDone(MediaBrowser2, Bundle, String, Bundle)
+     */
+    public void getLibraryRoot(@Nullable Bundle rootHints) {
+        mProvider.getLibraryRoot_impl(rootHints);
     }
 
     /**
      * Subscribe to a parent id for the change in its children. When there's a change,
-     * {@link BrowserCallback#onChildrenChanged(String, Bundle)} will be called with the bundle
-     * that you've specified. You should call {@link #getChildren(String, int, int, Bundle)} to get
-     * the actual contents for the parent.
+     * {@link BrowserCallback#onChildrenChanged(MediaBrowser2, String, int, Bundle)} will be called
+     * with the bundle that you've specified. You should call
+     * {@link #getChildren(String, int, int, Bundle)} to get the actual contents for the parent.
      *
      * @param parentId parent id
-     * @param options optional bundle
+     * @param extras extra bundle
      */
-    public void subscribe(String parentId, @Nullable Bundle options) {
-        mProvider.subscribe_impl(parentId, options);
+    public void subscribe(@NonNull String parentId, @Nullable Bundle extras) {
+        mProvider.subscribe_impl(parentId, extras);
     }
 
     /**
      * Unsubscribe for changes to the children of the parent, which was previously subscribed with
      * {@link #subscribe(String, Bundle)}.
+     * <p>
+     * This unsubscribes all previous subscription with the parent id, regardless of the extra
+     * that was previously sent to the library service.
      *
      * @param parentId parent id
-     * @param options optional bundle
      */
-    public void unsubscribe(String parentId, @Nullable Bundle options) {
-        mProvider.unsubscribe_impl(parentId, options);
-    }
-
-    /**
-     * Get the media item with the given media id. Result would be sent back asynchronously with the
-     * {@link BrowserCallback#onItemLoaded(String, MediaItem2)}.
-     *
-     * @param mediaId media id
-     */
-    public void getItem(String mediaId) {
-        mProvider.getItem_impl(mediaId);
+    public void unsubscribe(@NonNull String parentId) {
+        mProvider.unsubscribe_impl(parentId);
     }
 
     /**
      * Get list of children under the parent. Result would be sent back asynchronously with the
-     * {@link BrowserCallback#onChildrenLoaded(String, int, int, Bundle, List)}.
+     * {@link BrowserCallback#onGetChildrenDone(MediaBrowser2, String, int, int, List, Bundle)}.
      *
-     * @param parentId
-     * @param page
-     * @param pageSize
-     * @param options
+     * @param parentId parent id for getting the children.
+     * @param page page number to get the result. Starts from {@code 1}
+     * @param pageSize page size. Should be greater or equal to {@code 1}
+     * @param extras extra bundle
      */
-    public void getChildren(String parentId, int page, int pageSize, @Nullable Bundle options) {
-        mProvider.getChildren_impl(parentId, page, pageSize, options);
+    public void getChildren(@NonNull String parentId, int page, int pageSize,
+            @Nullable Bundle extras) {
+        mProvider.getChildren_impl(parentId, page, pageSize, extras);
     }
 
     /**
+     * Get the media item with the given media id. Result would be sent back asynchronously with the
+     * {@link BrowserCallback#onGetItemDone(MediaBrowser2, String, MediaItem2)}.
      *
-     * @param query search query deliminated by string
+     * @param mediaId media id for specifying the item
+     */
+    public void getItem(@NonNull String mediaId) {
+        mProvider.getItem_impl(mediaId);
+    }
+
+    /**
+     * Send a search request to the library service. When the search result is changed,
+     * {@link BrowserCallback#onSearchResultChanged(MediaBrowser2, String, int, Bundle)} will be
+     * called. You should call {@link #getSearchResult(String, int, int, Bundle)} to get the actual
+     * search result.
+     *
+     * @param query search query. Should not be an empty string.
+     * @param extras extra bundle
+     */
+    public void search(@NonNull String query, @Nullable Bundle extras) {
+        mProvider.search_impl(query, extras);
+    }
+
+    /**
+     * Get the search result from lhe library service. Result would be sent back asynchronously with
+     * the
+     * {@link BrowserCallback#onGetSearchResultDone(MediaBrowser2, String, int, int, List, Bundle)}.
+     *
+     * @param query search query that you've specified with {@link #search(String, Bundle)}
      * @param page page number to get search result. Starts from {@code 1}
      * @param pageSize page size. Should be greater or equal to {@code 1}
      * @param extras extra bundle
      */
-    public void search(String query, int page, int pageSize, Bundle extras) {
-        mProvider.search_impl(query, page, pageSize, extras);
+    public void getSearchResult(@NonNull String query, int page, int pageSize,
+            @Nullable Bundle extras) {
+        mProvider.getSearchResult_impl(query, page, pageSize, extras);
     }
 }

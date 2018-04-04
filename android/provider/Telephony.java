@@ -33,6 +33,7 @@ import android.telephony.Rlog;
 import android.telephony.ServiceState;
 import android.telephony.SmsMessage;
 import android.telephony.SubscriptionManager;
+import android.telephony.TelephonyManager;
 import android.text.TextUtils;
 import android.util.Patterns;
 
@@ -1102,10 +1103,15 @@ public final class Telephony {
                 "android.provider.Telephony.MMS_DOWNLOADED";
 
             /**
-             * Broadcast Action: A debug code has been entered in the dialer. These "secret codes"
-             * are used to activate developer menus by dialing certain codes. And they are of the
-             * form {@code *#*#&lt;code&gt;#*#*}. The intent will have the data URI:
-             * {@code android_secret_code://&lt;code&gt;}.
+             * Broadcast Action: A debug code has been entered in the dialer. This intent is
+             * broadcast by the system and OEM telephony apps may need to receive these broadcasts.
+             * These "secret codes" are used to activate developer menus by dialing certain codes.
+             * And they are of the form {@code *#*#&lt;code&gt;#*#*}. The intent will have the data
+             * URI: {@code android_secret_code://&lt;code&gt;}. It is possible that a manifest
+             * receiver would be woken up even if it is not currently running.
+             *
+             * <p>Requires {@code android.Manifest.permission#CONTROL_INCALL_EXPERIENCE} to
+             * send and receive.</p>
              */
             @SdkConstant(SdkConstantType.BROADCAST_INTENT_ACTION)
             public static final String SECRET_CODE_ACTION =
@@ -2731,6 +2737,7 @@ public final class Telephony {
          * This should be spread to other technologies,
          * but is currently only used for LTE (14) and eHRPD (13).
          * <P>Type: INTEGER</P>
+         * @deprecated this column is no longer supported, use {@link #NETWORK_TYPE_BITMASK} instead
          */
         @Deprecated
         public static final String BEARER = "bearer";
@@ -2743,13 +2750,14 @@ public final class Telephony {
          * Bitmask for a radio tech R is (1 << (R - 1))
          * <P>Type: INTEGER</P>
          * @hide
+         * @deprecated this column is no longer supported, use {@link #NETWORK_TYPE_BITMASK} instead
          */
         @Deprecated
         public static final String BEARER_BITMASK = "bearer_bitmask";
 
         /**
          * Radio technology (network type) bitmask.
-         * To check what values can be contained, refer to
+         * To check what values can be contained, refer to the NETWORK_TYPE_ constants in
          * {@link android.telephony.TelephonyManager}.
          * Bitmask for a radio tech R is (1 << (R - 1))
          * <P>Type: INTEGER</P>
@@ -3157,8 +3165,8 @@ public final class Telephony {
             values.put(RIL_VOICE_RADIO_TECHNOLOGY, state.getRilVoiceRadioTechnology());
             values.put(RIL_DATA_RADIO_TECHNOLOGY, state.getRilDataRadioTechnology());
             values.put(CSS_INDICATOR, state.getCssIndicator());
-            values.put(NETWORK_ID, state.getNetworkId());
-            values.put(SYSTEM_ID, state.getSystemId());
+            values.put(NETWORK_ID, state.getCdmaNetworkId());
+            values.put(SYSTEM_ID, state.getCdmaSystemId());
             values.put(CDMA_ROAMING_INDICATOR, state.getCdmaRoamingIndicator());
             values.put(CDMA_DEFAULT_ROAMING_INDICATOR, state.getCdmaDefaultRoamingIndicator());
             values.put(CDMA_ERI_ICON_INDEX, state.getCdmaEriIconIndex());
@@ -3288,13 +3296,13 @@ public final class Telephony {
         public static final String CSS_INDICATOR = "css_indicator";
 
         /**
-         * This is the same as {@link ServiceState#getNetworkId()}.
+         * This is the same as {@link ServiceState#getCdmaNetworkId()}.
          * @hide
          */
         public static final String NETWORK_ID = "network_id";
 
         /**
-         * This is the same as {@link ServiceState#getSystemId()}.
+         * This is the same as {@link ServiceState#getCdmaSystemId()}.
          * @hide
          */
         public static final String SYSTEM_ID = "system_id";
@@ -3345,73 +3353,118 @@ public final class Telephony {
     }
 
     /**
-     * Contains carrier identification information.
-     * @hide
+     * Contains carrier identification information for the current subscriptions.
+     * @see SubscriptionManager#getActiveSubscriptionIdList()
      */
-    public static final class CarrierIdentification implements BaseColumns {
+    public static final class CarrierId implements BaseColumns {
         /**
-         * Numeric operator ID (as String). {@code MCC + MNC}
-         * <P>Type: TEXT </P>
+         * Not instantiable.
+         * @hide
          */
-        public static final String MCCMNC = "mccmnc";
+        private CarrierId() {}
 
         /**
-         * Group id level 1 (as String).
-         * <P>Type: TEXT </P>
+         * The {@code content://} style URI for this provider.
          */
-        public static final String GID1 = "gid1";
+        public static final Uri CONTENT_URI = Uri.parse("content://carrier_id");
 
         /**
-         * Group id level 2 (as String).
-         * <P>Type: TEXT </P>
+         * The authority string for the CarrierId Provider
+         * @hide
          */
-        public static final String GID2 = "gid2";
+        public static final String AUTHORITY = "carrier_id";
+
 
         /**
-         * Public Land Mobile Network name.
-         * <P>Type: TEXT </P>
+         * Generates a content {@link Uri} used to receive updates on carrier identity change
+         * on the given subscriptionId
+         * <p>
+         * Use this {@link Uri} with a {@link ContentObserver} to be notified of changes to the
+         * carrier identity {@link TelephonyManager#getSimCarrierId()}
+         * while your app is running. You can also use a {@link JobService} to ensure your app
+         * is notified of changes to the {@link Uri} even when it is not running.
+         * Note, however, that using a {@link JobService} does not guarantee timely delivery of
+         * updates to the {@link Uri}.
+         *
+         * @param subscriptionId the subscriptionId to receive updates on
+         * @return the Uri used to observe carrier identity changes
          */
-        public static final String PLMN = "plmn";
+        public static Uri getUriForSubscriptionId(int subscriptionId) {
+            return CONTENT_URI.buildUpon().appendEncodedPath(
+                    String.valueOf(subscriptionId)).build();
+        }
 
         /**
-         * Prefix xpattern of IMSI (International Mobile Subscriber Identity).
+         * A user facing carrier name.
+         * @see TelephonyManager#getSimCarrierIdName()
          * <P>Type: TEXT </P>
          */
-        public static final String IMSI_PREFIX_XPATTERN = "imsi_prefix_xpattern";
-
-        /**
-         * Service Provider Name.
-         * <P>Type: TEXT </P>
-         */
-        public static final String SPN = "spn";
-
-        /**
-         * Prefer APN name.
-         * <P>Type: TEXT </P>
-         */
-        public static final String APN = "apn";
-
-        /**
-         * Prefix of Integrated Circuit Card Identifier.
-         * <P>Type: TEXT </P>
-         */
-        public static final String ICCID_PREFIX = "iccid_prefix";
-
-        /**
-         * User facing carrier name.
-         * <P>Type: TEXT </P>
-         */
-        public static final String NAME = "carrier_name";
+        public static final String CARRIER_NAME = "carrier_name";
 
         /**
          * A unique carrier id
+         * @see TelephonyManager#getSimCarrierId()
          * <P>Type: INTEGER </P>
          */
-        public static final String CID = "carrier_id";
+        public static final String CARRIER_ID = "carrier_id";
 
         /**
-         * The {@code content://} URI for this table.
+         * Contains mappings between matching rules with carrier id for all carriers.
+         * @hide
          */
-        public static final Uri CONTENT_URI = Uri.parse("content://carrier_identification");
+        public static final class All implements BaseColumns {
+            /**
+             * Numeric operator ID (as String). {@code MCC + MNC}
+             * <P>Type: TEXT </P>
+             */
+            public static final String MCCMNC = "mccmnc";
+
+            /**
+             * Group id level 1 (as String).
+             * <P>Type: TEXT </P>
+             */
+            public static final String GID1 = "gid1";
+
+            /**
+             * Group id level 2 (as String).
+             * <P>Type: TEXT </P>
+             */
+            public static final String GID2 = "gid2";
+
+            /**
+             * Public Land Mobile Network name.
+             * <P>Type: TEXT </P>
+             */
+            public static final String PLMN = "plmn";
+
+            /**
+             * Prefix xpattern of IMSI (International Mobile Subscriber Identity).
+             * <P>Type: TEXT </P>
+             */
+            public static final String IMSI_PREFIX_XPATTERN = "imsi_prefix_xpattern";
+
+            /**
+             * Service Provider Name.
+             * <P>Type: TEXT </P>
+             */
+            public static final String SPN = "spn";
+
+            /**
+             * Prefer APN name.
+             * <P>Type: TEXT </P>
+             */
+            public static final String APN = "apn";
+
+            /**
+             * Prefix of Integrated Circuit Card Identifier.
+             * <P>Type: TEXT </P>
+             */
+            public static final String ICCID_PREFIX = "iccid_prefix";
+
+            /**
+             * The {@code content://} URI for this table.
+             */
+            public static final Uri CONTENT_URI = Uri.parse("content://carrier_id/all");
+        }
     }
 }

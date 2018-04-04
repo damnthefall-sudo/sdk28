@@ -16,11 +16,17 @@
 
 package com.android.server.wm;
 
+import static com.android.server.wm.AnimationAdapterProto.LOCAL;
+import static com.android.server.wm.LocalAnimationAdapterProto.ANIMATION_SPEC;
+
 import android.os.SystemClock;
+import android.util.proto.ProtoOutputStream;
 import android.view.SurfaceControl;
 import android.view.SurfaceControl.Transaction;
 
 import com.android.server.wm.SurfaceAnimator.OnAnimationFinishedCallback;
+
+import java.io.PrintWriter;
 
 /**
  * Animation that can be executed without holding the window manager lock. See
@@ -40,6 +46,11 @@ class LocalAnimationAdapter implements AnimationAdapter {
     @Override
     public boolean getDetachWallpaper() {
         return mSpec.getDetachWallpaper();
+    }
+
+    @Override
+    public boolean getShowWallpaper() {
+        return mSpec.getShowWallpaper();
     }
 
     @Override
@@ -69,6 +80,18 @@ class LocalAnimationAdapter implements AnimationAdapter {
         return mSpec.calculateStatusBarTransitionStartTime();
     }
 
+    @Override
+    public void dump(PrintWriter pw, String prefix) {
+        mSpec.dump(pw, prefix);
+    }
+
+    @Override
+    public void writeToProto(ProtoOutputStream proto) {
+        final long token = proto.start(LOCAL);
+        mSpec.writeToProto(proto, ANIMATION_SPEC);
+        proto.end(token);
+    }
+
     /**
      * Describes how to apply an animation.
      */
@@ -78,6 +101,13 @@ class LocalAnimationAdapter implements AnimationAdapter {
          * @see AnimationAdapter#getDetachWallpaper
          */
         default boolean getDetachWallpaper() {
+            return false;
+        }
+
+        /**
+         * @see AnimationAdapter#getShowWallpaper
+         */
+        default boolean getShowWallpaper() {
             return false;
         }
 
@@ -115,5 +145,15 @@ class LocalAnimationAdapter implements AnimationAdapter {
         default boolean canSkipFirstFrame() {
             return false;
         }
+
+        void dump(PrintWriter pw, String prefix);
+
+        default void writeToProto(ProtoOutputStream proto, long fieldId) {
+            final long token = proto.start(fieldId);
+            writeToProtoInner(proto);
+            proto.end(token);
+        }
+
+        void writeToProtoInner(ProtoOutputStream proto);
     }
 }

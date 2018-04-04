@@ -17,12 +17,12 @@
 package com.android.server.backup.fullbackup;
 
 import static com.android.server.backup.BackupPasswordManager.PBKDF_CURRENT;
-import static com.android.server.backup.RefactoredBackupManagerService.BACKUP_FILE_HEADER_MAGIC;
-import static com.android.server.backup.RefactoredBackupManagerService.BACKUP_FILE_VERSION;
-import static com.android.server.backup.RefactoredBackupManagerService.DEBUG;
-import static com.android.server.backup.RefactoredBackupManagerService.MORE_DEBUG;
-import static com.android.server.backup.RefactoredBackupManagerService.SHARED_BACKUP_AGENT_PACKAGE;
-import static com.android.server.backup.RefactoredBackupManagerService.TAG;
+import static com.android.server.backup.BackupManagerService.BACKUP_FILE_HEADER_MAGIC;
+import static com.android.server.backup.BackupManagerService.BACKUP_FILE_VERSION;
+import static com.android.server.backup.BackupManagerService.DEBUG;
+import static com.android.server.backup.BackupManagerService.MORE_DEBUG;
+import static com.android.server.backup.BackupManagerService.SHARED_BACKUP_AGENT_PACKAGE;
+import static com.android.server.backup.BackupManagerService.TAG;
 
 import android.app.backup.IFullBackupRestoreObserver;
 import android.content.pm.ApplicationInfo;
@@ -37,7 +37,7 @@ import android.util.Slog;
 import com.android.server.AppWidgetBackupBridge;
 import com.android.server.backup.BackupRestoreTask;
 import com.android.server.backup.KeyValueAdbBackupEngine;
-import com.android.server.backup.RefactoredBackupManagerService;
+import com.android.server.backup.BackupManagerService;
 import com.android.server.backup.utils.AppBackupUtils;
 import com.android.server.backup.utils.PasswordUtils;
 
@@ -66,7 +66,7 @@ import javax.crypto.spec.SecretKeySpec;
  */
 public class PerformAdbBackupTask extends FullBackupTask implements BackupRestoreTask {
 
-    private RefactoredBackupManagerService backupManagerService;
+    private BackupManagerService backupManagerService;
     FullBackupEngine mBackupEngine;
     final AtomicBoolean mLatch;
 
@@ -86,7 +86,7 @@ public class PerformAdbBackupTask extends FullBackupTask implements BackupRestor
     String mEncryptPassword;
     private final int mCurrentOpToken;
 
-    public PerformAdbBackupTask(RefactoredBackupManagerService backupManagerService,
+    public PerformAdbBackupTask(BackupManagerService backupManagerService,
             ParcelFileDescriptor fd, IFullBackupRestoreObserver observer,
             boolean includeApks, boolean includeObbs, boolean includeShared, boolean doWidgets,
             String curPassword, String encryptPassword, boolean doAllApps, boolean doSystem,
@@ -129,7 +129,7 @@ public class PerformAdbBackupTask extends FullBackupTask implements BackupRestor
                 try {
                     PackageInfo info = backupManagerService.getPackageManager().getPackageInfo(
                             pkgName,
-                            PackageManager.GET_SIGNATURES);
+                            PackageManager.GET_SIGNING_CERTIFICATES);
                     set.put(pkgName, info);
                 } catch (NameNotFoundException e) {
                     Slog.w(TAG, "Unknown package " + pkgName + ", skipping");
@@ -240,7 +240,8 @@ public class PerformAdbBackupTask extends FullBackupTask implements BackupRestor
 
         // doAllApps supersedes the package set if any
         if (mAllApps) {
-            List<PackageInfo> allPackages = pm.getInstalledPackages(PackageManager.GET_SIGNATURES);
+            List<PackageInfo> allPackages = pm.getInstalledPackages(
+                    PackageManager.GET_SIGNING_CERTIFICATES);
             for (int i = 0; i < allPackages.size(); i++) {
                 PackageInfo pkg = allPackages.get(i);
                 // Exclude system apps if we've been asked to do so
@@ -410,7 +411,8 @@ public class PerformAdbBackupTask extends FullBackupTask implements BackupRestor
                                 SHARED_BACKUP_AGENT_PACKAGE);
 
                 mBackupEngine = new FullBackupEngine(backupManagerService, out,
-                        null, pkg, mIncludeApks, this, Long.MAX_VALUE, mCurrentOpToken);
+                        null, pkg, mIncludeApks, this, Long.MAX_VALUE,
+                        mCurrentOpToken, /*transportFlags=*/ 0);
                 sendOnBackupPackage(isSharedStorage ? "Shared storage" : pkg.packageName);
 
                 // Don't need to check preflight result as there is no preflight hook.

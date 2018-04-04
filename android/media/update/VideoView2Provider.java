@@ -16,14 +16,26 @@
 
 package android.media.update;
 
+import android.annotation.SystemApi;
 import android.media.AudioAttributes;
+import android.media.DataSourceDesc;
+import android.media.MediaItem2;
+import android.media.MediaMetadata2;
 import android.media.MediaPlayerBase;
+import android.media.SessionToken2;
+import android.media.session.MediaController;
+import android.media.session.PlaybackState;
+import android.media.session.MediaSession;
 import android.net.Uri;
+import android.util.AttributeSet;
 import android.widget.MediaControlView2;
 import android.widget.VideoView2;
 
+import com.android.internal.annotations.VisibleForTesting;
+
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executor;
 
 /**
  * Interface for connecting the public API to an updatable implementation.
@@ -39,35 +51,49 @@ import java.util.Map;
  * @hide
  */
 // TODO @SystemApi
-public interface VideoView2Provider extends ViewProvider {
-    void setMediaControlView2_impl(MediaControlView2 mediaControlView);
+public interface VideoView2Provider extends ViewGroupProvider {
+    void initialize(AttributeSet attrs, int defStyleAttr, int defStyleRes);
+
+    void setMediaControlView2_impl(MediaControlView2 mediaControlView, long intervalMs);
+    void setMediaMetadata_impl(MediaMetadata2 metadata);
+    /**
+     * @hide TODO: remove
+     */
+    MediaController getMediaController_impl();
+    SessionToken2 getMediaSessionToken_impl();
     MediaControlView2 getMediaControlView2_impl();
-    void start_impl();
-    void pause_impl();
-    int getDuration_impl();
-    int getCurrentPosition_impl();
-    void seekTo_impl(int msec);
-    boolean isPlaying_impl();
-    int getBufferPercentage_impl();
-    int getAudioSessionId_impl();
-    void showSubtitle_impl();
-    void hideSubtitle_impl();
-    void setFullScreen_impl(boolean fullScreen);
+    MediaMetadata2 getMediaMetadata_impl();
+    void setSubtitleEnabled_impl(boolean enable);
+    boolean isSubtitleEnabled_impl();
+    // TODO: remove setSpeed_impl once MediaController2 is ready.
     void setSpeed_impl(float speed);
-    float getSpeed_impl();
     void setAudioFocusRequest_impl(int focusGain);
     void setAudioAttributes_impl(AudioAttributes attributes);
-    void setRouteAttributes_impl(List<String> routeCategories, MediaPlayerBase player);
     void setVideoPath_impl(String path);
-    void setVideoURI_impl(Uri uri);
-    void setVideoURI_impl(Uri uri, Map<String, String> headers);
+    /**
+     * @hide TODO: remove
+     */
+    void setVideoUri_impl(Uri uri);
+    /**
+     * @hide TODO: remove
+     */
+    void setVideoUri_impl(Uri uri, Map<String, String> headers);
+    void setMediaItem_impl(MediaItem2 mediaItem);
+    void setDataSource_impl(DataSourceDesc dsd);
     void setViewType_impl(int viewType);
     int getViewType_impl();
-    void stopPlayback_impl();
-    void setOnPreparedListener_impl(VideoView2.OnPreparedListener l);
-    void setOnCompletionListener_impl(VideoView2.OnCompletionListener l);
-    void setOnErrorListener_impl(VideoView2.OnErrorListener l);
-    void setOnInfoListener_impl(VideoView2.OnInfoListener l);
+    /**
+     * @hide TODO: remove
+     */
+    void setCustomActions_impl(List<PlaybackState.CustomAction> actionList,
+            Executor executor, VideoView2.OnCustomActionListener listener);
+    /**
+     * @hide
+     */
+    @VisibleForTesting
     void setOnViewTypeChangedListener_impl(VideoView2.OnViewTypeChangedListener l);
-    void setFullScreenChangedListener_impl(VideoView2.OnFullScreenChangedListener l);
+    /**
+     * @hide TODO: remove
+     */
+    void setFullScreenRequestListener_impl(VideoView2.OnFullScreenRequestListener l);
 }

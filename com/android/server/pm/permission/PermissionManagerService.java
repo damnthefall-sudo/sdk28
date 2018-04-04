@@ -242,7 +242,8 @@ public class PermissionManagerService {
         return PackageManager.PERMISSION_DENIED;
     }
 
-    private int checkUidPermission(String permName, int uid, int callingUid) {
+    private int checkUidPermission(String permName, PackageParser.Package pkg, int uid,
+            int callingUid) {
         final int callingUserId = UserHandle.getUserId(callingUid);
         final boolean isCallerInstantApp =
                 mPackageManagerInt.getInstantAppPackageName(callingUid) != null;
@@ -253,28 +254,13 @@ public class PermissionManagerService {
             return PackageManager.PERMISSION_DENIED;
         }
 
-        final String[] packages = mContext.getPackageManager().getPackagesForUid(uid);
-        if (packages != null && packages.length > 0) {
-            PackageParser.Package pkg = null;
-            for (String packageName : packages) {
-                pkg = mPackageManagerInt.getPackage(packageName);
-                if (pkg != null) {
-                    break;
-                }
-            }
-            if (pkg == null) {
-Slog.e(TAG, "TODD: No package not found; UID: " + uid);
-Slog.e(TAG, "TODD: Packages: " + Arrays.toString(packages));
-                return PackageManager.PERMISSION_DENIED;
-            }
+        if (pkg != null) {
             if (pkg.mSharedUserId != null) {
                 if (isCallerInstantApp) {
                     return PackageManager.PERMISSION_DENIED;
                 }
-            } else {
-                if (mPackageManagerInt.filterAppAccess(pkg, callingUid, callingUserId)) {
-                    return PackageManager.PERMISSION_DENIED;
-                }
+            } else if (mPackageManagerInt.filterAppAccess(pkg, callingUid, callingUserId)) {
+                return PackageManager.PERMISSION_DENIED;
             }
             final PermissionsState permissionsState =
                     ((PackageSetting) pkg.mExtras).getPermissionsState();
@@ -954,9 +940,16 @@ Slog.e(TAG, "TODD: Packages: " + Arrays.toString(packages));
      * <p>This handles parent/child apps.
      */
     private boolean hasPrivappWhitelistEntry(String perm, PackageParser.Package pkg) {
-        ArraySet<String> wlPermissions = pkg.isVendor() ?
-                SystemConfig.getInstance().getVendorPrivAppPermissions(pkg.packageName)
-                    : SystemConfig.getInstance().getPrivAppPermissions(pkg.packageName);
+        ArraySet<String> wlPermissions = null;
+        if (pkg.isVendor()) {
+            wlPermissions =
+                    SystemConfig.getInstance().getVendorPrivAppPermissions(pkg.packageName);
+        } else if (pkg.isProduct()) {
+            wlPermissions =
+                    SystemConfig.getInstance().getProductPrivAppPermissions(pkg.packageName);
+        } else {
+            wlPermissions = SystemConfig.getInstance().getPrivAppPermissions(pkg.packageName);
+        }
         // Let's check if this package is whitelisted...
         boolean whitelisted = wlPermissions != null && wlPermissions.contains(perm);
         // If it's not, we'll also tail-recurse to the parent.
@@ -979,11 +972,17 @@ Slog.e(TAG, "TODD: Packages: " + Arrays.toString(packages));
                 // Only report violations for apps on system image
                 if (!mSystemReady && !pkg.isUpdatedSystemApp()) {
                     // it's only a reportable violation if the permission isn't explicitly denied
-                    final ArraySet<String> deniedPermissions = pkg.isVendor() ?
-                            SystemConfig.getInstance()
-                                    .getVendorPrivAppDenyPermissions(pkg.packageName)
-                            : SystemConfig.getInstance()
-                                    .getPrivAppDenyPermissions(pkg.packageName);
+                    ArraySet<String> deniedPermissions = null;
+                    if (pkg.isVendor()) {
+                        deniedPermissions = SystemConfig.getInstance()
+                                .getVendorPrivAppDenyPermissions(pkg.packageName);
+                    } else if (pkg.isProduct()) {
+                        deniedPermissions = SystemConfig.getInstance()
+                                .getProductPrivAppDenyPermissions(pkg.packageName);
+                    } else {
+                        deniedPermissions = SystemConfig.getInstance()
+                                .getPrivAppDenyPermissions(pkg.packageName);
+                    }
                     final boolean permissionViolation =
                             deniedPermissions == null || !deniedPermissions.contains(perm);
                     if (permissionViolation) {
@@ -1009,12 +1008,24 @@ Slog.e(TAG, "TODD: Packages: " + Arrays.toString(packages));
                 PackageManagerInternal.PACKAGE_SYSTEM, UserHandle.USER_SYSTEM);
         final PackageParser.Package systemPackage =
                 mPackageManagerInt.getPackage(systemPackageName);
-        boolean allowed = (PackageManagerServiceUtils.compareSignatures(
-                                bp.getSourceSignatures(), pkg.mSigningDetails.signatures)
-                        == PackageManager.SIGNATURE_MATCH)
-                || (PackageManagerServiceUtils.compareSignatures(
-                systemPackage.mSigningDetails.signatures, pkg.mSigningDetails.signatures)
-                        == PackageManager.SIGNATURE_MATCH);
+
+        // check if the package is allow to use this signature permission.  A package is allowed to
+        // use a signature permission if:
+        //     - it has the same set of signing certificates as the source package
+        //     - or its signing certificate was rotated from the source package's certificate
+        //     - or its signing certificate is a previous signing certificate of the defining
+        //       package, and the defining package still trusts the old certificate for permissions
+        //     - or it shares the above relationships with the system package
+        boolean allowed =
+                pkg.mSigningDetails.hasAncestorOrSelf(
+                        bp.getSourcePackageSetting().getSigningDetails())
+                || bp.getSourcePackageSetting().getSigningDetails().checkCapability(
+                        pkg.mSigningDetails,
+                        PackageParser.SigningDetails.CertCapabilities.PERMISSION)
+                || pkg.mSigningDetails.hasAncestorOrSelf(systemPackage.mSigningDetails)
+                || systemPackage.mSigningDetails.checkCapability(
+                        pkg.mSigningDetails,
+                        PackageParser.SigningDetails.CertCapabilities.PERMISSION);
         if (!allowed && (privilegedPermission || oemPermission)) {
             if (pkg.isSystem()) {
                 // For updated system applications, a privileged/oem permission
@@ -1137,6 +1148,13 @@ Slog.e(TAG, "TODD: Packages: " + Arrays.toString(packages));
                 // this app is a setup wizard, then it gets the permission.
                 allowed = true;
             }
+            if (!allowed && bp.isSystemTextClassifier()
+                    && pkg.packageName.equals(mPackageManagerInt.getKnownPackageName(
+                            PackageManagerInternal.PACKAGE_SYSTEM_TEXT_CLASSIFIER,
+                            UserHandle.USER_SYSTEM))) {
+                // Special permissions for the system default text classifier.
+                allowed = true;
+            }
         }
         return allowed;
     }
@@ -1185,6 +1203,7 @@ Slog.e(TAG, "TODD: Packages: " + Arrays.toString(packages));
         return false;
     }
 
+    @GuardedBy("mLock")
     private void grantRuntimePermissionsGrantedToDisabledPackageLocked(
             PackageParser.Package pkg, int callingUid, PermissionCallback callback) {
         if (pkg.parentPackage == null) {
@@ -1438,8 +1457,10 @@ Slog.e(TAG, "TODD: Packages: " + Arrays.toString(packages));
         final PermissionsState permissionsState = ps.getPermissionsState();
 
         final int flags = permissionsState.getPermissionFlags(permName, userId);
-        if ((flags & PackageManager.FLAG_PERMISSION_SYSTEM_FIXED) != 0) {
-            throw new SecurityException("Cannot revoke system fixed permission "
+        // Only the system may revoke SYSTEM_FIXED permissions.
+        if ((flags & PackageManager.FLAG_PERMISSION_SYSTEM_FIXED) != 0
+                && UserHandle.getCallingAppId() != Process.SYSTEM_UID) {
+            throw new SecurityException("Non-System UID cannot revoke system fixed permission "
                     + permName + " for package " + packageName);
         }
         if (!overridePolicy && (flags & PackageManager.FLAG_PERMISSION_POLICY_FIXED) != 0) {
@@ -1474,6 +1495,7 @@ Slog.e(TAG, "TODD: Packages: " + Arrays.toString(packages));
         }
     }
 
+    @GuardedBy("mLock")
     private int[] revokeUnusedSharedUserPermissionsLocked(
             SharedUserSetting suSetting, int[] allUserIds) {
         // Collect all used permissions in the UID
@@ -1483,6 +1505,9 @@ Slog.e(TAG, "TODD: Packages: " + Arrays.toString(packages));
             return EmptyArray.INT;
         }
         for (PackageParser.Package pkg : pkgList) {
+            if (pkg.requestedPermissions == null) {
+                continue;
+            }
             final int requestedPermCount = pkg.requestedPermissions.size();
             for (int j = 0; j < requestedPermCount; j++) {
                 String permission = pkg.requestedPermissions.get(j);
@@ -2041,8 +2066,9 @@ Slog.e(TAG, "TODD: Packages: " + Arrays.toString(packages));
                     permName, packageName, callingUid, userId);
         }
         @Override
-        public int checkUidPermission(String permName, int uid, int callingUid) {
-            return PermissionManagerService.this.checkUidPermission(permName, uid, callingUid);
+        public int checkUidPermission(String permName, PackageParser.Package pkg, int uid,
+                int callingUid) {
+            return PermissionManagerService.this.checkUidPermission(permName, pkg, uid, callingUid);
         }
         @Override
         public PermissionGroupInfo getPermissionGroupInfo(String groupName, int flags,

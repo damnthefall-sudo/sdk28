@@ -16,24 +16,24 @@
 
 package android.media.update;
 
-import android.media.MediaPlayerBase;
-import android.media.session.PlaybackState;
-import android.os.Handler;
+import android.media.MediaItem2;
 
 /**
  * @hide
  */
-// TODO(jaewan): SystemApi
 public interface TransportControlProvider {
     void play_impl();
     void pause_impl();
     void stop_impl();
-    void skipToPrevious_impl();
-    void skipToNext_impl();
+    void skipToPreviousItem_impl();
+    void skipToNextItem_impl();
 
     void prepare_impl();
-    void fastForward_impl();
-    void rewind_impl();
     void seekTo_impl(long pos);
-    void setCurrentPlaylistItem_impl(int index);
+    void skipToPlaylistItem_impl(MediaItem2 item);
+
+    int getRepeatMode_impl();
+    void setRepeatMode_impl(int repeatMode);
+    int getShuffleMode_impl();
+    void setShuffleMode_impl(int shuffleMode);
 }

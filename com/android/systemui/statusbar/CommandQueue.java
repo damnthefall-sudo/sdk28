@@ -18,12 +18,13 @@ package com.android.systemui.statusbar;
 
 import android.content.ComponentName;
 import android.graphics.Rect;
-import android.hardware.fingerprint.IFingerprintDialogReceiver;
+import android.hardware.biometrics.IBiometricDialogReceiver;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.Message;
+import android.os.RemoteException;
 import android.support.annotation.VisibleForTesting;
 import android.util.Pair;
 
@@ -90,6 +91,8 @@ public class CommandQueue extends IStatusBar.Stub {
     private static final int MSG_FINGERPRINT_ERROR             = 42 << MSG_SHIFT;
     private static final int MSG_FINGERPRINT_HIDE              = 43 << MSG_SHIFT;
     private static final int MSG_SHOW_CHARGING_ANIMATION       = 44 << MSG_SHIFT;
+    private static final int MSG_SHOW_PINNING_TOAST_ENTER_EXIT = 45 << MSG_SHIFT;
+    private static final int MSG_SHOW_PINNING_TOAST_ESCAPE     = 46 << MSG_SHIFT;
 
     public static final int FLAG_EXCLUDE_NONE = 0;
     public static final int FLAG_EXCLUDE_SEARCH_PANEL = 1 << 0;
@@ -148,14 +151,16 @@ public class CommandQueue extends IStatusBar.Stub {
         default void clickTile(ComponentName tile) { }
 
         default void handleSystemKey(int arg1) { }
+        default void showPinningEnterExitToast(boolean entering) { }
+        default void showPinningEscapeToast() { }
         default void handleShowGlobalActionsMenu() { }
         default void handleShowShutdownUi(boolean isReboot, String reason) { }
 
-        default void showChargingAnimation(int batteryLevel) {  }
+        default void showWirelessChargingAnimation(int batteryLevel) {  }
 
         default void onRotationProposal(int rotation, boolean isValid) { }
 
-        default void showFingerprintDialog(Bundle bundle, IFingerprintDialogReceiver receiver) { }
+        default void showFingerprintDialog(Bundle bundle, IBiometricDialogReceiver receiver) { }
         default void onFingerprintAuthenticated() { }
         default void onFingerprintHelp(String message) { }
         default void onFingerprintError(String error) { }
@@ -453,6 +458,21 @@ public class CommandQueue extends IStatusBar.Stub {
     }
 
     @Override
+    public void showPinningEnterExitToast(boolean entering) {
+        synchronized (mLock) {
+            mHandler.obtainMessage(MSG_SHOW_PINNING_TOAST_ENTER_EXIT, entering).sendToTarget();
+        }
+    }
+
+    @Override
+    public void showPinningEscapeToast() {
+        synchronized (mLock) {
+            mHandler.obtainMessage(MSG_SHOW_PINNING_TOAST_ESCAPE).sendToTarget();
+        }
+    }
+
+
+    @Override
     public void showGlobalActionsMenu() {
         synchronized (mLock) {
             mHandler.removeMessages(MSG_SHOW_GLOBAL_ACTIONS);
@@ -477,7 +497,7 @@ public class CommandQueue extends IStatusBar.Stub {
     }
 
     @Override
-    public void showChargingAnimation(int batteryLevel) {
+    public void showWirelessChargingAnimation(int batteryLevel) {
         mHandler.removeMessages(MSG_SHOW_CHARGING_ANIMATION);
         mHandler.obtainMessage(MSG_SHOW_CHARGING_ANIMATION, batteryLevel, 0)
                 .sendToTarget();
@@ -493,7 +513,7 @@ public class CommandQueue extends IStatusBar.Stub {
     }
 
     @Override
-    public void showFingerprintDialog(Bundle bundle, IFingerprintDialogReceiver receiver) {
+    public void showFingerprintDialog(Bundle bundle, IBiometricDialogReceiver receiver) {
         synchronized (mLock) {
             SomeArgs args = SomeArgs.obtain();
             args.arg1 = bundle;
@@ -739,7 +759,7 @@ public class CommandQueue extends IStatusBar.Stub {
                     for (int i = 0; i < mCallbacks.size(); i++) {
                         mCallbacks.get(i).showFingerprintDialog(
                                 (Bundle)((SomeArgs)msg.obj).arg1,
-                                (IFingerprintDialogReceiver)((SomeArgs)msg.obj).arg2);
+                                (IBiometricDialogReceiver)((SomeArgs)msg.obj).arg2);
                     }
                     break;
                 case MSG_FINGERPRINT_AUTHENTICATED:
@@ -764,7 +784,17 @@ public class CommandQueue extends IStatusBar.Stub {
                     break;
                 case MSG_SHOW_CHARGING_ANIMATION:
                     for (int i = 0; i < mCallbacks.size(); i++) {
-                        mCallbacks.get(i).showChargingAnimation(msg.arg1);
+                        mCallbacks.get(i).showWirelessChargingAnimation(msg.arg1);
+                    }
+                    break;
+                case MSG_SHOW_PINNING_TOAST_ENTER_EXIT:
+                    for (int i = 0; i < mCallbacks.size(); i++) {
+                        mCallbacks.get(i).showPinningEnterExitToast((Boolean) msg.obj);
+                    }
+                    break;
+                case MSG_SHOW_PINNING_TOAST_ESCAPE:
+                    for (int i = 0; i < mCallbacks.size(); i++) {
+                        mCallbacks.get(i).showPinningEscapeToast();
                     }
                     break;
             }
@@ -780,4 +810,3 @@ public class CommandQueue extends IStatusBar.Stub {
         }
     }
 }
-

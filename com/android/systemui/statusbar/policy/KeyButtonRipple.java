@@ -27,6 +27,7 @@ import android.graphics.Paint;
 import android.graphics.PixelFormat;
 import android.graphics.drawable.Drawable;
 import android.os.Handler;
+import android.os.SystemProperties;
 import android.view.DisplayListCanvas;
 import android.view.RenderNodeAnimator;
 import android.view.View;

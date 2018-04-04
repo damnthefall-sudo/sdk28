@@ -30,7 +30,7 @@ import com.android.systemui.R;
 import com.android.systemui.statusbar.ExpandableView;
 import com.android.systemui.statusbar.notification.AnimatableProperty;
 import com.android.systemui.statusbar.notification.PropertyAnimator;
-import com.android.systemui.statusbar.policy.HeadsUpManager;
+import com.android.systemui.statusbar.policy.HeadsUpUtil;
 
 /**
  * A state of a view. This can be used to apply a set of view properties to a view with
@@ -582,7 +582,7 @@ public class ViewState {
         animator.addListener(new AnimatorListenerAdapter() {
             @Override
             public void onAnimationEnd(Animator animation) {
-                HeadsUpManager.setIsClickedNotification(child, false);
+                HeadsUpUtil.setIsClickedHeadsUpNotification(child, false);
                 child.setTag(TAG_ANIMATOR_TRANSLATION_Y, null);
                 child.setTag(TAG_START_TRANSLATION_Y, null);
                 child.setTag(TAG_END_TRANSLATION_Y, null);
@@ -638,6 +638,22 @@ public class ViewState {
             previousAnimator.cancel();
         }
         return newDuration;
+    }
+
+    /**
+     * Get the end value of the xTranslation animation running on a view or the xTranslation
+     * if no animation is running.
+     */
+    public static float getFinalTranslationX(View view) {
+        if (view == null) {
+            return 0;
+        }
+        ValueAnimator xAnimator = getChildTag(view, TAG_ANIMATOR_TRANSLATION_X);
+        if (xAnimator == null) {
+            return view.getTranslationX();
+        } else {
+            return getChildTag(view, TAG_END_TRANSLATION_X);
+        }
     }
 
     /**

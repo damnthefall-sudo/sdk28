@@ -16,6 +16,8 @@
 
 package com.android.setupwizardlib.template;
 
+import static com.google.common.truth.Truth.assertThat;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertSame;
 import static org.mockito.Matchers.eq;
@@ -27,6 +29,7 @@ import android.content.res.XmlResourceParser;
 import android.graphics.Color;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.Drawable;
 import android.support.test.InstrumentationRegistry;
 import android.support.test.filters.SmallTest;
 import android.support.test.runner.AndroidJUnit4;
@@ -79,6 +82,17 @@ public class IconMixinTest {
     }
 
     @Test
+    public void setIcon_resourceId_shouldSetIcon() {
+        int icon = android.R.drawable.ic_menu_add;
+        IconMixin mixin = new IconMixin(mTemplateLayout, null, 0);
+        mixin.setIcon(icon);
+
+        Drawable drawable = mIconView.getDrawable();
+        assertThat(drawable).isInstanceOf(BitmapDrawable.class);
+        assertEquals(View.VISIBLE, mIconView.getVisibility());
+    }
+
+    @Test
     public void setIcon_shouldSetVisibilityToGone_whenIconIsNull() {
         IconMixin mixin = new IconMixin(mTemplateLayout, null, 0);
         mixin.setIcon(null);
@@ -112,5 +126,19 @@ public class IconMixinTest {
         final BitmapDrawable actual = (BitmapDrawable) mIconView.getDrawable();
         assertEquals(expected.getBitmap(), actual.getBitmap());
         assertEquals(View.VISIBLE, mIconView.getVisibility());
+    }
+
+    @Test
+    public void setContentDescription_shouldSetContentDescriptionOnIconView() {
+        IconMixin mixin = new IconMixin(mTemplateLayout, null, 0);
+        mixin.setContentDescription("hello world");
+        assertThat(mIconView.getContentDescription()).isEqualTo("hello world");
+    }
+
+    @Test
+    public void getContentDescription_shouldReturnContentDescriptionFromView() {
+        IconMixin mixin = new IconMixin(mTemplateLayout, null, 0);
+        mIconView.setContentDescription("aloha");
+        assertThat(mixin.getContentDescription()).isEqualTo("aloha");
     }
 }

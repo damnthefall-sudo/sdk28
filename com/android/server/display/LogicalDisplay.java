@@ -21,12 +21,12 @@ import android.hardware.display.DisplayManagerInternal;
 import android.view.Display;
 import android.view.DisplayInfo;
 import android.view.Surface;
+import android.view.SurfaceControl;
 
 import java.io.PrintWriter;
 import java.util.Arrays;
 import java.util.List;
-
-import libcore.util.Objects;
+import java.util.Objects;
 
 /**
  * Describes how a logical display is configured.
@@ -225,7 +225,7 @@ final class LogicalDisplay {
         // logical display that they are sharing.  (eg. Adjust size for pixel-perfect
         // mirroring over HDMI.)
         DisplayDeviceInfo deviceInfo = mPrimaryDisplayDevice.getDisplayDeviceInfoLocked();
-        if (!Objects.equal(mPrimaryDisplayDeviceInfo, deviceInfo)) {
+        if (!Objects.equals(mPrimaryDisplayDeviceInfo, deviceInfo)) {
             mBaseDisplayInfo.layerStack = mLayerStack;
             mBaseDisplayInfo.flags = 0;
             if ((deviceInfo.flags & DisplayDeviceInfo.FLAG_SUPPORTS_PROTECTED_BUFFERS) != 0) {
@@ -305,17 +305,18 @@ final class LogicalDisplay {
      * @param device The display device to modify.
      * @param isBlanked True if the device is being blanked.
      */
-    public void configureDisplayInTransactionLocked(DisplayDevice device,
+    public void configureDisplayLocked(SurfaceControl.Transaction t,
+            DisplayDevice device,
             boolean isBlanked) {
         // Set the layer stack.
-        device.setLayerStackInTransactionLocked(isBlanked ? BLANK_LAYER_STACK : mLayerStack);
+        device.setLayerStackLocked(t, isBlanked ? BLANK_LAYER_STACK : mLayerStack);
 
         // Set the color mode and mode.
         if (device == mPrimaryDisplayDevice) {
-            device.requestDisplayModesInTransactionLocked(
+            device.requestDisplayModesLocked(
                     mRequestedColorMode, mRequestedModeId);
         } else {
-            device.requestDisplayModesInTransactionLocked(0, 0);  // Revert to default.
+            device.requestDisplayModesLocked(0, 0);  // Revert to default.
         }
 
         // Only grab the display info now as it may have been changed based on the requests above.
@@ -378,7 +379,7 @@ final class LogicalDisplay {
         mTempDisplayRect.right += mDisplayOffsetX;
         mTempDisplayRect.top += mDisplayOffsetY;
         mTempDisplayRect.bottom += mDisplayOffsetY;
-        device.setProjectionInTransactionLocked(orientation, mTempLayerStackRect, mTempDisplayRect);
+        device.setProjectionLocked(t, orientation, mTempLayerStackRect, mTempDisplayRect);
     }
 
     /**

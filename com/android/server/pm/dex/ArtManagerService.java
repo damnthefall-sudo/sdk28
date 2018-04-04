@@ -19,31 +19,41 @@ package com.android.server.pm.dex;
 import android.Manifest;
 import android.annotation.UserIdInt;
 import android.content.pm.ApplicationInfo;
+import android.content.pm.IPackageManager;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.PackageParser;
 import android.content.pm.dex.ArtManager;
+import android.content.pm.dex.ArtManager.ProfileType;
+import android.content.pm.dex.ArtManagerInternal;
 import android.content.pm.dex.DexMetadataHelper;
+import android.content.pm.dex.ISnapshotRuntimeProfileCallback;
+import android.content.pm.dex.PackageOptimizationInfo;
 import android.os.Binder;
-import android.os.Environment;
+import android.os.Build;
 import android.os.Handler;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
-import android.content.pm.IPackageManager;
-import android.content.pm.dex.ISnapshotRuntimeProfileCallback;
 import android.os.SystemProperties;
 import android.os.UserHandle;
+import android.system.Os;
 import android.util.ArrayMap;
 import android.util.Slog;
-
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.os.BackgroundThread;
 import com.android.internal.util.ArrayUtils;
 import com.android.internal.util.Preconditions;
+import com.android.server.LocalServices;
 import com.android.server.pm.Installer;
 import com.android.server.pm.Installer.InstallerException;
+import com.android.server.pm.PackageManagerServiceCompilerMapping;
+import dalvik.system.DexFile;
+import dalvik.system.VMRuntime;
 import java.io.File;
 import java.io.FileNotFoundException;
+import libcore.io.IoUtils;
+import libcore.util.NonNull;
+import libcore.util.Nullable;
 
 /**
  * A system service that provides access to runtime and compiler artifacts.
@@ -63,6 +73,12 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
     private static boolean DEBUG = false;
     private static boolean DEBUG_IGNORE_PERMISSIONS = false;
 
+    // Package name used to create the profile directory layout when
+    // taking a snapshot of the boot image profile.
+    private static final String BOOT_IMAGE_ANDROID_PACKAGE = "android";
+    // Profile name used for the boot image profile.
+    private static final String BOOT_IMAGE_PROFILE_NAME = "android.prof";
+
     private final IPackageManager mPackageManager;
     private final Object mInstallLock;
     @GuardedBy("mInstallLock")
@@ -70,28 +86,50 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
 
     private final Handler mHandler;
 
+    static {
+        verifyTronLoggingConstants();
+    }
+
     public ArtManagerService(IPackageManager pm, Installer installer, Object installLock) {
         mPackageManager = pm;
         mInstaller = installer;
         mInstallLock = installLock;
         mHandler = new Handler(BackgroundThread.getHandler().getLooper());
+
+        LocalServices.addService(ArtManagerInternal.class, new ArtManagerInternalImpl());
     }
 
     @Override
-    public void snapshotRuntimeProfile(String packageName, String codePath,
-            ISnapshotRuntimeProfileCallback callback) {
+    public void snapshotRuntimeProfile(@ProfileType int profileType, @Nullable String packageName,
+            @Nullable String codePath, @NonNull ISnapshotRuntimeProfileCallback callback) {
         // Sanity checks on the arguments.
-        Preconditions.checkStringNotEmpty(packageName);
-        Preconditions.checkStringNotEmpty(codePath);
         Preconditions.checkNotNull(callback);
 
-        // Verify that the caller has the right permissions.
-        checkReadRuntimeProfilePermission();
+        boolean bootImageProfile = profileType == ArtManager.PROFILE_BOOT_IMAGE;
+        if (!bootImageProfile) {
+            Preconditions.checkStringNotEmpty(codePath);
+            Preconditions.checkStringNotEmpty(packageName);
+        }
+
+        // Verify that the caller has the right permissions and that the runtime profiling is
+        // enabled. The call to isRuntimePermissions will checkReadRuntimeProfilePermission.
+        if (!isRuntimeProfilingEnabled(profileType)) {
+            throw new IllegalStateException("Runtime profiling is not enabled for " + profileType);
+        }
 
         if (DEBUG) {
             Slog.d(TAG, "Requested snapshot for " + packageName + ":" + codePath);
         }
 
+        if (bootImageProfile) {
+            snapshotBootImageProfile(callback);
+        } else {
+            snapshotAppProfile(packageName, codePath, callback);
+        }
+    }
+
+    private void snapshotAppProfile(String packageName, String codePath,
+            ISnapshotRuntimeProfileCallback callback) {
         PackageInfo info = null;
         try {
             // Note that we use the default user 0 to retrieve the package info.
@@ -111,11 +149,13 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
         }
 
         boolean pathFound = info.applicationInfo.getBaseCodePath().equals(codePath);
+        String splitName = null;
         String[] splitCodePaths = info.applicationInfo.getSplitCodePaths();
         if (!pathFound && (splitCodePaths != null)) {
-            for (String path : splitCodePaths) {
-                if (path.equals(codePath)) {
+            for (int i = splitCodePaths.length - 1; i >= 0; i--) {
+                if (splitCodePaths[i].equals(codePath)) {
                     pathFound = true;
+                    splitName = info.applicationInfo.splitNames[i];
                     break;
                 }
             }
@@ -126,18 +166,25 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
         }
 
         // All good, create the profile snapshot.
-        createProfileSnapshot(packageName, codePath, callback, info);
+        int appId = UserHandle.getAppId(info.applicationInfo.uid);
+        if (appId < 0) {
+            postError(callback, packageName, ArtManager.SNAPSHOT_FAILED_INTERNAL_ERROR);
+            Slog.wtf(TAG, "AppId is -1 for package: " + packageName);
+            return;
+        }
+
+        createProfileSnapshot(packageName, ArtManager.getProfileName(splitName), codePath,
+                appId, callback);
         // Destroy the snapshot, we no longer need it.
-        destroyProfileSnapshot(packageName, codePath);
+        destroyProfileSnapshot(packageName, ArtManager.getProfileName(splitName));
     }
 
-    private void createProfileSnapshot(String packageName, String codePath,
-            ISnapshotRuntimeProfileCallback callback, PackageInfo info) {
+    private void createProfileSnapshot(String packageName, String profileName, String classpath,
+            int appId, ISnapshotRuntimeProfileCallback callback) {
         // Ask the installer to snapshot the profile.
         synchronized (mInstallLock) {
             try {
-                if (!mInstaller.createProfileSnapshot(UserHandle.getAppId(info.applicationInfo.uid),
-                        packageName, codePath)) {
+                if (!mInstaller.createProfileSnapshot(appId, packageName, profileName, classpath)) {
                     postError(callback, packageName, ArtManager.SNAPSHOT_FAILED_INTERNAL_ERROR);
                     return;
                 }
@@ -148,38 +195,69 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
         }
 
         // Open the snapshot and invoke the callback.
-        File snapshotProfile = Environment.getProfileSnapshotPath(packageName, codePath);
-        ParcelFileDescriptor fd;
+        File snapshotProfile = ArtManager.getProfileSnapshotFileForName(packageName, profileName);
+
+        ParcelFileDescriptor fd = null;
         try {
             fd = ParcelFileDescriptor.open(snapshotProfile, ParcelFileDescriptor.MODE_READ_ONLY);
-            postSuccess(packageName, fd, callback);
+            if (fd == null || !fd.getFileDescriptor().valid()) {
+                Slog.wtf(TAG,
+                        "ParcelFileDescriptor.open returned an invalid descriptor for "
+                                + packageName + ":" + snapshotProfile + ". isNull=" + (fd == null));
+                postError(callback, packageName, ArtManager.SNAPSHOT_FAILED_INTERNAL_ERROR);
+            } else {
+                postSuccess(packageName, fd, callback);
+            }
         } catch (FileNotFoundException e) {
-            Slog.w(TAG, "Could not open snapshot profile for " + packageName + ":" + codePath, e);
+            Slog.w(TAG, "Could not open snapshot profile for " + packageName + ":"
+                    + snapshotProfile, e);
             postError(callback, packageName, ArtManager.SNAPSHOT_FAILED_INTERNAL_ERROR);
         }
     }
 
-    private void destroyProfileSnapshot(String packageName, String codePath) {
+    private void destroyProfileSnapshot(String packageName, String profileName) {
         if (DEBUG) {
-            Slog.d(TAG, "Destroying profile snapshot for" + packageName + ":" + codePath);
+            Slog.d(TAG, "Destroying profile snapshot for" + packageName + ":" + profileName);
         }
 
         synchronized (mInstallLock) {
             try {
-                mInstaller.destroyProfileSnapshot(packageName, codePath);
+                mInstaller.destroyProfileSnapshot(packageName, profileName);
             } catch (InstallerException e) {
                 Slog.e(TAG, "Failed to destroy profile snapshot for " +
-                    packageName + ":" + codePath, e);
+                    packageName + ":" + profileName, e);
             }
         }
     }
 
     @Override
-    public boolean isRuntimeProfilingEnabled() {
+    public boolean isRuntimeProfilingEnabled(@ProfileType int profileType) {
         // Verify that the caller has the right permissions.
         checkReadRuntimeProfilePermission();
 
-        return SystemProperties.getBoolean("dalvik.vm.usejitprofiles", false);
+        switch (profileType) {
+            case ArtManager.PROFILE_APPS :
+                return SystemProperties.getBoolean("dalvik.vm.usejitprofiles", false);
+            case ArtManager.PROFILE_BOOT_IMAGE:
+                return (Build.IS_USERDEBUG || Build.IS_ENG) &&
+                        SystemProperties.getBoolean("dalvik.vm.usejitprofiles", false) &&
+                        SystemProperties.getBoolean("dalvik.vm.profilebootimage", false);
+            default:
+                throw new IllegalArgumentException("Invalid profile type:" + profileType);
+        }
+    }
+
+    private void snapshotBootImageProfile(ISnapshotRuntimeProfileCallback callback) {
+        // Combine the profiles for boot classpath and system server classpath.
+        // This avoids having yet another type of profiles and simplifies the processing.
+        String classpath = String.join(":", Os.getenv("BOOTCLASSPATH"),
+                Os.getenv("SYSTEMSERVERCLASSPATH"));
+
+        // Create the snapshot.
+        createProfileSnapshot(BOOT_IMAGE_ANDROID_PACKAGE, BOOT_IMAGE_PROFILE_NAME, classpath,
+                /*appId*/ -1, callback);
+        // Destroy the snapshot, we no longer need it.
+        destroyProfileSnapshot(BOOT_IMAGE_ANDROID_PACKAGE, BOOT_IMAGE_PROFILE_NAME);
     }
 
     /**
@@ -195,7 +273,7 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
         mHandler.post(() -> {
             try {
                 callback.onError(errCode);
-            } catch (RemoteException e) {
+            } catch (Exception e) {
                 Slog.w(TAG, "Failed to callback after profile snapshot for " + packageName, e);
             }
         });
@@ -208,10 +286,21 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
         }
         mHandler.post(() -> {
             try {
-                callback.onSuccess(fd);
-            } catch (RemoteException e) {
+                // Double check that the descriptor is still valid.
+                // We've seen production issues (b/76028139) where this can turn invalid (there are
+                // suspicions around the finalizer behaviour).
+                if (fd.getFileDescriptor().valid()) {
+                    callback.onSuccess(fd);
+                } else {
+                    Slog.wtf(TAG, "The snapshot FD became invalid before posting the result for "
+                            + packageName);
+                    callback.onError(ArtManager.SNAPSHOT_FAILED_INTERNAL_ERROR);
+                }
+            } catch (Exception e) {
                 Slog.w(TAG,
                         "Failed to call onSuccess after profile snapshot for " + packageName, e);
+            } finally {
+                IoUtils.closeQuietly(fd);
             }
         });
     }
@@ -284,6 +373,40 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
     }
 
     /**
+     * Clear the profiles for the given package.
+     */
+    public void clearAppProfiles(PackageParser.Package pkg) {
+        try {
+            ArrayMap<String, String> packageProfileNames = getPackageProfileNames(pkg);
+            for (int i = packageProfileNames.size() - 1; i >= 0; i--) {
+                String profileName = packageProfileNames.valueAt(i);
+                mInstaller.clearAppProfiles(pkg.packageName, profileName);
+            }
+        } catch (InstallerException e) {
+            Slog.w(TAG, String.valueOf(e));
+        }
+    }
+
+    /**
+     * Dumps the profiles for the given package.
+     */
+    public void dumpProfiles(PackageParser.Package pkg) {
+        final int sharedGid = UserHandle.getSharedAppGid(pkg.applicationInfo.uid);
+        try {
+            ArrayMap<String, String> packageProfileNames = getPackageProfileNames(pkg);
+            for (int i = packageProfileNames.size() - 1; i >= 0; i--) {
+                String codePath = packageProfileNames.keyAt(i);
+                String profileName = packageProfileNames.valueAt(i);
+                synchronized (mInstallLock) {
+                    mInstaller.dumpProfiles(sharedGid, pkg.packageName, profileName, codePath);
+                }
+            }
+        } catch (InstallerException e) {
+            Slog.w(TAG, "Failed to dump profiles", e);
+        }
+    }
+
+    /**
      * Build the profiles names for all the package code paths (excluding resource only paths).
      * Return the map [code path -> profile name].
      */
@@ -300,5 +423,130 @@ public class ArtManagerService extends android.content.pm.dex.IArtManager.Stub {
             }
         }
         return result;
+    }
+
+    // Constants used for logging compilation filter to TRON.
+    // DO NOT CHANGE existing values.
+    //
+    // NOTE: '-1' value is reserved for the case where we cannot produce a valid
+    // PackageOptimizationInfo because the ArtManagerInternal is not ready to be used by the
+    // ActivityMetricsLoggers.
+    private static final int TRON_COMPILATION_FILTER_ERROR = 0;
+    private static final int TRON_COMPILATION_FILTER_UNKNOWN = 1;
+    private static final int TRON_COMPILATION_FILTER_ASSUMED_VERIFIED = 2;
+    private static final int TRON_COMPILATION_FILTER_EXTRACT = 3;
+    private static final int TRON_COMPILATION_FILTER_VERIFY = 4;
+    private static final int TRON_COMPILATION_FILTER_QUICKEN = 5;
+    private static final int TRON_COMPILATION_FILTER_SPACE_PROFILE = 6;
+    private static final int TRON_COMPILATION_FILTER_SPACE = 7;
+    private static final int TRON_COMPILATION_FILTER_SPEED_PROFILE = 8;
+    private static final int TRON_COMPILATION_FILTER_SPEED = 9;
+    private static final int TRON_COMPILATION_FILTER_EVERYTHING_PROFILE = 10;
+    private static final int TRON_COMPILATION_FILTER_EVERYTHING = 11;
+    private static final int TRON_COMPILATION_FILTER_FAKE_RUN_FROM_APK = 12;
+    private static final int TRON_COMPILATION_FILTER_FAKE_RUN_FROM_APK_FALLBACK = 13;
+    private static final int TRON_COMPILATION_FILTER_FAKE_RUN_FROM_VDEX_FALLBACK = 14;
+
+    // Constants used for logging compilation reason to TRON.
+    // DO NOT CHANGE existing values.
+    //
+    // NOTE: '-1' value is reserved for the case where we cannot produce a valid
+    // PackageOptimizationInfo because the ArtManagerInternal is not ready to be used by the
+    // ActivityMetricsLoggers.
+    private static final int TRON_COMPILATION_REASON_ERROR = 0;
+    private static final int TRON_COMPILATION_REASON_UNKNOWN = 1;
+    private static final int TRON_COMPILATION_REASON_FIRST_BOOT = 2;
+    private static final int TRON_COMPILATION_REASON_BOOT = 3;
+    private static final int TRON_COMPILATION_REASON_INSTALL = 4;
+    private static final int TRON_COMPILATION_REASON_BG_DEXOPT = 5;
+    private static final int TRON_COMPILATION_REASON_AB_OTA = 6;
+    private static final int TRON_COMPILATION_REASON_INACTIVE = 7;
+    private static final int TRON_COMPILATION_REASON_SHARED = 8;
+
+    /**
+     * Convert the compilation reason to an int suitable to be logged to TRON.
+     */
+    private static int getCompilationReasonTronValue(String compilationReason) {
+        switch (compilationReason) {
+            case "unknown" : return TRON_COMPILATION_REASON_UNKNOWN;
+            case "error" : return TRON_COMPILATION_REASON_ERROR;
+            case "first-boot" : return TRON_COMPILATION_REASON_FIRST_BOOT;
+            case "boot" : return TRON_COMPILATION_REASON_BOOT;
+            case "install" : return TRON_COMPILATION_REASON_INSTALL;
+            case "bg-dexopt" : return TRON_COMPILATION_REASON_BG_DEXOPT;
+            case "ab-ota" : return TRON_COMPILATION_REASON_AB_OTA;
+            case "inactive" : return TRON_COMPILATION_REASON_INACTIVE;
+            case "shared" : return TRON_COMPILATION_REASON_SHARED;
+            default: return TRON_COMPILATION_REASON_UNKNOWN;
+        }
+    }
+
+    /**
+     * Convert the compilation filter to an int suitable to be logged to TRON.
+     */
+    private static int getCompilationFilterTronValue(String compilationFilter) {
+        switch (compilationFilter) {
+            case "error" : return TRON_COMPILATION_FILTER_ERROR;
+            case "unknown" : return TRON_COMPILATION_FILTER_UNKNOWN;
+            case "assume-verified" : return TRON_COMPILATION_FILTER_ASSUMED_VERIFIED;
+            case "extract" : return TRON_COMPILATION_FILTER_EXTRACT;
+            case "verify" : return TRON_COMPILATION_FILTER_VERIFY;
+            case "quicken" : return TRON_COMPILATION_FILTER_QUICKEN;
+            case "space-profile" : return TRON_COMPILATION_FILTER_SPACE_PROFILE;
+            case "space" : return TRON_COMPILATION_FILTER_SPACE;
+            case "speed-profile" : return TRON_COMPILATION_FILTER_SPEED_PROFILE;
+            case "speed" : return TRON_COMPILATION_FILTER_SPEED;
+            case "everything-profile" : return TRON_COMPILATION_FILTER_EVERYTHING_PROFILE;
+            case "everything" : return TRON_COMPILATION_FILTER_EVERYTHING;
+            case "run-from-apk" : return TRON_COMPILATION_FILTER_FAKE_RUN_FROM_APK;
+            case "run-from-apk-fallback" :
+                return TRON_COMPILATION_FILTER_FAKE_RUN_FROM_APK_FALLBACK;
+            case "run-from-vdex-fallback" :
+                return TRON_COMPILATION_FILTER_FAKE_RUN_FROM_VDEX_FALLBACK;
+            default: return TRON_COMPILATION_FILTER_UNKNOWN;
+        }
+    }
+
+    private static void verifyTronLoggingConstants() {
+        for (int i = 0; i < PackageManagerServiceCompilerMapping.REASON_STRINGS.length; i++) {
+            String reason = PackageManagerServiceCompilerMapping.REASON_STRINGS[i];
+            int value = getCompilationReasonTronValue(reason);
+            if (value == TRON_COMPILATION_REASON_ERROR
+                    || value == TRON_COMPILATION_REASON_UNKNOWN) {
+                throw new IllegalArgumentException("Compilation reason not configured for TRON "
+                        + "logging: " + reason);
+            }
+        }
+    }
+
+    private class ArtManagerInternalImpl extends ArtManagerInternal {
+        @Override
+        public PackageOptimizationInfo getPackageOptimizationInfo(
+                ApplicationInfo info, String abi) {
+            String compilationReason;
+            String compilationFilter;
+            try {
+                String isa = VMRuntime.getInstructionSet(abi);
+                DexFile.OptimizationInfo optInfo =
+                        DexFile.getDexFileOptimizationInfo(info.getBaseCodePath(), isa);
+                compilationFilter = optInfo.getStatus();
+                compilationReason = optInfo.getReason();
+            } catch (FileNotFoundException e) {
+                Slog.e(TAG, "Could not get optimizations status for " + info.getBaseCodePath(), e);
+                compilationFilter = "error";
+                compilationReason = "error";
+            } catch (IllegalArgumentException e) {
+                Slog.wtf(TAG, "Requested optimization status for " + info.getBaseCodePath()
+                        + " due to an invalid abi " + abi, e);
+                compilationFilter = "error";
+                compilationReason = "error";
+            }
+
+            int compilationFilterTronValue = getCompilationFilterTronValue(compilationFilter);
+            int compilationReasonTronValue = getCompilationReasonTronValue(compilationReason);
+
+            return new PackageOptimizationInfo(
+                    compilationFilterTronValue, compilationReasonTronValue);
+        }
     }
 }

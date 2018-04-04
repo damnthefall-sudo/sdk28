@@ -330,10 +330,10 @@ public class HostapdHal {
      */
     private void hostapdServiceDiedHandler() {
         synchronized (mLock) {
+            clearState();
             if (mDeathEventHandler != null) {
                 mDeathEventHandler.onDeath();
             }
-            clearState();
         }
     }
 
@@ -352,6 +352,21 @@ public class HostapdHal {
     public boolean isInitializationComplete() {
         synchronized (mLock) {
             return mIHostapd != null;
+        }
+    }
+
+    /**
+     * Terminate the hostapd daemon.
+     */
+    public void terminate() {
+        synchronized (mLock) {
+            final String methodStr = "terminate";
+            if (!checkHostapdAndLogFailure(methodStr)) return;
+            try {
+                mIHostapd.terminate();
+            } catch (RemoteException e) {
+                handleRemoteException(e, methodStr);
+            }
         }
     }
 

@@ -16,11 +16,14 @@
 
 package com.android.server.wm;
 
+import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_DISPLAY;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_STACK;
 import static com.android.server.wm.WindowManagerDebugConfig.TAG_WM;
 
 import android.content.res.Configuration;
+import android.os.Binder;
 import android.util.Slog;
+import android.view.Display;
 
 /**
  * Controller for the display container. This is created by activity manager to link activity
@@ -31,30 +34,43 @@ public class DisplayWindowController
 
     private final int mDisplayId;
 
-    public DisplayWindowController(int displayId, WindowContainerListener listener) {
+    public DisplayWindowController(Display display, WindowContainerListener listener) {
         super(listener, WindowManagerService.getInstance());
-        mDisplayId = displayId;
+        mDisplayId = display.getDisplayId();
 
         synchronized (mWindowMap) {
-            // TODO: Convert to setContainer() from DisplayContent once everything is hooked up.
-            // Currently we are not setup to register for config changes.
-            mContainer = mRoot.getDisplayContentOrCreate(displayId);
+            final long callingIdentity = Binder.clearCallingIdentity();
+            try {
+                mRoot.createDisplayContent(display, this /* controller */);
+            } finally {
+                Binder.restoreCallingIdentity(callingIdentity);
+            }
+
             if (mContainer == null) {
-                throw new IllegalArgumentException("Trying to add displayId=" + displayId);
+                throw new IllegalArgumentException("Trying to add display=" + display
+                        + " dc=" + mRoot.getDisplayContent(mDisplayId));
             }
         }
     }
 
     @Override
     public void removeContainer() {
-        // TODO: Pipe through from ActivityDisplay to remove the display
-        throw new UnsupportedOperationException("To be implemented");
+        synchronized (mWindowMap) {
+            if(mContainer == null) {
+                if (DEBUG_DISPLAY) Slog.i(TAG_WM, "removeDisplay: could not find displayId="
+                        + mDisplayId);
+                return;
+            }
+            mContainer.removeIfPossible();
+            super.removeContainer();
+        }
     }
 
     @Override
     public void onOverrideConfigurationChanged(Configuration overrideConfiguration) {
-        // TODO: Pipe through from ActivityDisplay to update the configuration for the display
-        throw new UnsupportedOperationException("To be implemented");
+        // TODO: The container receives override configuration changes through other means. enabling
+        // callbacks through the controller causes layout issues. Investigate consolidating
+        // override configuration propagation to just here.
     }
 
     /**

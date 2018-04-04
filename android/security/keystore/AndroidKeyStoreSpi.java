@@ -26,6 +26,7 @@ import android.security.keymaster.KeymasterArguments;
 import android.security.keymaster.KeymasterDefs;
 import android.security.keystore.KeyProperties;
 import android.security.keystore.KeyProtection;
+import android.security.keystore.SecureKeyImportUnavailableException;
 import android.security.keystore.WrappedKeyEntry;
 import android.util.Log;
 
@@ -497,12 +498,7 @@ public class AndroidKeyStoreSpi extends KeyStoreSpi {
                 importArgs.addEnums(KeymasterDefs.KM_TAG_PADDING, keymasterEncryptionPaddings);
                 importArgs.addEnums(KeymasterDefs.KM_TAG_PADDING,
                         KeyProperties.SignaturePadding.allToKeymaster(spec.getSignaturePaddings()));
-                KeymasterUtils.addUserAuthArgs(importArgs,
-                        spec.isUserAuthenticationRequired(),
-                        spec.getUserAuthenticationValidityDurationSeconds(),
-                        spec.isUserAuthenticationValidWhileOnBody(),
-                        spec.isInvalidatedByBiometricEnrollment(),
-                        spec.getBoundToSpecificSecureUserId());
+                KeymasterUtils.addUserAuthArgs(importArgs, spec);
                 importArgs.addDateIfNotNull(KeymasterDefs.KM_TAG_ACTIVE_DATETIME,
                         spec.getKeyValidityStart());
                 importArgs.addDateIfNotNull(KeymasterDefs.KM_TAG_ORIGINATION_EXPIRE_DATETIME,
@@ -699,12 +695,7 @@ public class AndroidKeyStoreSpi extends KeyStoreSpi {
             int[] keymasterPaddings = KeyProperties.EncryptionPadding.allToKeymaster(
                     params.getEncryptionPaddings());
             args.addEnums(KeymasterDefs.KM_TAG_PADDING, keymasterPaddings);
-            KeymasterUtils.addUserAuthArgs(args,
-                    params.isUserAuthenticationRequired(),
-                    params.getUserAuthenticationValidityDurationSeconds(),
-                    params.isUserAuthenticationValidWhileOnBody(),
-                    params.isInvalidatedByBiometricEnrollment(),
-                    params.getBoundToSpecificSecureUserId());
+            KeymasterUtils.addUserAuthArgs(args, params);
             KeymasterUtils.addMinMacLengthAuthorizationIfNecessary(
                     args,
                     keymasterAlgorithm,
@@ -765,7 +756,9 @@ public class AndroidKeyStoreSpi extends KeyStoreSpi {
             0, // FIXME fingerprint id?
             mUid,
             new KeyCharacteristics());
-        if (errorCode != KeyStore.NO_ERROR) {
+        if (errorCode == KeymasterDefs.KM_ERROR_UNIMPLEMENTED) {
+          throw new SecureKeyImportUnavailableException("Could not import wrapped key");
+        } else if (errorCode != KeyStore.NO_ERROR) {
             throw new KeyStoreException("Failed to import wrapped key. Keystore error code: "
                 + errorCode);
         }

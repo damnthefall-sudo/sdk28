@@ -63,6 +63,7 @@ import android.os.Parcelable;
 import android.text.TextUtils;
 import android.util.Log;
 import android.util.proto.ProtoOutputStream;
+import android.view.accessibility.AccessibilityNodeInfo;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -235,6 +236,18 @@ public interface WindowManager extends ViewManager {
     int TRANSIT_KEYGUARD_UNOCCLUDE = 23;
 
     /**
+     * A translucent activity is being opened.
+     * @hide
+     */
+    int TRANSIT_TRANSLUCENT_ACTIVITY_OPEN = 24;
+
+    /**
+     * A translucent activity is being closed.
+     * @hide
+     */
+    int TRANSIT_TRANSLUCENT_ACTIVITY_CLOSE = 25;
+
+    /**
      * @hide
      */
     @IntDef(prefix = { "TRANSIT_" }, value = {
@@ -257,7 +270,9 @@ public interface WindowManager extends ViewManager {
             TRANSIT_KEYGUARD_GOING_AWAY,
             TRANSIT_KEYGUARD_GOING_AWAY_ON_WALLPAPER,
             TRANSIT_KEYGUARD_OCCLUDE,
-            TRANSIT_KEYGUARD_UNOCCLUDE
+            TRANSIT_KEYGUARD_UNOCCLUDE,
+            TRANSIT_TRANSLUCENT_ACTIVITY_OPEN,
+            TRANSIT_TRANSLUCENT_ACTIVITY_CLOSE
     })
     @Retention(RetentionPolicy.SOURCE)
     @interface TransitionType {}
@@ -1832,7 +1847,9 @@ public interface WindowManager extends ViewManager {
         public static final int SOFT_INPUT_MASK_STATE = 0x0f;
 
         /**
-         * Visibility state for {@link #softInputMode}: no state has been specified.
+         * Visibility state for {@link #softInputMode}: no state has been specified. The system may
+         * show or hide the software keyboard for better user experience when the window gains
+         * focus.
          */
         public static final int SOFT_INPUT_STATE_UNSPECIFIED = 0;
 
@@ -2219,7 +2236,7 @@ public interface WindowManager extends ViewManager {
         @IntDef(
                 flag = true,
                 value = {LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT,
-                        LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS,
+                        LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES,
                         LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER})
         @interface LayoutInDisplayCutoutMode {}
 
@@ -2230,56 +2247,107 @@ public interface WindowManager extends ViewManager {
          * Defaults to {@link #LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT}.
          *
          * @see #LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT
-         * @see #LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+         * @see #LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
          * @see #LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER
          * @see DisplayCutout
+         * @see android.R.attr#windowLayoutInDisplayCutoutMode
+         *         android:windowLayoutInDisplayCutoutMode
          */
         @LayoutInDisplayCutoutMode
         public int layoutInDisplayCutoutMode = LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT;
 
         /**
          * The window is allowed to extend into the {@link DisplayCutout} area, only if the
-         * {@link DisplayCutout} is fully contained within the status bar. Otherwise, the window is
+         * {@link DisplayCutout} is fully contained within a system bar. Otherwise, the window is
          * laid out such that it does not overlap with the {@link DisplayCutout} area.
          *
          * <p>
-         * In practice, this means that if the window did not set FLAG_FULLSCREEN or
-         * SYSTEM_UI_FLAG_FULLSCREEN, it can extend into the cutout area in portrait.
-         * Otherwise (i.e. fullscreen or landscape) it is laid out such that it does overlap the
+         * In practice, this means that if the window did not set {@link #FLAG_FULLSCREEN} or
+         * {@link View#SYSTEM_UI_FLAG_FULLSCREEN}, it can extend into the cutout area in portrait
+         * if the cutout is at the top edge. Similarly for
+         * {@link View#SYSTEM_UI_FLAG_HIDE_NAVIGATION} and a cutout at the bottom of the screen.
+         * Otherwise (i.e. fullscreen or landscape) it is laid out such that it does not overlap the
          * cutout area.
          *
          * <p>
-         * The usual precautions for not overlapping with the status bar are sufficient for ensuring
-         * that no important content overlaps with the DisplayCutout.
+         * The usual precautions for not overlapping with the status and navigation bar are
+         * sufficient for ensuring that no important content overlaps with the DisplayCutout.
          *
          * @see DisplayCutout
          * @see WindowInsets
+         * @see #layoutInDisplayCutoutMode
+         * @see android.R.attr#windowLayoutInDisplayCutoutMode
+         *         android:windowLayoutInDisplayCutoutMode
          */
         public static final int LAYOUT_IN_DISPLAY_CUTOUT_MODE_DEFAULT = 0;
 
         /**
-         * The window is always allowed to extend into the {@link DisplayCutout} area,
-         * even if fullscreen or in landscape.
+         * @deprecated use {@link #LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES}
+         * @hide
+         */
+        @Deprecated
+        public static final int LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS = 1;
+
+        /**
+         * The window is always allowed to extend into the {@link DisplayCutout} areas on the short
+         * edges of the screen.
+         *
+         * The window will never extend into a {@link DisplayCutout} area on the long edges of the
+         * screen.
          *
          * <p>
          * The window must make sure that no important content overlaps with the
          * {@link DisplayCutout}.
          *
+         * <p>
+         * In this mode, the window extends under cutouts on the short edge of the display in both
+         * portrait and landscape, regardless of whether the window is hiding the system bars:<br/>
+         * <img src="{@docRoot}reference/android/images/display_cutout/short_edge/fullscreen_top_no_letterbox.png"
+         * height="720"
+         * alt="Screenshot of a fullscreen activity on a display with a cutout at the top edge in
+         *         portrait, no letterbox is applied."/>
+         *
+         * <img src="{@docRoot}reference/android/images/display_cutout/short_edge/landscape_top_no_letterbox.png"
+         * width="720"
+         * alt="Screenshot of an activity on a display with a cutout at the top edge in landscape,
+         *         no letterbox is applied."/>
+         *
+         * <p>
+         * A cutout in the corner is considered to be on the short edge: <br/>
+         * <img src="{@docRoot}reference/android/images/display_cutout/short_edge/fullscreen_corner_no_letterbox.png"
+         * height="720"
+         * alt="Screenshot of a fullscreen activity on a display with a cutout in the corner in
+         *         portrait, no letterbox is applied."/>
+         *
+         * <p>
+         * On the other hand, should the cutout be on the long edge of the display, a letterbox will
+         * be applied such that the window does not extend into the cutout on either long edge:
+         * <br/>
+         * <img src="{@docRoot}reference/android/images/display_cutout/short_edge/portrait_side_letterbox.png"
+         * height="720"
+         * alt="Screenshot of an activity on a display with a cutout on the long edge in portrait,
+         *         letterbox is applied."/>
+         *
          * @see DisplayCutout
          * @see WindowInsets#getDisplayCutout()
+         * @see #layoutInDisplayCutoutMode
+         * @see android.R.attr#windowLayoutInDisplayCutoutMode
+         *         android:windowLayoutInDisplayCutoutMode
          */
-        public static final int LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS = 1;
+        public static final int LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES = 1;
 
         /**
          * The window is never allowed to overlap with the DisplayCutout area.
          *
          * <p>
-         * This should be used with windows that transiently set SYSTEM_UI_FLAG_FULLSCREEN to
-         * avoid a relayout of the window when the flag is set or cleared.
+         * This should be used with windows that transiently set
+         * {@link View#SYSTEM_UI_FLAG_FULLSCREEN} or {@link View#SYSTEM_UI_FLAG_HIDE_NAVIGATION}
+         * to avoid a relayout of the window when the respective flag is set or cleared.
          *
          * @see DisplayCutout
-         * @see View#SYSTEM_UI_FLAG_FULLSCREEN SYSTEM_UI_FLAG_FULLSCREEN
-         * @see View#SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+         * @see #layoutInDisplayCutoutMode
+         * @see android.R.attr#windowLayoutInDisplayCutoutMode
+         *         android:windowLayoutInDisplayCutoutMode
          */
         public static final int LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER = 2;
 
@@ -2344,7 +2412,7 @@ public interface WindowManager extends ViewManager {
          *
          * @hide
          */
-        public int accessibilityIdOfAnchor = -1;
+        public long accessibilityIdOfAnchor = AccessibilityNodeInfo.UNDEFINED_NODE_ID;
 
         /**
          * The window title isn't kept in sync with what is displayed in the title bar, so we
@@ -2368,6 +2436,13 @@ public interface WindowManager extends ViewManager {
          * @hide
          */
         public long hideTimeoutMilliseconds = -1;
+
+        /**
+         * A frame number in which changes requested in this layout will be rendered.
+         *
+         * @hide
+         */
+        public long frameNumber = -1;
 
         /**
          * The color mode requested by this window. The target display may
@@ -2538,10 +2613,11 @@ public interface WindowManager extends ViewManager {
             out.writeInt(hasManualSurfaceInsets ? 1 : 0);
             out.writeInt(preservePreviousSurfaceInsets ? 1 : 0);
             out.writeInt(needsMenuKey);
-            out.writeInt(accessibilityIdOfAnchor);
+            out.writeLong(accessibilityIdOfAnchor);
             TextUtils.writeToParcel(accessibilityTitle, out, parcelableFlags);
             out.writeInt(mColorMode);
             out.writeLong(hideTimeoutMilliseconds);
+            out.writeLong(frameNumber);
         }
 
         public static final Parcelable.Creator<LayoutParams> CREATOR
@@ -2594,10 +2670,11 @@ public interface WindowManager extends ViewManager {
             hasManualSurfaceInsets = in.readInt() != 0;
             preservePreviousSurfaceInsets = in.readInt() != 0;
             needsMenuKey = in.readInt();
-            accessibilityIdOfAnchor = in.readInt();
+            accessibilityIdOfAnchor = in.readLong();
             accessibilityTitle = TextUtils.CHAR_SEQUENCE_CREATOR.createFromParcel(in);
             mColorMode = in.readInt();
             hideTimeoutMilliseconds = in.readLong();
+            frameNumber = in.readLong();
         }
 
         @SuppressWarnings({"PointlessBitwiseExpression"})
@@ -2798,6 +2875,10 @@ public interface WindowManager extends ViewManager {
                 changes |= SURFACE_INSETS_CHANGED;
             }
 
+            // The frame number changing is only relevant in the context of other
+            // changes, and so we don't need to track it with a flag.
+            frameNumber = o.frameNumber;
+
             if (hasManualSurfaceInsets != o.hasManualSurfaceInsets) {
                 hasManualSurfaceInsets = o.hasManualSurfaceInsets;
                 changes |= SURFACE_INSETS_CHANGED;
@@ -2855,9 +2936,8 @@ public interface WindowManager extends ViewManager {
         /**
          * @hide
          */
-        public String toString(String prefix) {
-            StringBuilder sb = new StringBuilder(256);
-            sb.append("{(");
+        public void dumpDimensions(StringBuilder sb) {
+            sb.append('(');
             sb.append(x);
             sb.append(',');
             sb.append(y);
@@ -2868,6 +2948,15 @@ public interface WindowManager extends ViewManager {
             sb.append((height == MATCH_PARENT ? "fill" : (height == WRAP_CONTENT
                     ? "wrap" : String.valueOf(height))));
             sb.append(")");
+        }
+
+        /**
+         * @hide
+         */
+        public String toString(String prefix) {
+            StringBuilder sb = new StringBuilder(256);
+            sb.append('{');
+            dumpDimensions(sb);
             if (horizontalMargin != 0) {
                 sb.append(" hm=");
                 sb.append(horizontalMargin);

@@ -16,30 +16,38 @@
 
 package androidx.car.drawer;
 
+import android.app.Activity;
+import android.car.drivingstate.CarUxRestrictions;
 import android.content.Context;
 import android.graphics.PorterDuff;
 import android.graphics.drawable.Drawable;
-import android.support.annotation.NonNull;
-import android.support.annotation.Nullable;
-import android.support.v7.widget.RecyclerView;
+import android.os.Bundle;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 
+import androidx.annotation.Nullable;
 import androidx.car.R;
+import androidx.car.utils.CarUxRestrictionsHelper;
 import androidx.car.widget.PagedListView;
+import androidx.recyclerview.widget.RecyclerView;
 
 /**
  * Base adapter for displaying items in the car navigation drawer, which uses a
  * {@link PagedListView}.
  *
- * <p>Subclasses must set the title that will be displayed when displaying the contents of the
- * drawer via {@link #setTitle(CharSequence)}. The title can be updated at any point later on. The
- * title of the root adapter will also be the main title showed in the toolbar when the drawer is
- * closed. See {@link CarDrawerController#setRootAdapter(CarDrawerAdapter)} for more information.
+ * <p>Subclasses can optionally set the title that will be displayed when displaying the contents
+ * of the drawer via {@link #setTitle(CharSequence)}. The title can be updated at any point later
+ * on. The title of the root adapter will also be the main title showed in the toolbar when the
+ * drawer is closed. See {@link CarDrawerController#setRootAdapter(CarDrawerAdapter)} for more
+ * information.
  *
  * <p>This class also takes care of implementing the PageListView.ItemCamp contract and subclasses
  * should implement {@link #getActualItemCount()}.
+ *
+ * <p>To enable support for {@link CarUxRestrictions}, call {@link #start()} in your
+ * {@code Activity}'s {@link android.app.Activity#onCreate(Bundle)}, and {@link #stop()} in
+ * {@link Activity#onStop()}.
  */
 public abstract class CarDrawerAdapter extends RecyclerView.Adapter<DrawerItemViewHolder>
         implements PagedListView.ItemCap, DrawerItemClickListener {
@@ -49,6 +57,31 @@ public abstract class CarDrawerAdapter extends RecyclerView.Adapter<DrawerItemVi
     private CharSequence mTitle;
     private TitleChangeListener mTitleChangeListener;
 
+    private final CarUxRestrictionsHelper mUxRestrictionsHelper;
+    private CarUxRestrictions mCurrentUxRestrictions;
+
+    /**
+     * Enables support for {@link CarUxRestrictions}.
+     *
+     * <p>This method can be called from {@code Activity}'s {@link Activity#onStart()}, or at the
+     * time of construction.
+     *
+     * <p>This method must be accompanied with a matching {@link #stop()} to avoid leak.
+     */
+    public void start() {
+        mUxRestrictionsHelper.start();
+    }
+
+    /**
+     * Disables support for {@link CarUxRestrictions}, and frees up resources.
+     *
+     * <p>This method should be called from {@code Activity}'s {@link Activity#onStop()}, or at the
+     * time of this adapter being discarded.
+     */
+    public void stop() {
+        mUxRestrictionsHelper.stop();
+    }
+
     /**
      * Interface for a class that will be notified a new title has been set on this adapter.
      */
@@ -57,7 +90,7 @@ public abstract class CarDrawerAdapter extends RecyclerView.Adapter<DrawerItemVi
          * Called when {@link #setTitle(CharSequence)} has been called and the title has been
          * changed.
          */
-        void onTitleChanged(CharSequence newTitle);
+        void onTitleChanged(@Nullable CharSequence newTitle);
     }
 
     protected CarDrawerAdapter(Context context, boolean showDisabledListOnEmpty) {
@@ -66,6 +99,12 @@ public abstract class CarDrawerAdapter extends RecyclerView.Adapter<DrawerItemVi
         mEmptyListDrawable = context.getDrawable(R.drawable.ic_list_view_disable);
         mEmptyListDrawable.setColorFilter(context.getColor(R.color.car_tint),
                 PorterDuff.Mode.SRC_IN);
+
+        mUxRestrictionsHelper =
+                new CarUxRestrictionsHelper(context, carUxRestrictions -> {
+                    mCurrentUxRestrictions = carUxRestrictions;
+                    notifyDataSetChanged();
+                });
     }
 
     /** Returns the title set via {@link #setTitle(CharSequence)}. */
@@ -74,11 +113,7 @@ public abstract class CarDrawerAdapter extends RecyclerView.Adapter<DrawerItemVi
     }
 
     /** Updates the title to display in the toolbar for this Adapter. */
-    public final void setTitle(@NonNull CharSequence title) {
-        if (title == null) {
-            throw new IllegalArgumentException("setTitle() cannot be passed a null title!");
-        }
-
+    public final void setTitle(@Nullable CharSequence title) {
         mTitle = title;
 
         if (mTitleChangeListener != null) {
@@ -151,6 +186,11 @@ public abstract class CarDrawerAdapter extends RecyclerView.Adapter<DrawerItemVi
 
     @Override
     public final void onBindViewHolder(DrawerItemViewHolder holder, int position) {
+        // Car may not be initialized thus current UXR will not be available.
+        if (mCurrentUxRestrictions != null) {
+            holder.complyWithUxRestrictions(mCurrentUxRestrictions);
+        }
+
         if (shouldShowDisabledListItem()) {
             holder.getTitle().setText(null);
             holder.getIcon().setImageDrawable(mEmptyListDrawable);

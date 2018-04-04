@@ -233,7 +233,8 @@ public class ExpandableViewState extends ViewState {
         expandableView.setDark(this.dark, animationFilter.animateDark, properties.delay);
 
         if (properties.wasAdded(child) && !hidden) {
-            expandableView.performAddAnimation(properties.delay, properties.duration);
+            expandableView.performAddAnimation(properties.delay, properties.duration,
+                    false /* isHeadsUpAppear */);
         }
 
         if (!expandableView.isInShelf() && this.inShelf) {
@@ -465,6 +466,23 @@ public class ExpandableViewState extends ViewState {
             return view.getActualHeight();
         } else {
             return getChildTag(view, TAG_END_HEIGHT);
+        }
+    }
+
+    @Override
+    public void cancelAnimations(View view) {
+        super.cancelAnimations(view);
+        Animator animator = getChildTag(view, TAG_ANIMATOR_HEIGHT);
+        if (animator != null) {
+            animator.cancel();
+        }
+        animator = getChildTag(view, TAG_ANIMATOR_SHADOW_ALPHA);
+        if (animator != null) {
+            animator.cancel();
+        }
+        animator = getChildTag(view, TAG_ANIMATOR_TOP_INSET);
+        if (animator != null) {
+            animator.cancel();
         }
     }
 }

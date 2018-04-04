@@ -727,18 +727,7 @@ public class ImageReader implements AutoCloseable {
             return false;
         }
 
-        if (format == ImageFormat.PRIVATE) {
-            // Usage need to be either USAGE0_GPU_SAMPLED_IMAGE or USAGE0_VIDEO_ENCODE or combined.
-            boolean isAllowed = (usage == HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE);
-            isAllowed = isAllowed || (usage == HardwareBuffer.USAGE_VIDEO_ENCODE);
-            isAllowed = isAllowed || (usage ==
-                    (HardwareBuffer.USAGE_VIDEO_ENCODE | HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE));
-            return isAllowed;
-        } else {
-            // Usage need to make the buffer CPU readable for explicit format.
-            return ((usage == HardwareBuffer.USAGE_CPU_READ_RARELY) ||
-                    (usage == HardwareBuffer.USAGE_CPU_READ_OFTEN));
-        }
+        return true;
     }
 
     /**
@@ -876,6 +865,18 @@ public class ImageReader implements AutoCloseable {
         }
 
         @Override
+        public int getTransform() {
+            throwISEIfImageIsInvalid();
+            return mTransform;
+        }
+
+        @Override
+        public HardwareBuffer getHardwareBuffer() {
+            throwISEIfImageIsInvalid();
+            return nativeGetHardwareBuffer();
+        }
+
+        @Override
         public void setTimestamp(long timestampNs) {
             throwISEIfImageIsInvalid();
             mTimestamp = timestampNs;
@@ -1007,6 +1008,11 @@ public class ImageReader implements AutoCloseable {
          */
         private long mTimestamp;
 
+        /**
+         * This field is set by native code during nativeImageSetup().
+         */
+        private int mTransform;
+
         private SurfacePlane[] mPlanes;
         private int mFormat = ImageFormat.UNKNOWN;
         // If this image is detached from the ImageReader.
@@ -1017,6 +1023,7 @@ public class ImageReader implements AutoCloseable {
         private synchronized native int nativeGetWidth();
         private synchronized native int nativeGetHeight();
         private synchronized native int nativeGetFormat(int readerFormat);
+        private synchronized native HardwareBuffer nativeGetHardwareBuffer();
     }
 
     private synchronized native void nativeInit(Object weakSelf, int w, int h,

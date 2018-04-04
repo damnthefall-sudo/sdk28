@@ -16,6 +16,7 @@
 
 package com.android.systemui.statusbar;
 
+import static android.app.NotificationManager.IMPORTANCE_MIN;
 import static android.app.NotificationManager.IMPORTANCE_NONE;
 
 import android.animation.Animator;
@@ -30,7 +31,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
-import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.drawable.Drawable;
@@ -39,20 +39,20 @@ import android.service.notification.StatusBarNotification;
 import android.text.TextUtils;
 import android.util.AttributeSet;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.accessibility.AccessibilityEvent;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import com.android.internal.annotations.VisibleForTesting;
 import com.android.internal.logging.MetricsLogger;
 import com.android.internal.logging.nano.MetricsProto.MetricsEvent;
-import com.android.settingslib.Utils;
+import com.android.systemui.Dependency;
 import com.android.systemui.Interpolators;
 import com.android.systemui.R;
 
-import java.lang.IllegalArgumentException;
 import java.util.List;
-import java.util.Set;
 
 /**
  * The guts of a notification revealed when performing a long press.
@@ -71,20 +71,23 @@ public class NotificationInfo extends LinearLayout implements NotificationGuts.G
     private int mStartingUserImportance;
     private int mChosenImportance;
     private boolean mIsSingleDefaultChannel;
-    private boolean mNonblockable;
+    private boolean mIsNonblockable;
     private StatusBarNotification mSbn;
     private AnimatorSet mExpandAnimation;
+    private boolean mIsForeground;
 
     private CheckSaveListener mCheckSaveListener;
     private OnSettingsClickListener mOnSettingsClickListener;
     private OnAppSettingsClickListener mAppSettingsClickListener;
     private NotificationGuts mGutsContainer;
 
-    private OnClickListener mOnKeepShowing = v -> {
-        closeControls(v);
-    };
+    /** Whether this view is being shown as part of the blocking helper */
+    private boolean mIsForBlockingHelper;
+    private boolean mNegativeUserSentiment;
 
-    private OnClickListener mOnStopNotifications = v -> {
+    private OnClickListener mOnKeepShowing = this::closeControls;
+
+    private OnClickListener mOnStopMinNotifications = v -> {
         swapContent(false);
     };
 
@@ -111,7 +114,9 @@ public class NotificationInfo extends LinearLayout implements NotificationGuts.G
         void onClick(View v, Intent intent);
     }
 
-    public void bindNotification(final PackageManager pm,
+    @VisibleForTesting
+    void bindNotification(
+            final PackageManager pm,
             final INotificationManager iNotificationManager,
             final String pkg,
             final NotificationChannel notificationChannel,
@@ -120,7 +125,27 @@ public class NotificationInfo extends LinearLayout implements NotificationGuts.G
             final CheckSaveListener checkSaveListener,
             final OnSettingsClickListener onSettingsClick,
             final OnAppSettingsClickListener onAppSettingsClick,
-            final Set<String> nonBlockablePkgs)
+            boolean isNonblockable)
+            throws RemoteException {
+        bindNotification(pm, iNotificationManager, pkg, notificationChannel, numChannels, sbn,
+                checkSaveListener, onSettingsClick, onAppSettingsClick, isNonblockable,
+                false /* isBlockingHelper */,
+                false /* isUserSentimentNegative */);
+    }
+
+    public void bindNotification(
+            PackageManager pm,
+            INotificationManager iNotificationManager,
+            String pkg,
+            NotificationChannel notificationChannel,
+            int numChannels,
+            StatusBarNotification sbn,
+            CheckSaveListener checkSaveListener,
+            OnSettingsClickListener onSettingsClick,
+            OnAppSettingsClickListener onAppSettingsClick,
+            boolean isNonblockable,
+            boolean isForBlockingHelper,
+            boolean isUserSentimentNegative)
             throws RemoteException {
         mINotificationManager = iNotificationManager;
         mPkg = pkg;
@@ -133,6 +158,12 @@ public class NotificationInfo extends LinearLayout implements NotificationGuts.G
         mOnSettingsClickListener = onSettingsClick;
         mSingleNotificationChannel = notificationChannel;
         mStartingUserImportance = mChosenImportance = mSingleNotificationChannel.getImportance();
+        mNegativeUserSentiment = isUserSentimentNegative;
+        mIsNonblockable = isNonblockable;
+        mIsForeground =
+                (mSbn.getNotification().flags & Notification.FLAG_FOREGROUND_SERVICE) != 0;
+        mIsForBlockingHelper = isForBlockingHelper;
+        mAppUid = mSbn.getUid();
 
         int numTotalChannels = mINotificationManager.getNumNotificationChannelsForPackage(
                 pkg, mAppUid, false /* includeDeleted */);
@@ -141,26 +172,10 @@ public class NotificationInfo extends LinearLayout implements NotificationGuts.G
         } else  {
             // Special behavior for the Default channel if no other channels have been defined.
             mIsSingleDefaultChannel = mNumNotificationChannels == 1
-                    && mSingleNotificationChannel.getId()
-                    .equals(NotificationChannel.DEFAULT_CHANNEL_ID)
-                    && numTotalChannels <= 1;
+                    && mSingleNotificationChannel.getId().equals(
+                            NotificationChannel.DEFAULT_CHANNEL_ID)
+                    && numTotalChannels == 1;
         }
-
-        try {
-            final PackageInfo pkgInfo = pm.getPackageInfo(pkg, PackageManager.GET_SIGNATURES);
-            if (Utils.isSystemPackage(getResources(), pm, pkgInfo)) {
-                if (mSingleNotificationChannel != null
-                        && !mSingleNotificationChannel.isBlockableSystem()) {
-                    mNonblockable = true;
-                }
-            }
-        } catch (PackageManager.NameNotFoundException e) {
-            // unlikely.
-        }
-        if (nonBlockablePkgs != null) {
-            mNonblockable |= nonBlockablePkgs.contains(pkg);
-        }
-        mNonblockable |= (mNumNotificationChannels > 1);
 
         bindHeader();
         bindPrompt();
@@ -178,7 +193,6 @@ public class NotificationInfo extends LinearLayout implements NotificationGuts.G
                             | PackageManager.MATCH_DIRECT_BOOT_UNAWARE
                             | PackageManager.MATCH_DIRECT_BOOT_AWARE);
             if (info != null) {
-                mAppUid = mSbn.getUid();
                 mAppName = String.valueOf(mPm.getApplicationLabel(info));
                 pkgicon = mPm.getApplicationIcon(info);
             }
@@ -227,24 +241,27 @@ public class NotificationInfo extends LinearLayout implements NotificationGuts.G
     }
 
     private void bindPrompt() {
-        final TextView channelName = findViewById(R.id.channel_name);
         final TextView blockPrompt = findViewById(R.id.block_prompt);
-        if (mNonblockable) {
-            if (mIsSingleDefaultChannel || mNumNotificationChannels > 1) {
-                channelName.setVisibility(View.GONE);
-            } else {
-                channelName.setText(mSingleNotificationChannel.getName());
-            }
-
+        bindName();
+        if (mIsNonblockable) {
             blockPrompt.setText(R.string.notification_unblockable_desc);
         } else {
-            if (mIsSingleDefaultChannel || mNumNotificationChannels > 1) {
-                channelName.setVisibility(View.GONE);
+            if (mNegativeUserSentiment) {
+                blockPrompt.setText(R.string.inline_blocking_helper);
+            }  else if (mIsSingleDefaultChannel || mNumNotificationChannels > 1) {
                 blockPrompt.setText(R.string.inline_keep_showing_app);
             } else {
-                channelName.setText(mSingleNotificationChannel.getName());
                 blockPrompt.setText(R.string.inline_keep_showing);
             }
+        }
+    }
+
+    private void bindName() {
+        final TextView channelName = findViewById(R.id.channel_name);
+        if (mIsSingleDefaultChannel || mNumNotificationChannels > 1) {
+            channelName.setVisibility(View.GONE);
+        } else {
+            channelName.setText(mSingleNotificationChannel.getName());
         }
     }
 
@@ -253,7 +270,7 @@ public class NotificationInfo extends LinearLayout implements NotificationGuts.G
     }
 
     private void saveImportance() {
-        if (mNonblockable || !hasImportanceChanged()) {
+        if (mIsNonblockable) {
             return;
         }
         MetricsLogger.action(mContext, MetricsEvent.ACTION_SAVE_IMPORTANCE,
@@ -269,24 +286,35 @@ public class NotificationInfo extends LinearLayout implements NotificationGuts.G
     }
 
     private void bindButtons() {
+        // Set up stay-in-notification actions
         View block =  findViewById(R.id.block);
-        block.setOnClickListener(mOnStopNotifications);
         TextView keep = findViewById(R.id.keep);
-        keep.setOnClickListener(mOnKeepShowing);
-        findViewById(R.id.undo).setOnClickListener(mOnUndo);
+        View minimize = findViewById(R.id.minimize);
 
-        if (mNonblockable) {
+        findViewById(R.id.undo).setOnClickListener(mOnUndo);
+        block.setOnClickListener(mOnStopMinNotifications);
+        keep.setOnClickListener(mOnKeepShowing);
+        minimize.setOnClickListener(mOnStopMinNotifications);
+
+        if (mIsNonblockable) {
             keep.setText(R.string.notification_done);
             block.setVisibility(GONE);
+            minimize.setVisibility(GONE);
+        } else if (mIsForeground) {
+            block.setVisibility(GONE);
+            minimize.setVisibility(VISIBLE);
+        } else if (!mIsForeground) {
+            block.setVisibility(VISIBLE);
+            minimize.setVisibility(GONE);
         }
 
-        // app settings link
+        // Set up app settings link
         TextView settingsLinkView = findViewById(R.id.app_settings);
         Intent settingsIntent = getAppSettingsIntent(mPm, mPkg, mSingleNotificationChannel,
                 mSbn.getId(), mSbn.getTag());
         if (settingsIntent != null
                 && !TextUtils.isEmpty(mSbn.getNotification().getSettingsText())) {
-            settingsLinkView.setVisibility(View.VISIBLE);
+            settingsLinkView.setVisibility(VISIBLE);
             settingsLinkView.setText(mContext.getString(R.string.notification_app_settings,
                     mSbn.getNotification().getSettingsText()));
             settingsLinkView.setOnClickListener((View view) -> {
@@ -302,14 +330,21 @@ public class NotificationInfo extends LinearLayout implements NotificationGuts.G
             mExpandAnimation.cancel();
         }
 
+        View prompt = findViewById(R.id.prompt);
+        ViewGroup confirmation = findViewById(R.id.confirmation);
+        TextView confirmationText = findViewById(R.id.confirmation_text);
+        View header = findViewById(R.id.header);
+
         if (showPrompt) {
             mChosenImportance = mStartingUserImportance;
+        } else if (mIsForeground) {
+            mChosenImportance = IMPORTANCE_MIN;
+            confirmationText.setText(R.string.notification_channel_minimized);
         } else {
             mChosenImportance = IMPORTANCE_NONE;
+            confirmationText.setText(R.string.notification_channel_disabled);
         }
 
-        View prompt = findViewById(R.id.prompt);
-        View confirmation = findViewById(R.id.confirmation);
         ObjectAnimator promptAnim = ObjectAnimator.ofFloat(prompt, View.ALPHA,
                 prompt.getAlpha(), showPrompt ? 1f : 0f);
         promptAnim.setInterpolator(showPrompt ? Interpolators.ALPHA_IN : Interpolators.ALPHA_OUT);
@@ -319,6 +354,7 @@ public class NotificationInfo extends LinearLayout implements NotificationGuts.G
 
         prompt.setVisibility(showPrompt ? VISIBLE : GONE);
         confirmation.setVisibility(showPrompt ? GONE : VISIBLE);
+        header.setVisibility(showPrompt ? VISIBLE : GONE);
 
         mExpandAnimation = new AnimatorSet();
         mExpandAnimation.playTogether(promptAnim, confirmAnim);
@@ -379,16 +415,23 @@ public class NotificationInfo extends LinearLayout implements NotificationGuts.G
         return intent;
     }
 
-    private void closeControls(View v) {
-        int[] parentLoc = new int[2];
-        int[] targetLoc = new int[2];
-        mGutsContainer.getLocationOnScreen(parentLoc);
-        v.getLocationOnScreen(targetLoc);
-        final int centerX = v.getWidth() / 2;
-        final int centerY = v.getHeight() / 2;
-        final int x = targetLoc[0] - parentLoc[0] + centerX;
-        final int y = targetLoc[1] - parentLoc[1] + centerY;
-        mGutsContainer.closeControls(x, y, false /* save */, false /* force */);
+    @VisibleForTesting
+    void closeControls(View v) {
+        if (mIsForBlockingHelper) {
+            NotificationBlockingHelperManager manager =
+                    Dependency.get(NotificationBlockingHelperManager.class);
+            manager.dismissCurrentBlockingHelper();
+        } else {
+            int[] parentLoc = new int[2];
+            int[] targetLoc = new int[2];
+            mGutsContainer.getLocationOnScreen(parentLoc);
+            v.getLocationOnScreen(targetLoc);
+            final int centerX = v.getWidth() / 2;
+            final int centerY = v.getHeight() / 2;
+            final int x = targetLoc[0] - parentLoc[0] + centerX;
+            final int y = targetLoc[1] - parentLoc[1] + centerY;
+            mGutsContainer.closeControls(x, y, true /* save */, false /* force */);
+        }
     }
 
     @Override
@@ -408,7 +451,9 @@ public class NotificationInfo extends LinearLayout implements NotificationGuts.G
 
     @Override
     public boolean handleCloseControls(boolean save, boolean force) {
-        if (save && hasImportanceChanged()) {
+        // Save regardless of the importance so we can lock the importance field if the user wants
+        // to keep getting notifications
+        if (save) {
             if (mCheckSaveListener != null) {
                 mCheckSaveListener.checkSave(this::saveImportance, mSbn);
             } else {

@@ -21,7 +21,6 @@ import static android.content.pm.PackageManager.MATCH_DEBUG_TRIAGED_MISSING;
 
 import android.annotation.NonNull;
 import android.app.ActivityManager;
-import android.app.admin.DevicePolicyManager;
 import android.app.admin.DevicePolicyManagerInternal;
 import android.content.ComponentName;
 import android.content.Context;
@@ -61,10 +60,10 @@ import android.widget.Toast;
 
 import com.android.internal.content.PackageMonitor;
 import com.android.internal.os.BackgroundThread;
-import com.android.internal.print.DualDumpOutputStream;
 import com.android.internal.util.DumpUtils;
 import com.android.internal.util.IndentingPrintWriter;
 import com.android.internal.util.Preconditions;
+import com.android.internal.util.dump.DualDumpOutputStream;
 import com.android.server.LocalServices;
 import com.android.server.SystemService;
 
@@ -115,12 +114,9 @@ public final class PrintManagerService extends SystemService {
 
         private final SparseArray<UserState> mUserStates = new SparseArray<>();
 
-        private final DevicePolicyManager mDpm;
-
         PrintManagerImpl(Context context) {
             mContext = context;
             mUserManager = (UserManager) context.getSystemService(Context.USER_SERVICE);
-            mDpm = (DevicePolicyManager) context.getSystemService(Context.DEVICE_POLICY_SERVICE);
             registerContentObservers();
             registerBroadcastReceivers();
         }
@@ -708,12 +704,12 @@ public final class PrintManagerService extends SystemService {
             final long identity = Binder.clearCallingIdentity();
             try {
                 if (dumpAsProto) {
-                    dump(new DualDumpOutputStream(new ProtoOutputStream(fd), null),
+                    dump(new DualDumpOutputStream(new ProtoOutputStream(fd)),
                             userStatesToDump);
                 } else {
                     pw.println("PRINT MANAGER STATE (dumpsys print)");
 
-                    dump(new DualDumpOutputStream(null, new IndentingPrintWriter(pw, "  ")),
+                    dump(new DualDumpOutputStream(new IndentingPrintWriter(pw, "  ")),
                             userStatesToDump);
                 }
             } finally {
@@ -722,7 +718,8 @@ public final class PrintManagerService extends SystemService {
         }
 
         private boolean isPrintingEnabled() {
-            return mDpm == null || mDpm.isPrintingEnabled();
+            return !mUserManager.hasUserRestriction(UserManager.DISALLOW_PRINTING,
+                    Binder.getCallingUserHandle());
         }
 
         private void dump(@NonNull DualDumpOutputStream dumpStream,

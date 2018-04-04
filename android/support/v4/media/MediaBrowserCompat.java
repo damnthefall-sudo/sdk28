@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 The Android Open Source Project
+ * Copyright 2018 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,38 +15,37 @@
  */
 package android.support.v4.media;
 
-import static android.support.annotation.RestrictTo.Scope.LIBRARY_GROUP;
-import static android.support.v4.media.MediaBrowserProtocol.CLIENT_MSG_ADD_SUBSCRIPTION;
-import static android.support.v4.media.MediaBrowserProtocol.CLIENT_MSG_CONNECT;
-import static android.support.v4.media.MediaBrowserProtocol.CLIENT_MSG_DISCONNECT;
-import static android.support.v4.media.MediaBrowserProtocol.CLIENT_MSG_GET_MEDIA_ITEM;
-import static android.support.v4.media.MediaBrowserProtocol.CLIENT_MSG_REGISTER_CALLBACK_MESSENGER;
-import static android.support.v4.media.MediaBrowserProtocol.CLIENT_MSG_REMOVE_SUBSCRIPTION;
-import static android.support.v4.media.MediaBrowserProtocol.CLIENT_MSG_SEARCH;
-import static android.support.v4.media.MediaBrowserProtocol.CLIENT_MSG_SEND_CUSTOM_ACTION;
-import static android.support.v4.media.MediaBrowserProtocol
-        .CLIENT_MSG_UNREGISTER_CALLBACK_MESSENGER;
-import static android.support.v4.media.MediaBrowserProtocol.CLIENT_VERSION_CURRENT;
-import static android.support.v4.media.MediaBrowserProtocol.DATA_CALLBACK_TOKEN;
-import static android.support.v4.media.MediaBrowserProtocol.DATA_CUSTOM_ACTION;
-import static android.support.v4.media.MediaBrowserProtocol.DATA_CUSTOM_ACTION_EXTRAS;
-import static android.support.v4.media.MediaBrowserProtocol.DATA_MEDIA_ITEM_ID;
-import static android.support.v4.media.MediaBrowserProtocol.DATA_MEDIA_ITEM_LIST;
-import static android.support.v4.media.MediaBrowserProtocol.DATA_MEDIA_SESSION_TOKEN;
-import static android.support.v4.media.MediaBrowserProtocol.DATA_OPTIONS;
-import static android.support.v4.media.MediaBrowserProtocol.DATA_PACKAGE_NAME;
-import static android.support.v4.media.MediaBrowserProtocol.DATA_RESULT_RECEIVER;
-import static android.support.v4.media.MediaBrowserProtocol.DATA_ROOT_HINTS;
-import static android.support.v4.media.MediaBrowserProtocol.DATA_SEARCH_EXTRAS;
-import static android.support.v4.media.MediaBrowserProtocol.DATA_SEARCH_QUERY;
-import static android.support.v4.media.MediaBrowserProtocol.EXTRA_CLIENT_VERSION;
-import static android.support.v4.media.MediaBrowserProtocol.EXTRA_MESSENGER_BINDER;
-import static android.support.v4.media.MediaBrowserProtocol.EXTRA_SERVICE_VERSION;
-import static android.support.v4.media.MediaBrowserProtocol.EXTRA_SESSION_BINDER;
-import static android.support.v4.media.MediaBrowserProtocol.SERVICE_MSG_ON_CONNECT;
-import static android.support.v4.media.MediaBrowserProtocol.SERVICE_MSG_ON_CONNECT_FAILED;
-import static android.support.v4.media.MediaBrowserProtocol.SERVICE_MSG_ON_LOAD_CHILDREN;
-import static android.support.v4.media.MediaBrowserProtocol.SERVICE_VERSION_2;
+import static androidx.annotation.RestrictTo.Scope.LIBRARY_GROUP;
+import static androidx.media.MediaBrowserProtocol.CLIENT_MSG_ADD_SUBSCRIPTION;
+import static androidx.media.MediaBrowserProtocol.CLIENT_MSG_CONNECT;
+import static androidx.media.MediaBrowserProtocol.CLIENT_MSG_DISCONNECT;
+import static androidx.media.MediaBrowserProtocol.CLIENT_MSG_GET_MEDIA_ITEM;
+import static androidx.media.MediaBrowserProtocol.CLIENT_MSG_REGISTER_CALLBACK_MESSENGER;
+import static androidx.media.MediaBrowserProtocol.CLIENT_MSG_REMOVE_SUBSCRIPTION;
+import static androidx.media.MediaBrowserProtocol.CLIENT_MSG_SEARCH;
+import static androidx.media.MediaBrowserProtocol.CLIENT_MSG_SEND_CUSTOM_ACTION;
+import static androidx.media.MediaBrowserProtocol.CLIENT_MSG_UNREGISTER_CALLBACK_MESSENGER;
+import static androidx.media.MediaBrowserProtocol.CLIENT_VERSION_CURRENT;
+import static androidx.media.MediaBrowserProtocol.DATA_CALLBACK_TOKEN;
+import static androidx.media.MediaBrowserProtocol.DATA_CUSTOM_ACTION;
+import static androidx.media.MediaBrowserProtocol.DATA_CUSTOM_ACTION_EXTRAS;
+import static androidx.media.MediaBrowserProtocol.DATA_MEDIA_ITEM_ID;
+import static androidx.media.MediaBrowserProtocol.DATA_MEDIA_ITEM_LIST;
+import static androidx.media.MediaBrowserProtocol.DATA_MEDIA_SESSION_TOKEN;
+import static androidx.media.MediaBrowserProtocol.DATA_OPTIONS;
+import static androidx.media.MediaBrowserProtocol.DATA_PACKAGE_NAME;
+import static androidx.media.MediaBrowserProtocol.DATA_RESULT_RECEIVER;
+import static androidx.media.MediaBrowserProtocol.DATA_ROOT_HINTS;
+import static androidx.media.MediaBrowserProtocol.DATA_SEARCH_EXTRAS;
+import static androidx.media.MediaBrowserProtocol.DATA_SEARCH_QUERY;
+import static androidx.media.MediaBrowserProtocol.EXTRA_CLIENT_VERSION;
+import static androidx.media.MediaBrowserProtocol.EXTRA_MESSENGER_BINDER;
+import static androidx.media.MediaBrowserProtocol.EXTRA_SERVICE_VERSION;
+import static androidx.media.MediaBrowserProtocol.EXTRA_SESSION_BINDER;
+import static androidx.media.MediaBrowserProtocol.SERVICE_MSG_ON_CONNECT;
+import static androidx.media.MediaBrowserProtocol.SERVICE_MSG_ON_CONNECT_FAILED;
+import static androidx.media.MediaBrowserProtocol.SERVICE_MSG_ON_LOAD_CHILDREN;
+import static androidx.media.MediaBrowserProtocol.SERVICE_VERSION_2;
 
 import android.content.ComponentName;
 import android.content.Context;
@@ -63,19 +62,22 @@ import android.os.Messenger;
 import android.os.Parcel;
 import android.os.Parcelable;
 import android.os.RemoteException;
-import android.support.annotation.IntDef;
-import android.support.annotation.NonNull;
-import android.support.annotation.Nullable;
-import android.support.annotation.RequiresApi;
-import android.support.annotation.RestrictTo;
-import android.support.v4.app.BundleCompat;
 import android.support.v4.media.session.IMediaSession;
 import android.support.v4.media.session.MediaControllerCompat.TransportControls;
 import android.support.v4.media.session.MediaSessionCompat;
 import android.support.v4.os.ResultReceiver;
-import android.support.v4.util.ArrayMap;
 import android.text.TextUtils;
 import android.util.Log;
+
+import androidx.annotation.IntDef;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.annotation.RequiresApi;
+import androidx.annotation.RestrictTo;
+import androidx.collection.ArrayMap;
+import androidx.core.app.BundleCompat;
+import androidx.media.MediaBrowserCompatUtils;
+import androidx.media.MediaBrowserServiceCompat;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;

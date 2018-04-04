@@ -66,6 +66,7 @@ import static java.lang.annotation.RetentionPolicy.SOURCE;
 import android.Manifest;
 import android.annotation.IntDef;
 import android.annotation.Nullable;
+import android.app.ActivityManager;
 import android.content.Context;
 import android.content.pm.ActivityInfo;
 import android.content.res.CompatibilityInfo;
@@ -93,6 +94,7 @@ import android.view.animation.Animation;
 import com.android.internal.policy.IKeyguardDismissCallback;
 import com.android.internal.policy.IShortcutService;
 import com.android.server.wm.DisplayFrames;
+import com.android.server.wm.utils.WmDisplayCutout;
 
 import java.io.PrintWriter;
 import java.lang.annotation.Retention;
@@ -217,11 +219,14 @@ public interface WindowManagerPolicy extends WindowManagerPolicyConstants {
          * @param stableFrame The frame around which stable system decoration is positioned.
          * @param outsetFrame The frame that includes areas that aren't part of the surface but we
          * want to treat them as such.
-         * @param displayCutout the display displayCutout
+         * @param displayCutout the display cutout
+         * @param parentFrameWasClippedByDisplayCutout true if the parent frame would have been
+         * different if there was no display cutout.
          */
         public void computeFrameLw(Rect parentFrame, Rect displayFrame,
                 Rect overlayFrame, Rect contentFrame, Rect visibleFrame, Rect decorFrame,
-                Rect stableFrame, @Nullable Rect outsetFrame, DisplayCutout displayCutout);
+                Rect stableFrame, @Nullable Rect outsetFrame, WmDisplayCutout displayCutout,
+                boolean parentFrameWasClippedByDisplayCutout);
 
         /**
          * Retrieve the current frame of the window that has been assigned by
@@ -230,14 +235,6 @@ public interface WindowManagerPolicy extends WindowManagerPolicyConstants {
          * @return Rect The rectangle holding the window frame.
          */
         public Rect getFrameLw();
-
-        /**
-         * Retrieve the current position of the window that is actually shown.
-         * Must be called with the window manager lock held.
-         *
-         * @return Point The point holding the shown window position.
-         */
-        public Point getShownPositionLw();
 
         /**
          * Retrieve the frame of the display that this window was last
@@ -410,7 +407,10 @@ public interface WindowManagerPolicy extends WindowManagerPolicyConstants {
         /**
          * Returns true if this window has been shown on screen at some time in
          * the past.  Must be called with the window manager lock held.
+         *
+         * @deprecated Use {@link #isDrawnLw} or any of the other drawn/visibility methods.
          */
+        @Deprecated
         public boolean hasDrawnLw();
 
         /**
@@ -453,6 +453,14 @@ public interface WindowManagerPolicy extends WindowManagerPolicyConstants {
             return false;
         }
 
+        /**
+         * Returns true if the window has a letterbox and any part of that letterbox overlaps with
+         * the given {@code rect}.
+         */
+        default boolean isLetterboxedOverlappingWith(Rect rect) {
+            return false;
+        }
+
         /** @return the current windowing mode of this window. */
         int getWindowingMode();
 
@@ -465,6 +473,8 @@ public interface WindowManagerPolicy extends WindowManagerPolicyConstants {
         public int getRotationAnimationHint();
 
         public boolean isInputMethodWindow();
+
+        public boolean isInputMethodTarget();
 
         public int getDisplayId();
 
@@ -483,7 +493,7 @@ public interface WindowManagerPolicy extends WindowManagerPolicyConstants {
         boolean canAcquireSleepToken();
 
         /**
-         * Writes {@link com.android.server.wm.proto.IdentifierProto} to stream.
+         * Writes {@link com.android.server.wm.IdentifierProto} to stream.
          */
         void writeIdentifierToProto(ProtoOutputStream proto, long fieldId);
     }
@@ -551,6 +561,12 @@ public interface WindowManagerPolicy extends WindowManagerPolicyConstants {
          * Returns a code that descripbes whether the camera lens is covered or not.
          */
         public int getCameraLensCoverState();
+
+        /**
+         * Switch the keyboard layout for the given device.
+         * Direction should be +1 or -1 to go to the next or previous keyboard layout.
+         */
+        public void switchKeyboardLayout(int deviceId, int direction);
 
         /**
          * Switch the input method, to be precise, input method subtype.
@@ -638,6 +654,12 @@ public interface WindowManagerPolicy extends WindowManagerPolicyConstants {
                     return Integer.toString(lens);
             }
         }
+
+        /**
+         * Hint to window manager that the user has started a navigation action that should
+         * abort animations that have no timeout, in case they got stuck.
+         */
+        void triggerAnimationFailsafe();
     }
 
     /** Window has been added to the screen. */
@@ -922,7 +944,7 @@ public interface WindowManagerPolicy extends WindowManagerPolicyConstants {
      * button bar.
      */
     public int getNonDecorDisplayWidth(int fullWidth, int fullHeight, int rotation,
-            int uiMode, int displayId);
+            int uiMode, int displayId, DisplayCutout displayCutout);
 
     /**
      * Return the display height available after excluding any screen
@@ -930,25 +952,25 @@ public interface WindowManagerPolicy extends WindowManagerPolicyConstants {
      * button bar.
      */
     public int getNonDecorDisplayHeight(int fullWidth, int fullHeight, int rotation,
-            int uiMode, int displayId);
+            int uiMode, int displayId, DisplayCutout displayCutout);
 
     /**
      * Return the available screen width that we should report for the
      * configuration.  This must be no larger than
-     * {@link #getNonDecorDisplayWidth(int, int, int, int int, int)}; it may be smaller than
-     * that to account for more transient decoration like a status bar.
+     * {@link #getNonDecorDisplayWidth(int, int, int, int, int, DisplayCutout)}; it may be smaller
+     * than that to account for more transient decoration like a status bar.
      */
     public int getConfigDisplayWidth(int fullWidth, int fullHeight, int rotation,
-            int uiMode, int displayId);
+            int uiMode, int displayId, DisplayCutout displayCutout);
 
     /**
      * Return the available screen height that we should report for the
      * configuration.  This must be no larger than
-     * {@link #getNonDecorDisplayHeight(int, int, int, int, int)}; it may be smaller than
-     * that to account for more transient decoration like a status bar.
+     * {@link #getNonDecorDisplayHeight(int, int, int, int, int, DisplayCutout)}; it may be smaller
+     * than that to account for more transient decoration like a status bar.
      */
     public int getConfigDisplayHeight(int fullWidth, int fullHeight, int rotation,
-            int uiMode, int displayId);
+            int uiMode, int displayId, DisplayCutout displayCutout);
 
     /**
      * Return whether the given window can become the Keyguard window. Typically returns true for
@@ -1153,13 +1175,14 @@ public interface WindowManagerPolicy extends WindowManagerPolicyConstants {
 
 
     /**
-     * Return the insets for the areas covered by system windows. These values are computed on the
+     * Return the layout hints for a newly added window. These values are computed on the
      * most recent layout, so they are not guaranteed to be correct.
      *
      * @param attrs The LayoutParams of the window.
      * @param taskBounds The bounds of the task this window is on or {@code null} if no task is
      *                   associated with the window.
      * @param displayFrames display frames.
+     * @param outFrame The frame of the window.
      * @param outContentInsets The areas covered by system windows, expressed as positive insets.
      * @param outStableInsets The areas covered by stable system windows irrespective of their
      *                        current visibility. Expressed as positive insets.
@@ -1168,9 +1191,10 @@ public interface WindowManagerPolicy extends WindowManagerPolicyConstants {
      * @return Whether to always consume the navigation bar.
      *         See {@link #isNavBarForcedShownLw(WindowState)}.
      */
-    default boolean getInsetHintLw(WindowManager.LayoutParams attrs, Rect taskBounds,
-            DisplayFrames displayFrames, Rect outContentInsets, Rect outStableInsets,
-            Rect outOutsets, DisplayCutout.ParcelableWrapper outDisplayCutout) {
+    default boolean getLayoutHintLw(WindowManager.LayoutParams attrs, Rect taskBounds,
+            DisplayFrames displayFrames, Rect outFrame, Rect outContentInsets,
+            Rect outStableInsets, Rect outOutsets,
+            DisplayCutout.ParcelableWrapper outDisplayCutout) {
         return false;
     }
 
@@ -1413,10 +1437,13 @@ public interface WindowManagerPolicy extends WindowManagerPolicyConstants {
      * @param orientation An orientation constant, such as
      * {@link android.content.pm.ActivityInfo#SCREEN_ORIENTATION_LANDSCAPE}.
      * @param lastRotation The most recently used rotation.
+     * @param defaultDisplay Flag indicating whether the rotation is computed for the default
+     *                       display. Currently for all non-default displays sensors, docking mode,
+     *                       rotation lock and other factors are ignored.
      * @return The surface rotation to use.
      */
     public int rotationForOrientationLw(@ActivityInfo.ScreenOrientation int orientation,
-            int lastRotation);
+            int lastRotation, boolean defaultDisplay);
 
     /**
      * Given an orientation constant and a rotation, returns true if the rotation
@@ -1539,6 +1566,11 @@ public interface WindowManagerPolicy extends WindowManagerPolicyConstants {
     void setPipVisibilityLw(boolean visible);
 
     /**
+     * Called by System UI to enable or disable haptic feedback on the navigation bar buttons.
+     */
+    void setNavBarVirtualKeyHapticFeedbackEnabledLw(boolean enabled);
+
+    /**
      * Specifies whether there is an on-screen navigation bar separate from the status bar.
      */
     public boolean hasNavigationBar();
@@ -1608,7 +1640,7 @@ public interface WindowManagerPolicy extends WindowManagerPolicyConstants {
 
     /**
      * Write the WindowManagerPolicy's state into the protocol buffer.
-     * The message is described in {@link com.android.server.wm.proto.WindowManagerPolicyProto}
+     * The message is described in {@link com.android.server.wm.WindowManagerPolicyProto}
      *
      * @param proto The protocol buffer output stream to write to.
      */
@@ -1639,10 +1671,11 @@ public interface WindowManagerPolicy extends WindowManagerPolicyConstants {
      * @param displayRotation the current display rotation
      * @param displayWidth the current display width
      * @param displayHeight the current display height
+     * @param displayCutout the current display cutout
      * @param outInsets the insets to return
      */
     public void getStableInsetsLw(int displayRotation, int displayWidth, int displayHeight,
-            Rect outInsets);
+            DisplayCutout displayCutout, Rect outInsets);
 
 
     /**
@@ -1666,10 +1699,11 @@ public interface WindowManagerPolicy extends WindowManagerPolicyConstants {
      * @param displayRotation the current display rotation
      * @param displayWidth the current display width
      * @param displayHeight the current display height
+     * @param displayCutout the current display cutout
      * @param outInsets the insets to return
      */
     public void getNonDecorInsetsLw(int displayRotation, int displayWidth, int displayHeight,
-            Rect outInsets);
+            DisplayCutout displayCutout, Rect outInsets);
 
     /**
      * @return True if a specified {@param dockSide} is allowed on the current device, or false
@@ -1698,6 +1732,13 @@ public interface WindowManagerPolicy extends WindowManagerPolicyConstants {
     boolean canDismissBootAnimation();
 
     /**
+     * Called when the magnification state changes.
+     *
+     * @param active Whether magnification is active (that is, we are zoomed in).
+     */
+    void onScreenMagnificationStateChanged(boolean active);
+
+    /**
      * Convert the user rotation mode to a human readable format.
      */
     static String userRotationModeToString(int mode) {
@@ -1710,4 +1751,21 @@ public interface WindowManagerPolicy extends WindowManagerPolicyConstants {
                 return Integer.toString(mode);
         }
     }
+
+    /**
+     * Requests that the WindowManager sends WindowManagerPolicy#ACTION_USER_ACTIVITY_NOTIFICATION
+     * on the next user activity.
+     */
+    public void requestUserActivityNotification();
+
+    /**
+     * Called when the state of lock task mode changes. This should be used to disable immersive
+     * mode confirmation.
+     *
+     * @param lockTaskState the new lock task mode state. One of
+     *                      {@link ActivityManager#LOCK_TASK_MODE_NONE},
+     *                      {@link ActivityManager#LOCK_TASK_MODE_LOCKED},
+     *                      {@link ActivityManager#LOCK_TASK_MODE_PINNED}.
+     */
+    void onLockTaskStateChangedLw(int lockTaskState);
 }

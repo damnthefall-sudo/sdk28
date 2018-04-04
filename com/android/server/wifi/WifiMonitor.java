@@ -136,6 +136,24 @@ public class WifiMonitor {
         ifaceWhatHandlers.add(handler);
     }
 
+    /**
+     * Deregister the given |handler|
+     * @param iface
+     * @param what
+     * @param handler
+     */
+    public synchronized void deregisterHandler(String iface, int what, Handler handler) {
+        SparseArray<Set<Handler>> ifaceHandlers = mHandlerMap.get(iface);
+        if (ifaceHandlers == null) {
+            return;
+        }
+        Set<Handler> ifaceWhatHandlers = ifaceHandlers.get(what);
+        if (ifaceWhatHandlers == null) {
+            return;
+        }
+        ifaceWhatHandlers.remove(handler);
+    }
+
     private final Map<String, Boolean> mMonitoringMap = new HashMap<>();
     private boolean isMonitoring(String iface) {
         Boolean val = mMonitoringMap.get(iface);
@@ -431,9 +449,11 @@ public class WifiMonitor {
      *               {@link android.net.wifi.WifiManager#ERROR_AUTH_FAILURE_TIMEOUT},
      *               {@link android.net.wifi.WifiManager#ERROR_AUTH_FAILURE_WRONG_PSWD},
      *               {@link android.net.wifi.WifiManager#ERROR_AUTH_FAILURE_EAP_FAILURE}
+     * @param errorCode Error code associated with the authentication failure event.
+     *               A value of -1 is used when no error code is reported.
      */
-    public void broadcastAuthenticationFailureEvent(String iface, int reason) {
-        sendMessage(iface, AUTHENTICATION_FAILURE_EVENT, 0, reason);
+    public void broadcastAuthenticationFailureEvent(String iface, int reason, int errorCode) {
+        sendMessage(iface, AUTHENTICATION_FAILURE_EVENT, reason, errorCode);
     }
 
     /**

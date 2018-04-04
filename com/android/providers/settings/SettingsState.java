@@ -42,6 +42,7 @@ import android.util.AtomicFile;
 import android.util.Base64;
 import android.util.Slog;
 import android.util.SparseIntArray;
+import android.util.StatsLog;
 import android.util.TimeUtils;
 import android.util.Xml;
 import android.util.proto.ProtoOutputStream;
@@ -51,7 +52,6 @@ import com.android.internal.util.ArrayUtils;
 import com.android.server.LocalServices;
 
 import libcore.io.IoUtils;
-import libcore.util.Objects;
 
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
@@ -66,6 +66,7 @@ import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -166,6 +167,9 @@ final class SettingsState {
     @GuardedBy("mLock")
     private final File mStatePersistFile;
 
+    @GuardedBy("mLock")
+    private final String mStatePersistTag;
+
     private final Setting mNullSetting = new Setting(null, null, false, null, null) {
         @Override
         public boolean isNull() {
@@ -250,6 +254,7 @@ final class SettingsState {
         mContext = context;
         mLock = lock;
         mStatePersistFile = file;
+        mStatePersistTag = "settings-" + getTypeFromKey(key) + "-" + getUserIdFromKey(key);
         mKey = key;
         mHandler = new MyHandler(looper);
         if (maxBytesPerAppPackage == MAX_BYTES_PER_APP_PACKAGE_LIMITED) {
@@ -382,6 +387,9 @@ final class SettingsState {
             mSettings.put(name, newState);
         }
 
+        StatsLog.write(StatsLog.SETTING_CHANGED, name, value, newState.value, oldValue, tag,
+            makeDefault, getUserIdFromKey(mKey), StatsLog.SETTING_CHANGED__REASON__UPDATED);
+
         addHistoricalOperationLocked(HISTORICAL_OPERATION_UPDATE, newState);
 
         updateMemoryUsagePerPackageLocked(packageName, oldValue, value,
@@ -405,6 +413,10 @@ final class SettingsState {
         }
 
         Setting oldState = mSettings.remove(name);
+
+        StatsLog.write(StatsLog.SETTING_CHANGED, name, /* value= */ "", /* newValue= */ "",
+            oldState.value, /* tag */ "", false, getUserIdFromKey(mKey),
+            StatsLog.SETTING_CHANGED__REASON__DELETED);
 
         updateMemoryUsagePerPackageLocked(oldState.packageName, oldState.value,
                 null, oldState.defaultValue, null);
@@ -634,7 +646,7 @@ final class SettingsState {
                 Slog.i(LOG_TAG, "[PERSIST START]");
             }
 
-            AtomicFile destination = new AtomicFile(mStatePersistFile);
+            AtomicFile destination = new AtomicFile(mStatePersistFile, mStatePersistTag);
             FileOutputStream out = null;
             try {
                 out = destination.startWrite();
@@ -992,7 +1004,7 @@ final class SettingsState {
             String defaultValue = this.defaultValue;
             boolean defaultFromSystem = this.defaultFromSystem;
             if (setDefault) {
-                if (!Objects.equal(value, this.defaultValue)
+                if (!Objects.equals(value, this.defaultValue)
                         && (!defaultFromSystem || callerSystem)) {
                     defaultValue = value;
                     // Default null means no default, so the tag is irrelevant
@@ -1011,10 +1023,10 @@ final class SettingsState {
             }
 
             // Is something gonna change?
-            if (Objects.equal(value, this.value)
-                    && Objects.equal(defaultValue, this.defaultValue)
-                    && Objects.equal(packageName, this.packageName)
-                    && Objects.equal(tag, this.tag)
+            if (Objects.equals(value, this.value)
+                    && Objects.equals(defaultValue, this.defaultValue)
+                    && Objects.equals(packageName, this.packageName)
+                    && Objects.equals(tag, this.tag)
                     && defaultFromSystem == this.defaultFromSystem) {
                 return false;
             }

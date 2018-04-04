@@ -19,6 +19,7 @@ package com.android.server.backup;
 import android.annotation.Nullable;
 import android.annotation.WorkerThread;
 import android.app.backup.BackupManager;
+import android.app.backup.BackupTransport;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -26,6 +27,7 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.os.Bundle;
 import android.os.RemoteException;
 import android.os.UserHandle;
 import android.util.ArrayMap;
@@ -42,6 +44,7 @@ import com.android.server.backup.transport.TransportClientManager;
 import com.android.server.backup.transport.TransportConnectionListener;
 import com.android.server.backup.transport.TransportNotAvailableException;
 import com.android.server.backup.transport.TransportNotRegisteredException;
+import com.android.server.backup.transport.TransportStats;
 
 import java.io.PrintWriter;
 import java.util.List;
@@ -62,6 +65,7 @@ public class TransportManager {
     private final PackageManager mPackageManager;
     private final Set<ComponentName> mTransportWhitelist;
     private final TransportClientManager mTransportClientManager;
+    private final TransportStats mTransportStats;
     private OnTransportRegisteredListener mOnTransportRegisteredListener = (c, n) -> {};
 
     /**
@@ -83,7 +87,12 @@ public class TransportManager {
     private volatile String mCurrentTransportName;
 
     TransportManager(Context context, Set<ComponentName> whitelist, String selectedTransport) {
-        this(context, whitelist, selectedTransport, new TransportClientManager(context));
+        mContext = context;
+        mPackageManager = context.getPackageManager();
+        mTransportWhitelist = Preconditions.checkNotNull(whitelist);
+        mCurrentTransportName = selectedTransport;
+        mTransportStats = new TransportStats();
+        mTransportClientManager = new TransportClientManager(context, mTransportStats);
     }
 
     @VisibleForTesting
@@ -96,6 +105,7 @@ public class TransportManager {
         mPackageManager = context.getPackageManager();
         mTransportWhitelist = Preconditions.checkNotNull(whitelist);
         mCurrentTransportName = selectedTransport;
+        mTransportStats = new TransportStats();
         mTransportClientManager = transportClientManager;
     }
 
@@ -582,8 +592,12 @@ public class TransportManager {
 
         String transportString = transportComponent.flattenToShortString();
         String callerLogString = "TransportManager.registerTransport()";
-        TransportClient transportClient =
-                mTransportClientManager.getTransportClient(transportComponent, callerLogString);
+
+        Bundle extras = new Bundle();
+        extras.putBoolean(BackupTransport.EXTRA_TRANSPORT_REGISTRATION, true);
+
+        TransportClient transportClient = mTransportClientManager.getTransportClient(
+            transportComponent, extras, callerLogString);
         final IBackupTransport transport;
         try {
             transport = transportClient.connectOrThrow(callerLogString);
@@ -634,8 +648,12 @@ public class TransportManager {
                 !Thread.holdsLock(mTransportLock), "Can't call transport with transport lock held");
     }
 
-    public void dump(PrintWriter pw) {
+    public void dumpTransportClients(PrintWriter pw) {
         mTransportClientManager.dump(pw);
+    }
+
+    public void dumpTransportStats(PrintWriter pw) {
+        mTransportStats.dump(pw);
     }
 
     private static Predicate<ComponentName> fromPackageFilter(String packageName) {

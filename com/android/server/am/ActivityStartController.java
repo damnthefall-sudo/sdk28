@@ -41,6 +41,7 @@ import android.os.Looper;
 import android.os.Message;
 import android.provider.Settings;
 import android.util.Slog;
+import android.view.RemoteAnimationAdapter;
 
 import com.android.internal.annotations.VisibleForTesting;
 import com.android.server.am.ActivityStackSupervisor.PendingActivityLaunch;
@@ -85,6 +86,8 @@ public class ActivityStartController {
 
     private final Handler mHandler;
 
+    private final PendingRemoteAnimationRegistry mPendingRemoteAnimationRegistry;
+
     private final class StartHandler extends Handler {
         public StartHandler(Looper looper) {
             super(looper, null, true);
@@ -123,6 +126,8 @@ public class ActivityStartController {
         mHandler = new StartHandler(mService.mHandlerThread.getLooper());
         mFactory = factory;
         mFactory.setController(this);
+        mPendingRemoteAnimationRegistry = new PendingRemoteAnimationRegistry(service,
+                service.mHandler);
     }
 
     /**
@@ -193,9 +198,10 @@ public class ActivityStartController {
 
             // See if we should be showing the platform update setup UI.
             final Intent intent = new Intent(Intent.ACTION_UPGRADE_SETUP);
-            final List<ResolveInfo> ris = mService.mContext.getPackageManager()
-                    .queryIntentActivities(intent,
-                            PackageManager.MATCH_SYSTEM_ONLY | PackageManager.GET_META_DATA);
+            final List<ResolveInfo> ris =
+                    mService.mContext.getPackageManager().queryIntentActivities(intent,
+                            PackageManager.MATCH_SYSTEM_ONLY | PackageManager.GET_META_DATA
+                                    | ActivityManagerService.STOCK_PM_FLAGS);
             if (!ris.isEmpty()) {
                 final ResolveInfo ri = ris.get(0);
                 String vers = ri.activityInfo.metaData != null
@@ -245,11 +251,25 @@ public class ActivityStartController {
                 .execute();
     }
 
+    /**
+     * Start intents as a package.
+     *
+     * @param uid Make a call as if this UID did.
+     * @param callingPackage Make a call as if this package did.
+     * @param intents Intents to start.
+     * @param userId Start the intents on this user.
+     * @param validateIncomingUser Set true to skip checking {@code userId} with the calling UID.
+     */
     final int startActivitiesInPackage(int uid, String callingPackage, Intent[] intents,
-            String[] resolvedTypes, IBinder resultTo, SafeActivityOptions options, int userId) {
+            String[] resolvedTypes, IBinder resultTo, SafeActivityOptions options, int userId,
+            boolean validateIncomingUser) {
         final String reason = "startActivityInPackage";
-        userId = mService.mUserController.handleIncomingUser(Binder.getCallingPid(),
-                Binder.getCallingUid(), userId, false, ALLOW_FULL_ONLY, reason, null);
+        if (validateIncomingUser) {
+            userId = mService.mUserController.handleIncomingUser(Binder.getCallingPid(),
+                    Binder.getCallingUid(), userId, false, ALLOW_FULL_ONLY, reason, null);
+        } else {
+            mService.mUserController.ensureNotSpecialUser(userId);
+        }
         // TODO: Switch to user app stacks here.
         return startActivities(null, uid, callingPackage, intents, resolvedTypes, resultTo, options,
                 userId, reason);
@@ -383,6 +403,15 @@ public class ActivityStartController {
             }
         }
         return mPendingActivityLaunches.size() < pendingLaunches;
+    }
+
+    void registerRemoteAnimationForNextActivityStart(String packageName,
+            RemoteAnimationAdapter adapter) {
+        mPendingRemoteAnimationRegistry.addPendingAnimation(packageName, adapter);
+    }
+
+    PendingRemoteAnimationRegistry getPendingRemoteAnimationRegistry() {
+        return mPendingRemoteAnimationRegistry;
     }
 
     void dump(PrintWriter pw, String prefix, String dumpPackage) {

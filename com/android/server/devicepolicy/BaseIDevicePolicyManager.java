@@ -19,12 +19,10 @@ import android.annotation.UserIdInt;
 import android.app.admin.IDevicePolicyManager;
 import android.content.ComponentName;
 import android.os.PersistableBundle;
-import android.os.UserHandle;
 import android.security.keymaster.KeymasterCertificateChain;
 import android.security.keystore.ParcelableKeyGenParameterSpec;
 import android.telephony.data.ApnSetting;
 
-import com.android.internal.R;
 import com.android.server.SystemService;
 
 import java.util.ArrayList;
@@ -80,34 +78,12 @@ abstract class BaseIDevicePolicyManager extends IDevicePolicyManager.Stub {
         return false;
     }
 
-    @Override
-    public boolean setPasswordBlacklist(ComponentName who, String name, List<String> blacklist,
-            boolean parent) {
-        return false;
-    }
-
-    @Override
-    public String getPasswordBlacklistName(ComponentName who, @UserIdInt int userId,
-            boolean parent) {
-        return null;
-    }
-
-    @Override
-    public boolean isPasswordBlacklisted(@UserIdInt int userId, String password) {
-        return false;
-    }
-
     public boolean isUsingUnifiedPassword(ComponentName who) {
         return true;
     }
 
     public boolean setKeyPairCertificate(ComponentName who, String callerPackage, String alias,
             byte[] cert, byte[] chain, boolean isUserSelectable) {
-        return false;
-    }
-
-    @Override
-    public boolean startUserInBackground(ComponentName who, UserHandle userHandle) {
         return false;
     }
 
@@ -129,22 +105,12 @@ abstract class BaseIDevicePolicyManager extends IDevicePolicyManager.Stub {
     }
 
     @Override
-    public void setPrintingEnabled(ComponentName admin, boolean enabled) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public boolean isPrintingEnabled() {
-        return true;
-    }
-
-    @Override
-    public List<String> setMeteredDataDisabled(ComponentName admin, List<String> packageNames) {
+    public List<String> setMeteredDataDisabledPackages(ComponentName admin, List<String> packageNames) {
         return packageNames;
     }
 
     @Override
-    public List<String> getMeteredDataDisabled(ComponentName admin) {
+    public List<String> getMeteredDataDisabledPackages(ComponentName admin) {
         return new ArrayList<>();
     }
 
@@ -174,5 +140,23 @@ abstract class BaseIDevicePolicyManager extends IDevicePolicyManager.Stub {
     @Override
     public boolean isOverrideApnEnabled(ComponentName admin) {
         return false;
+    }
+
+    public void clearSystemUpdatePolicyFreezePeriodRecord() {
+    }
+
+    @Override
+    public boolean isMeteredDataDisabledPackageForUser(ComponentName admin,
+            String packageName, int userId) {
+        return false;
+    }
+
+    @Override
+    public long forceSecurityLogs() {
+        return 0;
+    }
+
+    @Override
+    public void setDefaultSmsApplication(ComponentName admin, String packageName) {
     }
 }

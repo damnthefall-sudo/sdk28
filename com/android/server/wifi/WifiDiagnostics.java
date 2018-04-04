@@ -16,7 +16,6 @@
 
 package com.android.server.wifi;
 
-import android.app.ActivityManager;
 import android.content.Context;
 import android.util.Base64;
 
@@ -78,8 +77,7 @@ class WifiDiagnostics extends BaseWifiDiagnostics {
     public static final int REPORT_REASON_UNEXPECTED_DISCONNECT     = 5;
     public static final int REPORT_REASON_SCAN_FAILURE              = 6;
     public static final int REPORT_REASON_USER_ACTION               = 7;
-    public static final int REPORT_REASON_WIFICOND_CRASH            = 8;
-    public static final int REPORT_REASON_HAL_CRASH                 = 9;
+    public static final int REPORT_REASON_WIFINATIVE_FAILURE        = 8;
 
     /** number of bug reports to hold */
     public static final int MAX_BUG_REPORTS                         = 4;
@@ -252,14 +250,14 @@ class WifiDiagnostics extends BaseWifiDiagnostics {
     /**
      * Initiates a system-level bugreport, in a non-blocking fashion.
      */
-    public void takeBugReport() {
+    public void takeBugReport(String bugTitle, String bugDetail) {
         if (mBuildProperties.isUserBuild()) {
             return;
         }
 
         try {
-            mWifiInjector.getActivityManagerService().requestBugReport(
-                    ActivityManager.BUGREPORT_OPTION_WIFI);
+            mWifiInjector.getActivityManagerService().requestWifiBugReport(
+                    bugTitle, bugDetail);
         } catch (Exception e) {  // diagnostics should never crash system_server
             mLog.err("error taking bugreport: %").c(e.getClass().getName()).flush();
         }
@@ -435,11 +433,6 @@ class WifiDiagnostics extends BaseWifiDiagnostics {
     }
 
     private boolean fetchRingBuffers() {
-        if (mBuildProperties.isUserBuild()) {
-            mRingBuffers = null;
-            return false;
-        }
-
         if (mRingBuffers != null) return true;
 
         mRingBuffers = mWifiNative.getRingBufferStatus();
@@ -471,10 +464,6 @@ class WifiDiagnostics extends BaseWifiDiagnostics {
 
         if (mRingBuffers == null) {
             if (DBG) mLog.tC("No ring buffers to log anything!");
-            return false;
-        }
-
-        if (!isVerboseLoggingEnabled()) {
             return false;
         }
 

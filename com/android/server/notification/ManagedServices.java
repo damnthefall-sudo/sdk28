@@ -376,9 +376,7 @@ abstract public class ManagedServices {
     protected void upgradeXml(final int xmlVersion, final int userId) {}
 
     private void loadAllowedComponentsFromSettings() {
-
-        UserManager userManager = (UserManager) mContext.getSystemService(Context.USER_SERVICE);
-        for (UserInfo user : userManager.getUsers()) {
+        for (UserInfo user : mUm.getUsers()) {
             final ContentResolver cr = mContext.getContentResolver();
             addApprovedList(Settings.Secure.getStringForUser(
                     cr,
@@ -482,7 +480,9 @@ abstract public class ManagedServices {
         for (int i = 0; i < allowedByType.size(); i++) {
             final ArraySet<String> allowed = allowedByType.valueAt(i);
             allowedPackages.addAll(
-                    allowed.stream().map(this::getPackageName).collect(Collectors.toList()));
+                    allowed.stream().map(this::getPackageName).
+                            filter(value -> !TextUtils.isEmpty(value))
+                            .collect(Collectors.toList()));
         }
         return allowedPackages;
     }
@@ -771,7 +771,7 @@ abstract public class ManagedServices {
      * Called whenever packages change, the user switches, or the secure setting
      * is altered. (For example in response to USER_SWITCHED in our broadcast receiver)
      */
-    private void rebindServices(boolean forceRebind) {
+    protected void rebindServices(boolean forceRebind) {
         if (DEBUG) Slog.d(TAG, "rebindServices");
         final int[] userIds = mUserProfiles.getCurrentProfileIds();
         final int nUserIds = userIds.length;
@@ -982,7 +982,11 @@ abstract public class ManagedServices {
                     Slog.w(TAG, getCaption() + " binding died: " + name);
                     synchronized (mMutex) {
                         mServicesBinding.remove(servicesBindingTag);
-                        mContext.unbindService(this);
+                        try {
+                            mContext.unbindService(this);
+                        } catch (IllegalArgumentException e) {
+                            Slog.e(TAG, "failed to unbind " + name, e);
+                        }
                         if (!mServicesRebinding.contains(servicesBindingTag)) {
                             mServicesRebinding.add(servicesBindingTag);
                             mHandler.postDelayed(new Runnable() {

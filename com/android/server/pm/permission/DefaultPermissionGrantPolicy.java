@@ -16,7 +16,7 @@
 
 package com.android.server.pm.permission;
 
-import static com.android.server.pm.PackageManagerServiceUtils.compareSignatures;
+import static android.os.Process.FIRST_APPLICATION_UID;
 
 import android.Manifest;
 import android.annotation.NonNull;
@@ -25,18 +25,18 @@ import android.app.ActivityManager;
 import android.app.DownloadManager;
 import android.app.admin.DevicePolicyManager;
 import android.companion.CompanionDeviceManager;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
-import android.content.pm.IPackageManager;
 import android.content.pm.PackageList;
 import android.content.pm.PackageManager;
 import android.content.pm.PackageManagerInternal;
+import android.content.pm.PackageManagerInternal.PackagesProvider;
+import android.content.pm.PackageManagerInternal.SyncAdapterPackagesProvider;
 import android.content.pm.PackageParser;
 import android.content.pm.ProviderInfo;
 import android.content.pm.ResolveInfo;
-import android.content.pm.PackageManagerInternal.PackagesProvider;
-import android.content.pm.PackageManagerInternal.SyncAdapterPackagesProvider;
 import android.media.RingtoneManager;
 import android.net.Uri;
 import android.os.Binder;
@@ -52,15 +52,19 @@ import android.provider.CalendarContract;
 import android.provider.ContactsContract;
 import android.provider.MediaStore;
 import android.provider.Telephony.Sms.Intents;
-import android.telephony.TelephonyManager;
 import android.security.Credentials;
+import android.service.textclassifier.TextClassifierService;
+import android.telephony.TelephonyManager;
+import android.text.TextUtils;
 import android.util.ArrayMap;
 import android.util.ArraySet;
 import android.util.Log;
 import android.util.Slog;
 import android.util.Xml;
+
 import com.android.internal.util.XmlUtils;
 import com.android.server.LocalServices;
+import com.android.server.pm.PackageManagerService;
 
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
@@ -71,13 +75,10 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-
-import static android.os.Process.FIRST_APPLICATION_UID;
 
 /**
  * This class is the policy for granting runtime permissions to
@@ -263,13 +264,9 @@ public final class DefaultPermissionGrantPolicy {
     }
 
     public void grantDefaultPermissions(int userId) {
-        if (mContext.getPackageManager().hasSystemFeature(PackageManager.FEATURE_EMBEDDED, 0)) {
-            grantAllRuntimePermissions(userId);
-        } else {
-            grantPermissionsToSysComponentsAndPrivApps(userId);
-            grantDefaultSystemHandlerPermissions(userId);
-            grantDefaultPermissionExceptions(userId);
-        }
+        grantPermissionsToSysComponentsAndPrivApps(userId);
+        grantDefaultSystemHandlerPermissions(userId);
+        grantDefaultPermissionExceptions(userId);
     }
 
     private void grantRuntimePermissionsForPackage(int userId, PackageParser.Package pkg) {
@@ -431,6 +428,13 @@ public final class DefaultPermissionGrantPolicy {
                 "com.android.externalstorage.documents", userId);
         if (storagePackage != null) {
             grantRuntimePermissions(storagePackage, STORAGE_PERMISSIONS, true, userId);
+        }
+
+        // Container service
+        PackageParser.Package containerPackage = getSystemPackage(
+                PackageManagerService.DEFAULT_CONTAINER_PACKAGE);
+        if (containerPackage != null) {
+            grantRuntimePermissions(containerPackage, STORAGE_PERMISSIONS, true, userId);
         }
 
         // CertInstaller
@@ -821,6 +825,22 @@ public final class DefaultPermissionGrantPolicy {
                     STORAGE_PERMISSIONS, true, userId);
         }
 
+        // TextClassifier Service
+        String textClassifierPackageName =
+                mContext.getPackageManager().getSystemTextClassifierPackageName();
+        if (!TextUtils.isEmpty(textClassifierPackageName)) {
+            PackageParser.Package textClassifierPackage =
+                    getSystemPackage(textClassifierPackageName);
+            if (textClassifierPackage != null
+                    && doesPackageSupportRuntimePermissions(textClassifierPackage)) {
+                grantRuntimePermissions(textClassifierPackage, PHONE_PERMISSIONS, true, userId);
+                grantRuntimePermissions(textClassifierPackage, SMS_PERMISSIONS, true, userId);
+                grantRuntimePermissions(textClassifierPackage, CALENDAR_PERMISSIONS, true, userId);
+                grantRuntimePermissions(textClassifierPackage, LOCATION_PERMISSIONS, true, userId);
+                grantRuntimePermissions(textClassifierPackage, CONTACTS_PERMISSIONS, true, userId);
+            }
+        }
+
         if (mPermissionGrantedCallback != null) {
             mPermissionGrantedCallback.onDefaultRuntimePermissionsGranted(userId);
         }
@@ -952,6 +972,67 @@ public final class DefaultPermissionGrantPolicy {
                 grantRuntimePermissions(imsServicePackage, MICROPHONE_PERMISSIONS, userId);
                 grantRuntimePermissions(imsServicePackage, LOCATION_PERMISSIONS, userId);
                 grantRuntimePermissions(imsServicePackage, CAMERA_PERMISSIONS, userId);
+                grantRuntimePermissions(imsServicePackage, CONTACTS_PERMISSIONS, userId);
+            }
+        }
+    }
+
+    public void grantDefaultPermissionsToEnabledTelephonyDataServices(
+            String[] packageNames, int userId) {
+        Log.i(TAG, "Granting permissions to enabled data services for user:" + userId);
+        if (packageNames == null) {
+            return;
+        }
+        for (String packageName : packageNames) {
+            PackageParser.Package dataServicePackage = getSystemPackage(packageName);
+            if (dataServicePackage != null
+                    && doesPackageSupportRuntimePermissions(dataServicePackage)) {
+                // Grant these permissions as system-fixed, so that nobody can accidentally
+                // break cellular data.
+                grantRuntimePermissions(dataServicePackage, PHONE_PERMISSIONS, true, userId);
+                grantRuntimePermissions(dataServicePackage, LOCATION_PERMISSIONS, true, userId);
+            }
+        }
+    }
+
+    public void revokeDefaultPermissionsFromDisabledTelephonyDataServices(
+            String[] packageNames, int userId) {
+        Log.i(TAG, "Revoking permissions from disabled data services for user:" + userId);
+        if (packageNames == null) {
+            return;
+        }
+        for (String packageName : packageNames) {
+            PackageParser.Package dataServicePackage = getSystemPackage(packageName);
+            if (dataServicePackage != null
+                    && doesPackageSupportRuntimePermissions(dataServicePackage)) {
+                revokeRuntimePermissions(dataServicePackage, PHONE_PERMISSIONS, true, userId);
+                revokeRuntimePermissions(dataServicePackage, LOCATION_PERMISSIONS, true, userId);
+            }
+        }
+    }
+
+    public void grantDefaultPermissionsToActiveLuiApp(String packageName, int userId) {
+        Log.i(TAG, "Granting permissions to active LUI app for user:" + userId);
+        if (packageName == null) {
+            return;
+        }
+        PackageParser.Package luiAppPackage = getSystemPackage(packageName);
+        if (luiAppPackage != null
+                && doesPackageSupportRuntimePermissions(luiAppPackage)) {
+            grantRuntimePermissions(luiAppPackage, CAMERA_PERMISSIONS, true, userId);
+        }
+    }
+
+    public void revokeDefaultPermissionsFromLuiApps(String[] packageNames, int userId) {
+        Log.i(TAG, "Revoke permissions from LUI apps for user:" + userId);
+        if (packageNames == null) {
+            return;
+        }
+        for (String packageName : packageNames) {
+            PackageParser.Package luiAppPackage = getSystemPackage(packageName);
+            if (luiAppPackage != null
+                    && doesPackageSupportRuntimePermissions(luiAppPackage)) {
+                revokeRuntimePermissions(luiAppPackage, CAMERA_PERMISSIONS, true, userId);
             }
         }
     }
@@ -1058,6 +1139,51 @@ public final class DefaultPermissionGrantPolicy {
         grantRuntimePermissions(pkg, permissions, systemFixed, false, userId);
     }
 
+    private void revokeRuntimePermissions(PackageParser.Package pkg, Set<String> permissions,
+            boolean systemFixed, int userId) {
+        if (pkg.requestedPermissions.isEmpty()) {
+            return;
+        }
+        Set<String> revokablePermissions = new ArraySet<>(pkg.requestedPermissions);
+
+        for (String permission : permissions) {
+            // We can't revoke what wasn't requested.
+            if (!revokablePermissions.contains(permission)) {
+                continue;
+            }
+
+            final int flags = mServiceInternal.getPermissionFlagsTEMP(
+                    permission, pkg.packageName, userId);
+
+            // We didn't get this through the default grant policy. Move along.
+            if ((flags & PackageManager.FLAG_PERMISSION_GRANTED_BY_DEFAULT) == 0) {
+                continue;
+            }
+            // We aren't going to clobber device policy with a DefaultGrant.
+            if ((flags & PackageManager.FLAG_PERMISSION_POLICY_FIXED) != 0) {
+                continue;
+            }
+            // Do not revoke system fixed permissions unless caller set them that way;
+            // there is no refcount for the number of sources of this, so there
+            // should be at most one grantor doing SYSTEM_FIXED for any given package.
+            if ((flags & PackageManager.FLAG_PERMISSION_SYSTEM_FIXED) != 0 && !systemFixed) {
+                continue;
+            }
+            mServiceInternal.revokeRuntimePermission(pkg.packageName, permission, userId, false);
+
+            if (DEBUG) {
+                Log.i(TAG, "revoked " + (systemFixed ? "fixed " : "not fixed ")
+                        + permission + " to " + pkg.packageName);
+            }
+
+            // Remove the GRANTED_BY_DEFAULT flag without touching the others.
+            // Note that we do not revoke FLAG_PERMISSION_SYSTEM_FIXED. That bit remains
+            // sticky once set.
+            mServiceInternal.updatePermissionFlagsTEMP(permission, pkg.packageName,
+                    PackageManager.FLAG_PERMISSION_GRANTED_BY_DEFAULT, 0, userId);
+        }
+    }
+
     private void grantRuntimePermissions(PackageParser.Package pkg, Set<String> permissions,
             boolean systemFixed, boolean ignoreSystemPackage, int userId) {
         if (pkg.requestedPermissions.isEmpty()) {
@@ -1108,10 +1234,10 @@ public final class DefaultPermissionGrantPolicy {
                 // to make sure we can grant the needed permission to the default
                 // sms and phone apps after the user chooses this in the UI.
                 if (flags == 0 || ignoreSystemPackage) {
-                    // Never clobber policy or system.
-                    final int fixedFlags = PackageManager.FLAG_PERMISSION_SYSTEM_FIXED
-                            | PackageManager.FLAG_PERMISSION_POLICY_FIXED;
-                    if ((flags & fixedFlags) != 0) {
+                    // Never clobber policy fixed permissions.
+                    // We must allow the grant of a system-fixed permission because
+                    // system-fixed is sticky, but the permission itself may be revoked.
+                    if ((flags & PackageManager.FLAG_PERMISSION_POLICY_FIXED) != 0) {
                         continue;
                     }
 
@@ -1166,9 +1292,9 @@ public final class DefaultPermissionGrantPolicy {
         final String systemPackageName = mServiceInternal.getKnownPackageName(
                 PackageManagerInternal.PACKAGE_SYSTEM, UserHandle.USER_SYSTEM);
         final PackageParser.Package systemPackage = getPackage(systemPackageName);
-        return compareSignatures(systemPackage.mSigningDetails.signatures,
-                pkg.mSigningDetails.signatures)
-                == PackageManager.SIGNATURE_MATCH;
+        return pkg.mSigningDetails.hasAncestorOrSelf(systemPackage.mSigningDetails)
+                || systemPackage.mSigningDetails.checkCapability(pkg.mSigningDetails,
+                        PackageParser.SigningDetails.CertCapabilities.PERMISSION);
     }
 
     private void grantDefaultPermissionExceptions(int userId) {
@@ -1214,6 +1340,21 @@ public final class DefaultPermissionGrantPolicy {
         dir = new File(Environment.getVendorDirectory(), "etc/default-permissions");
         if (dir.isDirectory() && dir.canRead()) {
             Collections.addAll(ret, dir.listFiles());
+        }
+        dir = new File(Environment.getOdmDirectory(), "etc/default-permissions");
+        if (dir.isDirectory() && dir.canRead()) {
+            Collections.addAll(ret, dir.listFiles());
+        }
+        dir = new File(Environment.getProductDirectory(), "etc/default-permissions");
+        if (dir.isDirectory() && dir.canRead()) {
+            Collections.addAll(ret, dir.listFiles());
+        }
+        // For IoT devices, we check the oem partition for default permissions for each app.
+        if (mContext.getPackageManager().hasSystemFeature(PackageManager.FEATURE_EMBEDDED, 0)) {
+            dir = new File(Environment.getOemDirectory(), "etc/default-permissions");
+            if (dir.isDirectory() && dir.canRead()) {
+                Collections.addAll(ret, dir.listFiles());
+            }
         }
         return ret.isEmpty() ? null : ret.toArray(new File[0]);
     }

@@ -55,7 +55,7 @@ import java.util.Locale;
  * magnification region. If a value is out of bounds, it will be adjusted to guarantee these
  * constraints.
  */
-class MagnificationController implements Handler.Callback {
+public class MagnificationController implements Handler.Callback {
     private static final boolean DEBUG = false;
     private static final String LOG_TAG = "MagnificationController";
 
@@ -446,8 +446,10 @@ class MagnificationController implements Handler.Callback {
             mMagnificationRegion.getBounds(viewport);
             final MagnificationSpec spec = mCurrentMagnificationSpec;
             final float oldScale = spec.scale;
-            final float oldCenterX = (viewport.width() / 2.0f - spec.offsetX) / oldScale;
-            final float oldCenterY = (viewport.height() / 2.0f - spec.offsetY) / oldScale;
+            final float oldCenterX
+                    = (viewport.width() / 2.0f - spec.offsetX + viewport.left) / oldScale;
+            final float oldCenterY
+                    = (viewport.height() / 2.0f - spec.offsetY + viewport.top) / oldScale;
             final float normPivotX = (pivotX - spec.offsetX) / oldScale;
             final float normPivotY = (pivotY - spec.offsetY) / oldScale;
             final float offsetX = (oldCenterX - normPivotX) * (oldScale / scale);
@@ -901,6 +903,7 @@ class MagnificationController implements Handler.Callback {
             }
         }
 
+        @GuardedBy("mLock")
         private void setMagnificationSpecLocked(MagnificationSpec spec) {
             if (mEnabled) {
                 if (DEBUG_SET_MAGNIFICATION_SPEC) {

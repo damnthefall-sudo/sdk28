@@ -583,6 +583,11 @@ public abstract class ViewGroup extends View implements ViewParent, ViewManager 
     private List<Integer> mTransientIndices = null;
     private List<View> mTransientViews = null;
 
+    /**
+     * Keeps track of how many child views have UnhandledKeyEventListeners. This should only be
+     * updated on the UI thread so shouldn't require explicit synchronization.
+     */
+    int mChildUnhandledKeyListeners = 0;
 
     /**
      * Empty ActionMode used as a sentinel in recursive entries to startActionModeForChild.
@@ -3555,13 +3560,16 @@ public abstract class ViewGroup extends View implements ViewParent, ViewManager 
     public void dispatchProvideAutofillStructure(ViewStructure structure,
             @AutofillFlags int flags) {
         super.dispatchProvideAutofillStructure(structure, flags);
+
         if (structure.getChildCount() != 0) {
             return;
         }
 
         if (!isLaidOut()) {
-            Log.v(VIEW_LOG_TAG, "dispatchProvideAutofillStructure(): not laid out, ignoring "
-                    + mChildrenCount + " children of " + getAutofillId());
+            if (Helper.sVerbose) {
+                Log.v(VIEW_LOG_TAG, "dispatchProvideAutofillStructure(): not laid out, ignoring "
+                        + mChildrenCount + " children of " + getAutofillId());
+            }
             return;
         }
 
@@ -3649,34 +3657,44 @@ public abstract class ViewGroup extends View implements ViewParent, ViewManager 
         return ViewGroup.class.getName();
     }
 
+    @Override
+    public void notifySubtreeAccessibilityStateChanged(View child, View source, int changeType) {
+        // If this is a live region, we should send a subtree change event
+        // from this view. Otherwise, we can let it propagate up.
+        if (getAccessibilityLiveRegion() != ACCESSIBILITY_LIVE_REGION_NONE) {
+            notifyViewAccessibilityStateChangedIfNeeded(
+                    AccessibilityEvent.CONTENT_CHANGE_TYPE_SUBTREE);
+        } else if (mParent != null) {
+            try {
+                mParent.notifySubtreeAccessibilityStateChanged(this, source, changeType);
+            } catch (AbstractMethodError e) {
+                Log.e(VIEW_LOG_TAG, mParent.getClass().getSimpleName() +
+                        " does not fully implement ViewParent", e);
+            }
+        }
+    }
+
     /** @hide */
     @Override
-    public void notifyAccessibilitySubtreeChanged() {
+    public void notifySubtreeAccessibilityStateChangedIfNeeded() {
         if (!AccessibilityManager.getInstance(mContext).isEnabled() || mAttachInfo == null) {
             return;
         }
         // If something important for a11y is happening in this subtree, make sure it's dispatched
         // from a view that is important for a11y so it doesn't get lost.
-        if (getImportantForAccessibility() != IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
-                && !isImportantForAccessibility()
-                && getChildCount() > 0) {
+        if ((getImportantForAccessibility() != IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS)
+                && !isImportantForAccessibility() && (getChildCount() > 0)) {
             ViewParent a11yParent = getParentForAccessibility();
             if (a11yParent instanceof View) {
-                ((View) a11yParent).notifyAccessibilitySubtreeChanged();
+                ((View) a11yParent).notifySubtreeAccessibilityStateChangedIfNeeded();
                 return;
             }
         }
-        super.notifyAccessibilitySubtreeChanged();
+        super.notifySubtreeAccessibilityStateChangedIfNeeded();
     }
 
     @Override
-    public void notifySubtreeAccessibilityStateChanged(View child, View source, int changeType) {
-        notifyAccessibilityStateChanged(source, changeType);
-    }
-
-    /** @hide */
-    @Override
-    public void resetSubtreeAccessibilityStateChanged() {
+    void resetSubtreeAccessibilityStateChanged() {
         super.resetSubtreeAccessibilityStateChanged();
         View[] children = mChildren;
         final int childCount = mChildrenCount;
@@ -3958,15 +3976,7 @@ public abstract class ViewGroup extends View implements ViewParent, ViewManager 
     }
 
     /**
-     * Layout debugging code which draws rectangles around layout params.
-     *
-     * <p>This function is called automatically when the developer setting is enabled.<p/>
-     *
-     * <p>It is strongly advised to only call this function from debug builds as there is
-     * a risk of leaking unwanted layout information.<p/>
-     *
-     * @param canvas the canvas on which to draw
-     * @param paint the paint used to draw through
+     * @hide
      */
     protected void onDebugDrawMargins(Canvas canvas, Paint paint) {
         for (int i = 0; i < getChildCount(); i++) {
@@ -3976,19 +3986,7 @@ public abstract class ViewGroup extends View implements ViewParent, ViewManager 
     }
 
     /**
-     * Layout debugging code which draws rectangles around:
-     * <ul>
-     *     <li>optical bounds<li/>
-     *     <li>margins<li/>
-     *     <li>clip bounds<li/>
-     * <ul/>
-     *
-     * <p>This function is called automatically when the developer setting is enabled.<p/>
-     *
-     * <p>It is strongly advised to only call this function from debug builds as there is
-     * a risk of leaking unwanted layout information.<p/>
-     *
-     * @param canvas the canvas on which to draw
+     * @hide
      */
     protected void onDebugDraw(Canvas canvas) {
         Paint paint = getDebugPaint();
@@ -4288,6 +4286,13 @@ public abstract class ViewGroup extends View implements ViewParent, ViewManager 
         final View[] children = mChildren;
         for (int i = 0; i < count; i++) {
             final View child = children[i];
+            if (((child.mViewFlags & VISIBILITY_MASK) == VISIBLE || child.getAnimation() != null)) {
+                recreateChildDisplayList(child);
+            }
+        }
+        final int transientCount = mTransientViews == null ? 0 : mTransientIndices.size();
+        for (int i = 0; i < transientCount; ++i) {
+            View child = mTransientViews.get(i);
             if (((child.mViewFlags & VISIBILITY_MASK) == VISIBLE || child.getAnimation() != null)) {
                 recreateChildDisplayList(child);
             }
@@ -5055,6 +5060,9 @@ public abstract class ViewGroup extends View implements ViewParent, ViewManager 
             child.assignParent(this);
         } else {
             child.mParent = this;
+            if (child.hasUnhandledKeyListener()) {
+                incrementChildUnhandledKeyListeners();
+            }
         }
 
         final boolean childHasFocus = child.hasFocus();
@@ -5088,7 +5096,7 @@ public abstract class ViewGroup extends View implements ViewParent, ViewManager 
         }
 
         if (child.getVisibility() != View.GONE) {
-            notifyAccessibilitySubtreeChanged();
+            notifySubtreeAccessibilityStateChangedIfNeeded();
         }
 
         if (mTransientIndices != null) {
@@ -5109,6 +5117,20 @@ public abstract class ViewGroup extends View implements ViewParent, ViewManager 
             // When adding a child that contains default focus, either during inflation or while
             // manually assembling the hierarchy, update the ancestor default-focus chain.
             setDefaultFocus(child);
+        }
+
+        touchAccessibilityNodeProviderIfNeeded(child);
+    }
+
+    /**
+     * We may need to touch the provider to bring up the a11y layer. In a11y mode
+     * clients inspect the screen or the user touches it which triggers bringing up
+     * of the a11y infrastructure while in autofill mode we want the infra up and
+     * running from the beginning since we watch for a11y events to drive autofill.
+     */
+    private void touchAccessibilityNodeProviderIfNeeded(View child) {
+        if (mContext.isAutofillCompatibilityEnabled()) {
+            child.getAccessibilityNodeProvider();
         }
     }
 
@@ -5345,6 +5367,10 @@ public abstract class ViewGroup extends View implements ViewParent, ViewManager 
 
         removeFromArray(index);
 
+        if (view.hasUnhandledKeyListener()) {
+            decrementChildUnhandledKeyListeners();
+        }
+
         if (view == mDefaultFocus) {
             clearDefaultFocus(view);
         }
@@ -5358,7 +5384,7 @@ public abstract class ViewGroup extends View implements ViewParent, ViewManager 
         dispatchViewRemoved(view);
 
         if (view.getVisibility() != View.GONE) {
-            notifyAccessibilitySubtreeChanged();
+            notifySubtreeAccessibilityStateChangedIfNeeded();
         }
 
         int transientCount = mTransientIndices == null ? 0 : mTransientIndices.size();
@@ -6077,7 +6103,7 @@ public abstract class ViewGroup extends View implements ViewParent, ViewManager 
         if (invalidate) {
             invalidateViewProperty(false, false);
         }
-        notifyAccessibilitySubtreeChanged();
+        notifySubtreeAccessibilityStateChangedIfNeeded();
     }
 
     @Override
@@ -7523,6 +7549,62 @@ public abstract class ViewGroup extends View implements ViewParent, ViewManager 
         }
     }
 
+    @Override
+    boolean hasUnhandledKeyListener() {
+        return (mChildUnhandledKeyListeners > 0) || super.hasUnhandledKeyListener();
+    }
+
+    void incrementChildUnhandledKeyListeners() {
+        mChildUnhandledKeyListeners += 1;
+        if (mChildUnhandledKeyListeners == 1) {
+            if (mParent instanceof ViewGroup) {
+                ((ViewGroup) mParent).incrementChildUnhandledKeyListeners();
+            }
+        }
+    }
+
+    void decrementChildUnhandledKeyListeners() {
+        mChildUnhandledKeyListeners -= 1;
+        if (mChildUnhandledKeyListeners == 0) {
+            if (mParent instanceof ViewGroup) {
+                ((ViewGroup) mParent).decrementChildUnhandledKeyListeners();
+            }
+        }
+    }
+
+    @Override
+    View dispatchUnhandledKeyEvent(KeyEvent evt) {
+        if (!hasUnhandledKeyListener()) {
+            return null;
+        }
+        ArrayList<View> orderedViews = buildOrderedChildList();
+        if (orderedViews != null) {
+            try {
+                for (int i = orderedViews.size() - 1; i >= 0; --i) {
+                    View v = orderedViews.get(i);
+                    View consumer = v.dispatchUnhandledKeyEvent(evt);
+                    if (consumer != null) {
+                        return consumer;
+                    }
+                }
+            } finally {
+                orderedViews.clear();
+            }
+        } else {
+            for (int i = getChildCount() - 1; i >= 0; --i) {
+                View v = getChildAt(i);
+                View consumer = v.dispatchUnhandledKeyEvent(evt);
+                if (consumer != null) {
+                    return consumer;
+                }
+            }
+        }
+        if (onUnhandledKeyEvent(evt)) {
+            return this;
+        }
+        return null;
+    }
+
     /**
      * LayoutParams are used by views to tell their parents how they want to be
      * laid out. See
@@ -7705,14 +7787,10 @@ public abstract class ViewGroup extends View implements ViewParent, ViewManager 
         /**
          * Use {@code canvas} to draw suitable debugging annotations for these LayoutParameters.
          *
-         * <p>This function is called automatically when the developer setting is enabled.<p/>
-         *
-         * <p>It is strongly advised to only call this function from debug builds as there is
-         * a risk of leaking unwanted layout information.<p/>
-         *
          * @param view the view that contains these layout parameters
          * @param canvas the canvas on which to draw
-         * @param paint the paint used to draw through
+         *
+         * @hide
          */
         public void onDebugDraw(View view, Canvas canvas, Paint paint) {
         }
@@ -8216,6 +8294,9 @@ public abstract class ViewGroup extends View implements ViewParent, ViewManager 
             return ((mMarginFlags & LAYOUT_DIRECTION_MASK) == View.LAYOUT_DIRECTION_RTL);
         }
 
+        /**
+         * @hide
+         */
         @Override
         public void onDebugDraw(View view, Canvas canvas, Paint paint) {
             Insets oi = isLayoutModeOptical(view.mParent) ? view.getOpticalInsets() : Insets.NONE;

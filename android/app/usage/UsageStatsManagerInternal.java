@@ -59,6 +59,16 @@ public abstract class UsageStatsManagerInternal {
     public abstract void reportConfigurationChange(Configuration config, @UserIdInt int userId);
 
     /**
+     * Reports that an application has posted an interruptive notification.
+     *
+     * @param packageName The package name of the app that posted the notification
+     * @param channelId The ID of the NotificationChannel to which the notification was posted
+     * @param userId The user in which the notification was posted
+     */
+    public abstract void reportInterruptiveNotification(String packageName, String channelId,
+            @UserIdInt int userId);
+
+    /**
      * Reports that an action equivalent to a ShortcutInfo is taken by the user.
      *
      * @param packageName The package name of the shortcut publisher
@@ -139,13 +149,21 @@ public abstract class UsageStatsManagerInternal {
 
         /** Callback to inform listeners that the idle state has changed to a new bucket. */
         public abstract void onAppIdleStateChanged(String packageName, @UserIdInt int userId,
-                boolean idle, int bucket);
+                boolean idle, int bucket, int reason);
 
         /**
          * Callback to inform listeners that the parole state has changed. This means apps are
          * allowed to do work even if they're idle or in a low bucket.
          */
         public abstract void onParoleStateChanged(boolean isParoleOn);
+
+        /**
+         * Optional callback to inform the listener that the app has transitioned into
+         * an active state due to user interaction.
+         */
+        public void onUserInteractionStarted(String packageName, @UserIdInt int userId) {
+            // No-op by default
+        }
     }
 
     /**  Backup/Restore API */
@@ -212,4 +230,25 @@ public abstract class UsageStatsManagerInternal {
      * indicated here before by a call to {@link #setLastJobRunTime(String, int, long)}.
      */
     public abstract long getTimeSinceLastJobRun(String packageName, @UserIdInt int userId);
+
+    /**
+     * Report a few data points about an app's job state at the current time.
+     *
+     * @param packageName the app whose job state is being described
+     * @param userId which user the app is associated with
+     * @param numDeferredJobs the number of pending jobs that were deferred
+     *   due to bucketing policy
+     * @param timeSinceLastJobRun number of milliseconds since the last time one of
+     *   this app's jobs was executed
+     */
+    public abstract void reportAppJobState(String packageName, @UserIdInt int userId,
+            int numDeferredJobs, long timeSinceLastJobRun);
+
+    /**
+     * Report a sync that was scheduled by an active app is about to be executed.
+     *
+     * @param packageName name of the package that owns the sync adapter.
+     * @param userId which user the app is associated with
+     */
+    public abstract void reportExemptedSyncStart(String packageName, @UserIdInt int userId);
 }

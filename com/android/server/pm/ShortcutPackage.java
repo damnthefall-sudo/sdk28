@@ -490,7 +490,7 @@ class ShortcutPackage extends ShortcutPackageItem {
      * <p>This takes care of the resetting the counter for foreground apps as well as after
      * locale changes.
      */
-    public int getApiCallCount() {
+    public int getApiCallCount(boolean unlimited) {
         final ShortcutService s = mShortcutUser.mService;
 
         // Reset the counter if:
@@ -498,8 +498,9 @@ class ShortcutPackage extends ShortcutPackageItem {
         // - the package is *not* in foreground now, but was in foreground at some point
         // since the previous time it had been.
         if (s.isUidForegroundLocked(mPackageUid)
-                || mLastKnownForegroundElapsedTime
-                    < s.getUidLastForegroundElapsedTimeLocked(mPackageUid)) {
+                || (mLastKnownForegroundElapsedTime
+                    < s.getUidLastForegroundElapsedTimeLocked(mPackageUid))
+                || unlimited) {
             mLastKnownForegroundElapsedTime = s.injectElapsedRealtime();
             resetRateLimiting();
         }
@@ -538,10 +539,10 @@ class ShortcutPackage extends ShortcutPackageItem {
      * <p>This takes care of the resetting the counter for foreground apps as well as after
      * locale changes, which is done internally by {@link #getApiCallCount}.
      */
-    public boolean tryApiCall() {
+    public boolean tryApiCall(boolean unlimited) {
         final ShortcutService s = mShortcutUser.mService;
 
-        if (getApiCallCount() >= s.mMaxUpdatesPerInterval) {
+        if (getApiCallCount(unlimited) >= s.mMaxUpdatesPerInterval) {
             return false;
         }
         mApiCallCount++;
@@ -703,7 +704,7 @@ class ShortcutPackage extends ShortcutPackageItem {
      */
     public boolean rescanPackageIfNeeded(boolean isNewApp, boolean forceRescan) {
         final ShortcutService s = mShortcutUser.mService;
-        final long start = s.injectElapsedRealtime();
+        final long start = s.getStatStartTime();
 
         final PackageInfo pi;
         try {
@@ -1248,7 +1249,7 @@ class ShortcutPackage extends ShortcutPackageItem {
         pw.print(prefix);
         pw.print("  ");
         pw.print("Calls: ");
-        pw.print(getApiCallCount());
+        pw.print(getApiCallCount(/*unlimited=*/ false));
         pw.println();
 
         // getApiCallCount() may have updated mLastKnownForegroundElapsedTime.
@@ -1347,7 +1348,7 @@ class ShortcutPackage extends ShortcutPackageItem {
         ShortcutService.writeAttr(out, ATTR_NAME, getPackageName());
         ShortcutService.writeAttr(out, ATTR_CALL_COUNT, mApiCallCount);
         ShortcutService.writeAttr(out, ATTR_LAST_RESET, mLastResetTime);
-        getPackageInfo().saveToXml(out, forBackup);
+        getPackageInfo().saveToXml(mShortcutUser.mService, out, forBackup);
 
         for (int j = 0; j < size; j++) {
             saveShortcut(out, mShortcuts.valueAt(j), forBackup,

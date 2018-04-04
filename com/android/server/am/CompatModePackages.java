@@ -82,7 +82,7 @@ public final class CompatModePackages {
 
     public CompatModePackages(ActivityManagerService service, File systemDir, Handler handler) {
         mService = service;
-        mFile = new AtomicFile(new File(systemDir, "packages-compat.xml"));
+        mFile = new AtomicFile(new File(systemDir, "packages-compat.xml"), "compat-mode");
         mHandler = new CompatHandler(handler.getLooper());
 
         FileInputStream fis = null;
@@ -369,7 +369,7 @@ public final class CompatModePackages {
             }
 
             if (starting != null) {
-                starting.ensureActivityConfigurationLocked(0 /* globalChanges */,
+                starting.ensureActivityConfiguration(0 /* globalChanges */,
                         false /* preserveWindow */);
                 // And we need to make sure at this point that all other activities
                 // are made visible with the correct configuration.

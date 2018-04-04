@@ -20,6 +20,8 @@ import static android.view.ViewGroup.LayoutParams.MATCH_PARENT;
 import static android.view.ViewGroup.LayoutParams.WRAP_CONTENT;
 import static android.view.WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS;
 
+import static java.lang.annotation.RetentionPolicy.SOURCE;
+
 import android.annotation.CallSuper;
 import android.annotation.DrawableRes;
 import android.annotation.IntDef;
@@ -239,19 +241,89 @@ public class InputMethodService extends AbstractInputMethodService {
     static final boolean DEBUG = false;
 
     /**
-     * The back button will close the input window.
+     * Allows the system to optimize the back button affordance based on the presence of software
+     * keyboard.
+     *
+     * <p>For instance, on devices that have navigation bar and software-rendered back button, the
+     * system may use a different icon while {@link #isInputViewShown()} returns {@code true}, to
+     * indicate that the back button has "dismiss" affordance.</p>
+     *
+     * <p>Note that {@link KeyEvent#KEYCODE_BACK} events continue to be sent to
+     * {@link #onKeyDown(int, KeyEvent)} even when this mode is specified. The default
+     * implementation of {@link #onKeyDown(int, KeyEvent)} for {@link KeyEvent#KEYCODE_BACK} does
+     * not take this mode into account.</p>
+     *
+     * <p>For API level {@link android.os.Build.VERSION_CODES#O_MR1} and lower devices, this is the
+     * only mode you can safely specify without worrying about the compatibility.</p>
+     *
+     * @see #setBackDisposition(int)
      */
-    public static final int BACK_DISPOSITION_DEFAULT = 0;  // based on window
+    public static final int BACK_DISPOSITION_DEFAULT = 0;
 
     /**
-     * This input method will not consume the back key.
+     * Deprecated flag.
+     *
+     * <p>To avoid compatibility issues, IME developers should not use this flag.</p>
+     *
+     * @deprecated on {@link android.os.Build.VERSION_CODES#P} and later devices, this flag is
+     *             handled as a synonym of {@link #BACK_DISPOSITION_DEFAULT}. On
+     *             {@link android.os.Build.VERSION_CODES#O_MR1} and prior devices, expected behavior
+     *             of this mode had not been well defined. Most likely the end result would be the
+     *             same as {@link #BACK_DISPOSITION_DEFAULT}. Either way it is not recommended to
+     *             use this mode
+     * @see #setBackDisposition(int)
      */
-    public static final int BACK_DISPOSITION_WILL_NOT_DISMISS = 1; // back
+    @Deprecated
+    public static final int BACK_DISPOSITION_WILL_NOT_DISMISS = 1;
 
     /**
-     * This input method will consume the back key.
+     * Deprecated flag.
+     *
+     * <p>To avoid compatibility issues, IME developers should not use this flag.</p>
+     *
+     * @deprecated on {@link android.os.Build.VERSION_CODES#P} and later devices, this flag is
+     *             handled as a synonym of {@link #BACK_DISPOSITION_DEFAULT}. On
+     *             {@link android.os.Build.VERSION_CODES#O_MR1} and prior devices, expected behavior
+     *             of this mode had not been well defined. In AOSP implementation running on devices
+     *             that have navigation bar, specifying this flag could change the software back
+     *             button to "Dismiss" icon no matter whether the software keyboard is shown or not,
+     *             but there would be no easy way to restore the icon state even after IME lost the
+     *             connection to the application. To avoid user confusions, do not specify this mode
+     *             anyway
+     * @see #setBackDisposition(int)
      */
-    public static final int BACK_DISPOSITION_WILL_DISMISS = 2; // down
+    @Deprecated
+    public static final int BACK_DISPOSITION_WILL_DISMISS = 2;
+
+    /**
+     * Asks the system to not adjust the back button affordance even when the software keyboard is
+     * shown.
+     *
+     * <p>This mode is useful for UI modes where IME's main soft input window is used for some
+     * supplemental UI, such as floating candidate window for languages such as Chinese and
+     * Japanese, where users expect the back button is, or at least looks to be, handled by the
+     * target application rather than the UI shown by the IME even while {@link #isInputViewShown()}
+     * returns {@code true}.</p>
+     *
+     * <p>Note that {@link KeyEvent#KEYCODE_BACK} events continue to be sent to
+     * {@link #onKeyDown(int, KeyEvent)} even when this mode is specified. The default
+     * implementation of {@link #onKeyDown(int, KeyEvent)} for {@link KeyEvent#KEYCODE_BACK} does
+     * not take this mode into account.</p>
+     *
+     * @see #setBackDisposition(int)
+     */
+    public static final int BACK_DISPOSITION_ADJUST_NOTHING = 3;
+
+    /**
+     * Enum flag to be used for {@link #setBackDisposition(int)}.
+     *
+     * @hide
+     */
+    @Retention(SOURCE)
+    @IntDef(value = {BACK_DISPOSITION_DEFAULT, BACK_DISPOSITION_WILL_NOT_DISMISS,
+            BACK_DISPOSITION_WILL_DISMISS, BACK_DISPOSITION_ADJUST_NOTHING},
+            prefix = "BACK_DISPOSITION_")
+    public @interface BackDispositionMode {}
 
     /**
      * @hide
@@ -264,6 +336,10 @@ public class InputMethodService extends AbstractInputMethodService {
      * The IME is visible.
      */
     public static final int IME_VISIBLE = 0x2;
+
+    // Min and max values for back disposition.
+    private static final int BACK_DISPOSITION_MIN = BACK_DISPOSITION_DEFAULT;
+    private static final int BACK_DISPOSITION_MAX = BACK_DISPOSITION_ADJUST_NOTHING;
 
     InputMethodManager mImm;
     
@@ -327,6 +403,8 @@ public class InputMethodService extends AbstractInputMethodService {
     boolean mIsInputViewShown;
     
     int mStatusIcon;
+
+    @BackDispositionMode
     int mBackDisposition;
 
     /**
@@ -501,9 +579,8 @@ public class InputMethodService extends AbstractInputMethodService {
             }
             clearInsetOfPreviousIme();
             // If user uses hard keyboard, IME button should always be shown.
-            boolean showing = isInputViewShown();
             mImm.setImeWindowStatus(mToken, mStartInputToken,
-                    IME_ACTIVE | (showing ? IME_VISIBLE : 0), mBackDisposition);
+                    mapToImeWindowStatus(isInputViewShown()), mBackDisposition);
             if (resultReceiver != null) {
                 resultReceiver.send(wasVis != isInputViewShown()
                         ? InputMethodManager.RESULT_SHOWN
@@ -1012,11 +1089,38 @@ public class InputMethodService extends AbstractInputMethodService {
     public Dialog getWindow() {
         return mWindow;
     }
-    
-    public void setBackDisposition(int disposition) {
+
+    /**
+     * Sets the disposition mode that indicates the expected affordance for the back button.
+     *
+     * <p>Keep in mind that specifying this flag does not change the the default behavior of
+     * {@link #onKeyDown(int, KeyEvent)}.  It is IME developers' responsibility for making sure that
+     * their custom implementation of {@link #onKeyDown(int, KeyEvent)} is consistent with the mode
+     * specified to this API.</p>
+     *
+     * @see #getBackDisposition()
+     * @param disposition disposition mode to be set
+     */
+    public void setBackDisposition(@BackDispositionMode int disposition) {
+        if (disposition == mBackDisposition) {
+            return;
+        }
+        if (disposition > BACK_DISPOSITION_MAX || disposition < BACK_DISPOSITION_MIN) {
+            Log.e(TAG, "Invalid back disposition value (" + disposition + ") specified.");
+            return;
+        }
         mBackDisposition = disposition;
+        mImm.setImeWindowStatus(mToken, mStartInputToken, mapToImeWindowStatus(isInputViewShown()),
+                mBackDisposition);
     }
 
+    /**
+     * Retrieves the current disposition mode that indicates the expected back button affordance.
+     *
+     * @see #setBackDisposition(int)
+     * @return currently selected disposition mode
+     */
+    @BackDispositionMode
     public int getBackDisposition() {
         return mBackDisposition;
     }
@@ -1063,33 +1167,14 @@ public class InputMethodService extends AbstractInputMethodService {
     }
 
     /**
-     * Force switch to a new input method component. This can only be called
-     * from an application or a service which has a token of the currently active input method.
-     * @param id The unique identifier for the new input method to be switched to.
-     */
-    public void setInputMethod(String id) {
-        mImm.setInputMethodInternal(mToken, id);
-    }
-
-    /**
-     * Force switch to a new input method and subtype. This can only be called
-     * from an application or a service which has a token of the currently active input method.
-     * @param id The unique identifier for the new input method to be switched to.
-     * @param subtype The new subtype of the new input method to be switched to.
-     */
-    public void setInputMethodAndSubtype(String id, InputMethodSubtype subtype) {
-        mImm.setInputMethodAndSubtypeInternal(mToken, id, subtype);
-    }
-
-    /**
      * Force switch to the last used input method and subtype. If the last input method didn't have
      * any subtypes, the framework will simply switch to the last input method with no subtype
      * specified.
      * @return true if the current input method and subtype was successfully switched to the last
      * used input method and subtype.
      */
-    public boolean switchToLastInputMethod() {
-        return mImm.switchToLastInputMethodInternal(mToken);
+    public final boolean switchToPreviousInputMethod() {
+        return mImm.switchToPreviousInputMethodInternal(mToken);
     }
 
     /**
@@ -1100,7 +1185,7 @@ public class InputMethodService extends AbstractInputMethodService {
      * @return true if the current input method and subtype was successfully switched to the next
      * input method and subtype.
      */
-    public boolean switchToNextInputMethod(boolean onlyCurrentIme) {
+    public final boolean switchToNextInputMethod(boolean onlyCurrentIme) {
         return mImm.switchToNextInputMethodInternal(mToken, onlyCurrentIme);
     }
 
@@ -1113,7 +1198,7 @@ public class InputMethodService extends AbstractInputMethodService {
      * and subtype in order to provide the consistent user experience in switching
      * between IMEs and subtypes.
      */
-    public boolean shouldOfferSwitchingToNextInputMethod() {
+    public final boolean shouldOfferSwitchingToNextInputMethod() {
         return mImm.shouldOfferSwitchingToNextInputMethodInternal(mToken);
     }
 
@@ -1443,10 +1528,22 @@ public class InputMethodService extends AbstractInputMethodService {
      * input method will be destroyed, and the requested one started on the
      * current input field.
      * 
-     * @param id Unique identifier of the new input method ot start.
+     * @param id Unique identifier of the new input method to start.
      */
     public void switchInputMethod(String id) {
         mImm.setInputMethodInternal(mToken, id);
+    }
+
+    /**
+     * Force switch to a new input method, as identified by {@code id}.  This
+     * input method will be destroyed, and the requested one started on the
+     * current input field.
+     *
+     * @param id Unique identifier of the new input method to start.
+     * @param subtype The new subtype of the new input method to be switched to.
+     */
+    public final void switchInputMethod(String id, InputMethodSubtype subtype) {
+        mImm.setInputMethodAndSubtypeInternal(mToken, id, subtype);
     }
 
     public void setExtractView(View view) {
@@ -1762,7 +1859,7 @@ public class InputMethodService extends AbstractInputMethodService {
             startExtractingText(false);
         }
 
-        final int nextImeWindowStatus = IME_ACTIVE | (isInputViewShown() ? IME_VISIBLE : 0);
+        final int nextImeWindowStatus = mapToImeWindowStatus(isInputViewShown());
         if (previousImeWindowStatus != nextImeWindowStatus) {
             mImm.setImeWindowStatus(mToken, mStartInputToken, nextImeWindowStatus,
                     mBackDisposition);
@@ -1806,9 +1903,9 @@ public class InputMethodService extends AbstractInputMethodService {
     }
 
     /**
-     * Called when the input method window has been shown to the user, after
-     * previously not being visible.  This is done after all of the UI setup
-     * for the window has occurred (creating its views etc).
+     * Called immediately before the input method window is shown to the user.
+     * You could override this to prepare for the window to be shown
+     * (update view structure etc).
      */
     public void onWindowShown() {
         // Intentionally empty
@@ -2053,7 +2150,7 @@ public class InputMethodService extends AbstractInputMethodService {
      * @see InputMethodManager#SHOW_FORCED
      * @param flags Provides additional operating flags.
      */
-    public void requestShowSelf(int flags) {
+    public final void requestShowSelf(int flags) {
         mImm.showSoftInputFromInputMethodInternal(mToken, flags);
     }
 
@@ -2090,18 +2187,28 @@ public class InputMethodService extends AbstractInputMethodService {
         return mExtractEditText;
     }
 
+
     /**
-     * Override this to intercept key down events before they are processed by the
-     * application.  If you return true, the application will not 
-     * process the event itself.  If you return false, the normal application processing
-     * will occur as if the IME had not seen the event at all.
-     * 
-     * <p>The default implementation intercepts {@link KeyEvent#KEYCODE_BACK
-     * KeyEvent.KEYCODE_BACK} if the IME is currently shown, to
-     * possibly hide it when the key goes up (if not canceled or long pressed).  In
-     * addition, in fullscreen mode only, it will consume DPAD movement
-     * events to move the cursor in the extracted text view, not allowing
-     * them to perform navigation in the underlying application.
+     * Called back when a {@link KeyEvent} is forwarded from the target application.
+     *
+     * <p>The default implementation intercepts {@link KeyEvent#KEYCODE_BACK} if the IME is
+     * currently shown , to possibly hide it when the key goes up (if not canceled or long pressed).
+     * In addition, in fullscreen mode only, it will consume DPAD movement events to move the cursor
+     * in the extracted text view, not allowing them to perform navigation in the underlying
+     * application.</p>
+     *
+     * <p>The default implementation does not take flags specified to
+     * {@link #setBackDisposition(int)} into account, even on API version
+     * {@link android.os.Build.VERSION_CODES#P} and later devices.  IME developers are responsible
+     * for making sure that their special handling for {@link KeyEvent#KEYCODE_BACK} are consistent
+     * with the flag they specified to {@link #setBackDisposition(int)}.</p>
+     *
+     * @param keyCode The value in {@code event.getKeyCode()}
+     * @param event Description of the key event
+     *
+     * @return {@code true} if the event is consumed by the IME and the application no longer needs
+     *         to consume it.  Return {@code false} when the event should be handled as if the IME
+     *         had not seen the event at all.
      */
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (event.getKeyCode() == KeyEvent.KEYCODE_BACK) {
@@ -2736,6 +2843,10 @@ public class InputMethodService extends AbstractInputMethodService {
             return;
         }
         mImm.exposeContent(mToken, inputContentInfo, getCurrentInputEditorInfo());
+    }
+
+    private static int mapToImeWindowStatus(boolean isInputViewShown) {
+        return IME_ACTIVE | (isInputViewShown ? IME_VISIBLE : 0);
     }
 
     /**

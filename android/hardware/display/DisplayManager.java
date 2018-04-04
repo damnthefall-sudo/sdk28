@@ -28,7 +28,6 @@ import android.content.Context;
 import android.graphics.Point;
 import android.media.projection.MediaProjection;
 import android.os.Handler;
-import android.os.UserHandle;
 import android.util.SparseArray;
 import android.view.Display;
 import android.view.Surface;
@@ -536,6 +535,19 @@ public final class DisplayManager {
     }
 
     /**
+     * Set the level of color saturation to apply to the display.
+     * @param level The amount of saturation to apply, between 0 and 1 inclusive.
+     * 0 produces a grayscale image, 1 is normal.
+     *
+     * @hide
+     */
+    @SystemApi
+    @RequiresPermission(Manifest.permission.CONTROL_DISPLAY_SATURATION)
+    public void setSaturationLevel(float level) {
+        mGlobal.setSaturationLevel(level);
+    }
+
+    /**
      * Creates a virtual display.
      *
      * @see #createVirtualDisplay(String, int, int, int, Surface, int,
@@ -615,6 +627,7 @@ public final class DisplayManager {
      * @hide
      */
     @SystemApi
+    @TestApi
     public Point getStableDisplaySize() {
         return mGlobal.getStableDisplaySize();
     }
@@ -631,6 +644,18 @@ public final class DisplayManager {
     }
 
     /**
+     * Fetch {@link AmbientBrightnessDayStats}s.
+     *
+     * @hide until we make it a system api
+     */
+    @SystemApi
+    @TestApi
+    @RequiresPermission(Manifest.permission.ACCESS_AMBIENT_LIGHT_STATS)
+    public List<AmbientBrightnessDayStats> getAmbientBrightnessStats() {
+        return mGlobal.getAmbientBrightnessStats();
+    }
+
+    /**
      * Sets the global display brightness configuration.
      *
      * @hide
@@ -639,7 +664,7 @@ public final class DisplayManager {
     @TestApi
     @RequiresPermission(Manifest.permission.CONFIGURE_DISPLAY_BRIGHTNESS)
     public void setBrightnessConfiguration(BrightnessConfiguration c) {
-        setBrightnessConfigurationForUser(c, UserHandle.myUserId(), mContext.getPackageName());
+        setBrightnessConfigurationForUser(c, mContext.getUserId(), mContext.getPackageName());
     }
 
     /**
@@ -653,6 +678,45 @@ public final class DisplayManager {
     public void setBrightnessConfigurationForUser(BrightnessConfiguration c, int userId,
             String packageName) {
         mGlobal.setBrightnessConfigurationForUser(c, userId, packageName);
+    }
+
+    /**
+     * Gets the global display brightness configuration or the default curve if one hasn't been set.
+     *
+     * @hide
+     */
+    @SystemApi
+    @TestApi
+    @RequiresPermission(Manifest.permission.CONFIGURE_DISPLAY_BRIGHTNESS)
+    public BrightnessConfiguration getBrightnessConfiguration() {
+        return getBrightnessConfigurationForUser(mContext.getUserId());
+    }
+
+    /**
+     * Gets the global display brightness configuration or the default curve if one hasn't been set
+     * for a specific user.
+     *
+     * Note this requires the INTERACT_ACROSS_USERS permission if getting the configuration for a
+     * user other than the one you're currently running as.
+     *
+     * @hide
+     */
+    public BrightnessConfiguration getBrightnessConfigurationForUser(int userId) {
+        return mGlobal.getBrightnessConfigurationForUser(userId);
+    }
+
+    /**
+     * Gets the default global display brightness configuration or null one hasn't
+     * been configured.
+     *
+     * @hide
+     */
+    @SystemApi
+    @TestApi
+    @RequiresPermission(Manifest.permission.CONFIGURE_DISPLAY_BRIGHTNESS)
+    @Nullable
+    public BrightnessConfiguration getDefaultBrightnessConfiguration() {
+        return mGlobal.getDefaultBrightnessConfiguration();
     }
 
     /**

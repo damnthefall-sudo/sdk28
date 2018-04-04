@@ -16,12 +16,15 @@
 
 package android.media;
 
+import java.io.IOException;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.ref.WeakReference;
 import java.nio.ByteBuffer;
 import java.util.Collection;
 import java.util.Iterator;
+import java.util.ArrayList;
+import java.util.List;
 
 import android.annotation.IntDef;
 import android.annotation.NonNull;
@@ -32,10 +35,13 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.Message;
+import android.os.PersistableBundle;
 import android.os.RemoteException;
 import android.os.ServiceManager;
+import android.text.TextUtils;
 import android.util.ArrayMap;
 import android.util.Log;
+import android.util.Pair;
 
 import com.android.internal.annotations.GuardedBy;
 
@@ -1314,6 +1320,23 @@ public class AudioRecord implements AudioRouting
         return native_read_in_direct_buffer(audioBuffer, sizeInBytes, readMode == READ_BLOCKING);
     }
 
+    /**
+     *  Return Metrics data about the current AudioTrack instance.
+     *
+     * @return a {@link PersistableBundle} containing the set of attributes and values
+     * available for the media being handled by this instance of AudioRecord
+     * The attributes are descibed in {@link MetricsConstants}.
+     *
+     * Additional vendor-specific fields may also be present in
+     * the return value.
+     */
+    public PersistableBundle getMetrics() {
+        PersistableBundle bundle = native_getMetrics();
+        return bundle;
+    }
+
+    private native PersistableBundle native_getMetrics();
+
     //--------------------------------------------------------------------------
     // Initialization / configuration
     //--------------------
@@ -1394,6 +1417,7 @@ public class AudioRecord implements AudioRouting
     /*
      * Call BEFORE adding a routing callback handler.
      */
+    @GuardedBy("mRoutingChangeListeners")
     private void testEnableNativeRoutingCallbacksLocked() {
         if (mRoutingChangeListeners.size() == 0) {
             native_enableDeviceCallback();
@@ -1403,6 +1427,7 @@ public class AudioRecord implements AudioRouting
     /*
      * Call AFTER removing a routing callback handler.
      */
+    @GuardedBy("mRoutingChangeListeners")
     private void testDisableNativeRoutingCallbacksLocked() {
         if (mRoutingChangeListeners.size() == 0) {
             native_disableDeviceCallback();
@@ -1583,6 +1608,46 @@ public class AudioRecord implements AudioRouting
         }
     }
 
+    //--------------------------------------------------------------------------
+    // Microphone information
+    //--------------------
+    /**
+     * Returns a lists of {@link MicrophoneInfo} representing the active microphones.
+     * By querying channel mapping for each active microphone, developer can know how
+     * the microphone is used by each channels or a capture stream.
+     * Note that the information about the active microphones may change during a recording.
+     * See {@link AudioManager#registerAudioDeviceCallback} to be notified of changes
+     * in the audio devices, querying the active microphones then will return the latest
+     * information.
+     *
+     * @return a lists of {@link MicrophoneInfo} representing the active microphones.
+     * @throws IOException if an error occurs
+     */
+    public List<MicrophoneInfo> getActiveMicrophones() throws IOException {
+        ArrayList<MicrophoneInfo> activeMicrophones = new ArrayList<>();
+        int status = native_get_active_microphones(activeMicrophones);
+        if (status != AudioManager.SUCCESS) {
+            Log.e(TAG, "getActiveMicrophones failed:" + status);
+            return new ArrayList<MicrophoneInfo>();
+        }
+        AudioManager.setPortIdForMicrophones(activeMicrophones);
+
+        // Use routed device when there is not information returned by hal.
+        if (activeMicrophones.size() == 0) {
+            AudioDeviceInfo device = getRoutedDevice();
+            if (device != null) {
+                MicrophoneInfo microphone = AudioManager.microphoneInfoFromAudioDeviceInfo(device);
+                ArrayList<Pair<Integer, Integer>> channelMapping = new ArrayList<>();
+                for (int i = 0; i < mChannelCount; i++) {
+                    channelMapping.add(new Pair(i, MicrophoneInfo.CHANNEL_MAPPING_DIRECT));
+                }
+                microphone.setChannelMapping(channelMapping);
+                activeMicrophones.add(microphone);
+            }
+        }
+        return activeMicrophones;
+    }
+
     //---------------------------------------------------------
     // Interface definitions
     //--------------------
@@ -1728,6 +1793,9 @@ public class AudioRecord implements AudioRouting
     private native final int native_get_timestamp(@NonNull AudioTimestamp outTimestamp,
             @AudioTimestamp.Timebase int timebase);
 
+    private native final int native_get_active_microphones(
+            ArrayList<MicrophoneInfo> activeMicrophones);
+
     //---------------------------------------------------------
     // Utility methods
     //------------------
@@ -1738,5 +1806,47 @@ public class AudioRecord implements AudioRouting
 
     private static void loge(String msg) {
         Log.e(TAG, msg);
+    }
+
+    public static final class MetricsConstants
+    {
+        private MetricsConstants() {}
+
+        /**
+         * Key to extract the output format being recorded
+         * from the {@link AudioRecord#getMetrics} return value.
+         * The value is a String.
+         */
+        public static final String ENCODING = "android.media.audiorecord.encoding";
+
+        /**
+         * Key to extract the Source Type for this track
+         * from the {@link AudioRecord#getMetrics} return value.
+         * The value is a String.
+         */
+        public static final String SOURCE = "android.media.audiorecord.source";
+
+        /**
+         * Key to extract the estimated latency through the recording pipeline
+         * from the {@link AudioRecord#getMetrics} return value.
+         * This is in units of milliseconds.
+         * The value is an integer.
+         */
+        public static final String LATENCY = "android.media.audiorecord.latency";
+
+        /**
+         * Key to extract the sink sample rate for this record track in Hz
+         * from the {@link AudioRecord#getMetrics} return value.
+         * The value is an integer.
+         */
+        public static final String SAMPLERATE = "android.media.audiorecord.samplerate";
+
+        /**
+         * Key to extract the number of channels being recorded in this record track
+         * from the {@link AudioRecord#getMetrics} return value.
+         * The value is an integer.
+         */
+        public static final String CHANNELS = "android.media.audiorecord.channels";
+
     }
 }

@@ -21,7 +21,6 @@ import android.annotation.Nullable;
 import android.app.PendingIntent;
 import android.content.pm.PackageManager.NameNotFoundException;
 import android.os.RemoteException;
-import android.os.ServiceManager;
 import android.os.ServiceSpecificException;
 import android.util.Log;
 
@@ -31,22 +30,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * An assistant for generating {@link javax.crypto.SecretKey} instances that can be recovered by
- * other Android devices belonging to the user. The exported keychain is protected by the user's
- * lock screen.
- *
- * <p>The RecoveryController must be paired with a recovery agent. The recovery agent is responsible
- * for transporting the keychain to remote trusted hardware. This hardware must prevent brute force
- * attempts against the user's lock screen by limiting the number of allowed guesses (to, e.g., 10).
- * After  that number of incorrect guesses, the trusted hardware no longer allows access to the
- * key chain.
- *
- * <p>For now only the recovery agent itself is able to create keys, so it is expected that the
- * recovery agent is itself the system app.
- *
- * <p>A recovery agent requires the privileged permission
- * {@code android.Manifest.permission#RECOVER_KEYSTORE}.
- *
+ * @deprecated Use {@link android.security.keystore.recovery.RecoveryController}.
  * @hide
  */
 public class RecoveryController {
@@ -114,12 +98,11 @@ public class RecoveryController {
     }
 
     /**
+     * Deprecated.
      * Gets a new instance of the class.
      */
     public static RecoveryController getInstance() {
-        ILockSettings lockSettings =
-                ILockSettings.Stub.asInterface(ServiceManager.getService("lock_settings"));
-        return new RecoveryController(lockSettings);
+        throw new UnsupportedOperationException("using Deprecated RecoveryController version");
     }
 
     /**
@@ -143,16 +126,8 @@ public class RecoveryController {
     public void initRecoveryService(
             @NonNull String rootCertificateAlias, @NonNull byte[] signedPublicKeyList)
             throws BadCertificateFormatException, InternalRecoveryServiceException {
-        try {
-            mBinder.initRecoveryService(rootCertificateAlias, signedPublicKeyList);
-        } catch (RemoteException e) {
-            throw e.rethrowFromSystemServer();
-        } catch (ServiceSpecificException e) {
-            if (e.errorCode == ERROR_BAD_CERTIFICATE_FORMAT) {
-                throw new BadCertificateFormatException(e.getMessage());
-            }
-            throw wrapUnexpectedServiceSpecificException(e);
-        }
+        throw new UnsupportedOperationException("Deprecated initRecoveryService method called");
+
     }
 
     /**
@@ -167,7 +142,7 @@ public class RecoveryController {
     public @NonNull KeychainSnapshot getRecoveryData(@NonNull byte[] account)
             throws InternalRecoveryServiceException {
         try {
-            return BackwardsCompat.toLegacyKeychainSnapshot(mBinder.getRecoveryData(account));
+            return BackwardsCompat.toLegacyKeychainSnapshot(mBinder.getKeyChainSnapshot());
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         } catch (ServiceSpecificException e) {
@@ -210,17 +185,7 @@ public class RecoveryController {
      */
     public @NonNull Map<byte[], Integer> getRecoverySnapshotVersions()
             throws InternalRecoveryServiceException {
-        try {
-            // IPC doesn't support generic Maps.
-            @SuppressWarnings("unchecked")
-            Map<byte[], Integer> result =
-                    (Map<byte[], Integer>) mBinder.getRecoverySnapshotVersions();
-            return result;
-        } catch (RemoteException e) {
-            throw e.rethrowFromSystemServer();
-        } catch (ServiceSpecificException e) {
-            throw wrapUnexpectedServiceSpecificException(e);
-        }
+        throw new UnsupportedOperationException();
     }
 
     /**
@@ -259,7 +224,9 @@ public class RecoveryController {
             @NonNull String packageName, @Nullable String[] aliases, int status)
             throws NameNotFoundException, InternalRecoveryServiceException {
         try {
-            mBinder.setRecoveryStatus(packageName, aliases, status);
+            for (String alias : aliases) {
+                mBinder.setRecoveryStatus(alias, status);
+            }
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
         } catch (ServiceSpecificException e) {
@@ -288,7 +255,7 @@ public class RecoveryController {
             // IPC doesn't support generic Maps.
             @SuppressWarnings("unchecked")
             Map<String, Integer> result =
-                    (Map<String, Integer>) mBinder.getRecoveryStatus(/*packageName=*/ null);
+                    (Map<String, Integer>) mBinder.getRecoveryStatus();
             return result;
         } catch (RemoteException e) {
             throw e.rethrowFromSystemServer();
@@ -350,13 +317,7 @@ public class RecoveryController {
     @NonNull
     public @KeychainProtectionParams.UserSecretType int[] getPendingRecoverySecretTypes()
             throws InternalRecoveryServiceException {
-        try {
-            return mBinder.getPendingRecoverySecretTypes();
-        } catch (RemoteException e) {
-            throw e.rethrowFromSystemServer();
-        } catch (ServiceSpecificException e) {
-            throw wrapUnexpectedServiceSpecificException(e);
-        }
+        throw new UnsupportedOperationException();
     }
 
     /**
@@ -472,16 +433,7 @@ public class RecoveryController {
      */
     public byte[] generateAndStoreKey(@NonNull String alias)
             throws InternalRecoveryServiceException, LockScreenRequiredException {
-        try {
-            return mBinder.generateAndStoreKey(alias);
-        } catch (RemoteException e) {
-            throw e.rethrowFromSystemServer();
-        } catch (ServiceSpecificException e) {
-            if (e.errorCode == ERROR_INSECURE_USER) {
-                throw new LockScreenRequiredException(e.getMessage());
-            }
-            throw wrapUnexpectedServiceSpecificException(e);
-        }
+        throw new UnsupportedOperationException();
     }
 
     /**

@@ -141,20 +141,18 @@ class WatchlistReportDbHelper extends SQLiteOpenHelper {
     }
 
     /**
-     * Aggregate the records in database, and return a rappor encoded result.
+     * Aggregate all records in database before input timestamp, and return a
+     * rappor encoded result.
      */
-    public AggregatedResult getAggregatedRecords() {
-        final long twoDaysBefore = getTwoDaysBeforeTimestamp();
-        final long yesterday = getYesterdayTimestamp();
-        final String selectStatement = WhiteListReportContract.TIMESTAMP + " >= ? AND " +
-                WhiteListReportContract.TIMESTAMP + " <= ?";
+    public AggregatedResult getAggregatedRecords(long untilTimestamp) {
+        final String selectStatement = WhiteListReportContract.TIMESTAMP + " < ?";
 
         final SQLiteDatabase db = getReadableDatabase();
         Cursor c = null;
         try {
             c = db.query(true /* distinct */,
                     WhiteListReportContract.TABLE, DIGEST_DOMAIN_PROJECTION, selectStatement,
-                    new String[]{"" + twoDaysBefore, "" + yesterday}, null, null,
+                    new String[]{Long.toString(untilTimestamp)}, null, null,
                     null, null);
             if (c == null) {
                 return null;
@@ -182,33 +180,13 @@ class WatchlistReportDbHelper extends SQLiteOpenHelper {
     }
 
     /**
-     * Remove all the records before yesterday.
+     * Remove all the records before input timestamp.
      *
      * @return True if success.
      */
-    public boolean cleanup() {
+    public boolean cleanup(long untilTimestamp) {
         final SQLiteDatabase db = getWritableDatabase();
-        final long twoDaysBefore = getTwoDaysBeforeTimestamp();
-        final String clause = WhiteListReportContract.TIMESTAMP + "< " + twoDaysBefore;
+        final String clause = WhiteListReportContract.TIMESTAMP + "< " + untilTimestamp;
         return db.delete(WhiteListReportContract.TABLE, clause, null) != 0;
-    }
-
-    static long getTwoDaysBeforeTimestamp() {
-        return getMidnightTimestamp(2);
-    }
-
-    static long getYesterdayTimestamp() {
-        return getMidnightTimestamp(1);
-    }
-
-    static long getMidnightTimestamp(int daysBefore) {
-        java.util.Calendar date = new GregorianCalendar();
-        // reset hour, minutes, seconds and millis
-        date.set(java.util.Calendar.HOUR_OF_DAY, 0);
-        date.set(java.util.Calendar.MINUTE, 0);
-        date.set(java.util.Calendar.SECOND, 0);
-        date.set(java.util.Calendar.MILLISECOND, 0);
-        date.add(java.util.Calendar.DAY_OF_MONTH, -daysBefore);
-        return date.getTimeInMillis();
     }
 }

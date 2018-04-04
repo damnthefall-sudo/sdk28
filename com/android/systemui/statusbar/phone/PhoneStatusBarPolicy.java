@@ -297,7 +297,7 @@ public class PhoneStatusBarPolicy implements Callback, Callbacks,
             mIconController.setIcon(mSlotLocation, LOCATION_STATUS_ICON_ID,
                     mContext.getString(R.string.accessibility_location_active));
         } else {
-            mIconController.removeIcon(mSlotLocation);
+            mIconController.removeAllIconsForSlot(mSlotLocation);
         }
     }
 
@@ -363,16 +363,16 @@ public class PhoneStatusBarPolicy implements Callback, Callbacks,
             zenDescription = mContext.getString(R.string.interruption_level_priority);
         }
 
-        if (DndTile.isVisible(mContext) && !DndTile.isCombinedIcon(mContext)
-                && audioManager.getRingerModeInternal() == AudioManager.RINGER_MODE_SILENT) {
-            volumeVisible = true;
-            volumeIconId = R.drawable.stat_sys_ringer_silent;
-            volumeDescription = mContext.getString(R.string.accessibility_ringer_silent);
-        } else if (zen != Global.ZEN_MODE_NO_INTERRUPTIONS && zen != Global.ZEN_MODE_ALARMS &&
+        if (zen != Global.ZEN_MODE_NO_INTERRUPTIONS && zen != Global.ZEN_MODE_ALARMS &&
                 audioManager.getRingerModeInternal() == AudioManager.RINGER_MODE_VIBRATE) {
             volumeVisible = true;
             volumeIconId = R.drawable.stat_sys_ringer_vibrate;
             volumeDescription = mContext.getString(R.string.accessibility_ringer_vibrate);
+        } else if (zen != Global.ZEN_MODE_NO_INTERRUPTIONS && zen != Global.ZEN_MODE_ALARMS &&
+                audioManager.getRingerModeInternal() == AudioManager.RINGER_MODE_SILENT) {
+            volumeVisible = true;
+            volumeIconId = R.drawable.stat_sys_ringer_silent;
+            volumeDescription = mContext.getString(R.string.accessibility_ringer_silent);
         }
 
         if (zenVisible) {
@@ -407,17 +407,17 @@ public class PhoneStatusBarPolicy implements Callback, Callbacks,
         int iconId = R.drawable.stat_sys_data_bluetooth;
         String contentDescription =
                 mContext.getString(R.string.accessibility_quick_settings_bluetooth_on);
-        boolean bluetoothEnabled = false;
+        boolean bluetoothVisible = false;
         if (mBluetooth != null) {
-            bluetoothEnabled = mBluetooth.isBluetoothEnabled();
             if (mBluetooth.isBluetoothConnected()) {
                 iconId = R.drawable.stat_sys_data_bluetooth_connected;
                 contentDescription = mContext.getString(R.string.accessibility_bluetooth_connected);
+                bluetoothVisible = mBluetooth.isBluetoothEnabled();
             }
         }
 
         mIconController.setIcon(mSlotBluetooth, iconId, contentDescription);
-        mIconController.setIconVisibility(mSlotBluetooth, bluetoothEnabled);
+        mIconController.setIconVisibility(mSlotBluetooth, bluetoothVisible);
     }
 
     private final void updateTTY() {
@@ -575,7 +575,7 @@ public class PhoneStatusBarPolicy implements Callback, Callbacks,
 
         Intent browserIntent = getTaskIntent(taskId, userId);
         Notification.Builder builder = new Notification.Builder(mContext, NotificationChannels.GENERAL);
-        if (browserIntent != null) {
+        if (browserIntent != null && browserIntent.isWebIntent()) {
             // Make sure that this doesn't resolve back to an instant app
             browserIntent.setComponent(null)
                     .setPackage(null)
@@ -597,8 +597,9 @@ public class PhoneStatusBarPolicy implements Callback, Callbacks,
                     .addCategory("unique:" + System.currentTimeMillis())
                     .putExtra(Intent.EXTRA_PACKAGE_NAME, appInfo.packageName)
                     .putExtra(Intent.EXTRA_VERSION_CODE, (int) (appInfo.versionCode & 0x7fffffff))
-                    .putExtra(Intent.EXTRA_VERSION_CODE, appInfo.versionCode)
-                    .putExtra(Intent.EXTRA_EPHEMERAL_FAILURE, pendingIntent);
+                    .putExtra(Intent.EXTRA_LONG_VERSION_CODE, appInfo.versionCode)
+                    .putExtra(Intent.EXTRA_EPHEMERAL_FAILURE, pendingIntent)
+                    .putExtra(Intent.EXTRA_INSTANT_APP_FAILURE, pendingIntent);
 
             PendingIntent webPendingIntent = PendingIntent.getActivity(mContext, 0, goToWebIntent, 0);
             Action webAction = new Notification.Action.Builder(null, mContext.getString(R.string.go_to_web),
@@ -761,20 +762,31 @@ public class PhoneStatusBarPolicy implements Callback, Callbacks,
         @Override
         public void onReceive(Context context, Intent intent) {
             String action = intent.getAction();
-            if (action.equals(AudioManager.RINGER_MODE_CHANGED_ACTION) ||
-                    action.equals(AudioManager.INTERNAL_RINGER_MODE_CHANGED_ACTION)) {
-                updateVolumeZen();
-            } else if (action.equals(TelephonyIntents.ACTION_SIM_STATE_CHANGED)) {
-                updateSimState(intent);
-            } else if (action.equals(TelecomManager.ACTION_CURRENT_TTY_MODE_CHANGED)) {
-                updateTTY(intent.getIntExtra(TelecomManager.EXTRA_CURRENT_TTY_MODE,
-                        TelecomManager.TTY_MODE_OFF));
-            } else if (action.equals(Intent.ACTION_MANAGED_PROFILE_AVAILABLE) ||
-                    action.equals(Intent.ACTION_MANAGED_PROFILE_UNAVAILABLE) ||
-                    action.equals(Intent.ACTION_MANAGED_PROFILE_REMOVED)) {
-                updateManagedProfile();
-            } else if (action.equals(AudioManager.ACTION_HEADSET_PLUG)) {
-                updateHeadsetPlug(intent);
+            switch (action) {
+                case AudioManager.RINGER_MODE_CHANGED_ACTION:
+                case AudioManager.INTERNAL_RINGER_MODE_CHANGED_ACTION:
+                    updateVolumeZen();
+                    break;
+                case TelephonyIntents.ACTION_SIM_STATE_CHANGED:
+                    // Avoid rebroadcast because SysUI is direct boot aware.
+                    if (intent.getBooleanExtra(TelephonyIntents.EXTRA_REBROADCAST_ON_UNLOCK,
+                            false)) {
+                        break;
+                    }
+                    updateSimState(intent);
+                    break;
+                case TelecomManager.ACTION_CURRENT_TTY_MODE_CHANGED:
+                    updateTTY(intent.getIntExtra(TelecomManager.EXTRA_CURRENT_TTY_MODE,
+                            TelecomManager.TTY_MODE_OFF));
+                    break;
+                case Intent.ACTION_MANAGED_PROFILE_AVAILABLE:
+                case Intent.ACTION_MANAGED_PROFILE_UNAVAILABLE:
+                case Intent.ACTION_MANAGED_PROFILE_REMOVED:
+                    updateManagedProfile();
+                    break;
+                case AudioManager.ACTION_HEADSET_PLUG:
+                    updateHeadsetPlug(intent);
+                    break;
             }
         }
     };

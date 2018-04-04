@@ -158,6 +158,7 @@ public class MediaScanner implements AutoCloseable {
     public static final String SCANNED_BUILD_PREFS_NAME = "MediaScanBuild";
     public static final String LAST_INTERNAL_SCAN_FINGERPRINT = "lastScanFingerprint";
     private static final String SYSTEM_SOUNDS_DIR = "/system/media/audio";
+    private static final String PRODUCT_SOUNDS_DIR = "/product/media/audio";
     private static String sLastInternalScanFingerprint;
 
     private static final String[] ID3_GENRES = {
@@ -323,7 +324,6 @@ public class MediaScanner implements AutoCloseable {
     private final Uri mAudioUri;
     private final Uri mVideoUri;
     private final Uri mImagesUri;
-    private final Uri mThumbsUri;
     private final Uri mPlaylistsUri;
     private final Uri mFilesUri;
     private final Uri mFilesUriNoNotify;
@@ -419,7 +419,6 @@ public class MediaScanner implements AutoCloseable {
         mAudioUri = Audio.Media.getContentUri(volumeName);
         mVideoUri = Video.Media.getContentUri(volumeName);
         mImagesUri = Images.Media.getContentUri(volumeName);
-        mThumbsUri = Images.Thumbnails.getContentUri(volumeName);
         mFilesUri = Files.getContentUri(volumeName);
         mFilesUriNoNotify = mFilesUri.buildUpon().appendQueryParameter("nonotify", "1").build();
 
@@ -947,6 +946,7 @@ public class MediaScanner implements AutoCloseable {
                 values.put(Audio.Media.IS_MUSIC, music);
                 values.put(Audio.Media.IS_PODCAST, podcasts);
             } else if ((mFileType == MediaFile.FILE_TYPE_JPEG
+                    || mFileType == MediaFile.FILE_TYPE_HEIF
                     || MediaFile.isRawImageFileType(mFileType)) && !mNoMedia) {
                 ExifInterface exif = null;
                 try {
@@ -1153,7 +1153,10 @@ public class MediaScanner implements AutoCloseable {
     private static boolean isSystemSoundWithMetadata(String path) {
         if (path.startsWith(SYSTEM_SOUNDS_DIR + ALARMS_DIR)
                 || path.startsWith(SYSTEM_SOUNDS_DIR + RINGTONES_DIR)
-                || path.startsWith(SYSTEM_SOUNDS_DIR + NOTIFICATIONS_DIR)) {
+                || path.startsWith(SYSTEM_SOUNDS_DIR + NOTIFICATIONS_DIR)
+                || path.startsWith(PRODUCT_SOUNDS_DIR + ALARMS_DIR)
+                || path.startsWith(PRODUCT_SOUNDS_DIR + RINGTONES_DIR)
+                || path.startsWith(PRODUCT_SOUNDS_DIR + NOTIFICATIONS_DIR)) {
             return true;
         }
         return false;
@@ -1283,53 +1286,6 @@ public class MediaScanner implements AutoCloseable {
         }
     }
 
-    private void pruneDeadThumbnailFiles() {
-        HashSet<String> existingFiles = new HashSet<String>();
-        String directory = "/sdcard/DCIM/.thumbnails";
-        String [] files = (new File(directory)).list();
-        Cursor c = null;
-        if (files == null)
-            files = new String[0];
-
-        for (int i = 0; i < files.length; i++) {
-            String fullPathString = directory + "/" + files[i];
-            existingFiles.add(fullPathString);
-        }
-
-        try {
-            c = mMediaProvider.query(
-                    mThumbsUri,
-                    new String [] { "_data" },
-                    null,
-                    null,
-                    null, null);
-            Log.v(TAG, "pruneDeadThumbnailFiles... " + c);
-            if (c != null && c.moveToFirst()) {
-                do {
-                    String fullPathString = c.getString(0);
-                    existingFiles.remove(fullPathString);
-                } while (c.moveToNext());
-            }
-
-            for (String fileToDelete : existingFiles) {
-                if (false)
-                    Log.v(TAG, "fileToDelete is " + fileToDelete);
-                try {
-                    (new File(fileToDelete)).delete();
-                } catch (SecurityException ex) {
-                }
-            }
-
-            Log.v(TAG, "/pruneDeadThumbnailFiles... " + c);
-        } catch (RemoteException e) {
-            // We will soon be killed...
-        } finally {
-            if (c != null) {
-                c.close();
-            }
-        }
-    }
-
     static class MediaBulkDeleter {
         StringBuilder whereClause = new StringBuilder();
         ArrayList<String> whereArgs = new ArrayList<String>(100);
@@ -1372,9 +1328,6 @@ public class MediaScanner implements AutoCloseable {
         if (mProcessPlaylists) {
             processPlayLists();
         }
-
-        if (mOriginalCount == 0 && mImagesUri.equals(Images.Media.getContentUri("external")))
-            pruneDeadThumbnailFiles();
 
         // allow GC to clean up
         mPlayLists.clear();

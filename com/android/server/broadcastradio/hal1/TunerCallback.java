@@ -17,9 +17,11 @@
 package com.android.server.broadcastradio.hal1;
 
 import android.annotation.NonNull;
+import android.annotation.Nullable;
 import android.hardware.radio.ITuner;
 import android.hardware.radio.ITunerCallback;
 import android.hardware.radio.ProgramList;
+import android.hardware.radio.ProgramSelector;
 import android.hardware.radio.RadioManager;
 import android.hardware.radio.RadioMetadata;
 import android.hardware.radio.RadioTuner;
@@ -46,6 +48,7 @@ class TunerCallback implements ITunerCallback {
     @NonNull private final ITunerCallback mClientCallback;
 
     private final AtomicReference<ProgramList.Filter> mProgramListFilter = new AtomicReference<>();
+    private boolean mInitialConfigurationDone = false;
 
     TunerCallback(@NonNull Tuner tuner, @NonNull ITunerCallback clientCallback, int halRev) {
         mTuner = tuner;
@@ -85,13 +88,18 @@ class TunerCallback implements ITunerCallback {
         mTuner.close();
     }
 
-    void startProgramListUpdates(@NonNull ProgramList.Filter filter) {
-        mProgramListFilter.set(Objects.requireNonNull(filter));
+    void startProgramListUpdates(@Nullable ProgramList.Filter filter) {
+        if (filter == null) filter = new ProgramList.Filter();
+        mProgramListFilter.set(filter);
         sendProgramListUpdate();
     }
 
     void stopProgramListUpdates() {
         mProgramListFilter.set(null);
+    }
+
+    boolean isInitialConfigurationDone() {
+        return mInitialConfigurationDone;
     }
 
     @Override
@@ -100,7 +108,13 @@ class TunerCallback implements ITunerCallback {
     }
 
     @Override
+    public void onTuneFailed(int result, ProgramSelector selector) {
+        Slog.e(TAG, "Not applicable for HAL 1.x");
+    }
+
+    @Override
     public void onConfigurationChanged(RadioManager.BandConfig config) {
+        mInitialConfigurationDone = true;
         dispatch(() -> mClientCallback.onConfigurationChanged(config));
     }
 
@@ -163,7 +177,7 @@ class TunerCallback implements ITunerCallback {
 
     @Override
     public void onParametersUpdated(Map parameters) {
-        dispatch(() -> mClientCallback.onParametersUpdated(parameters));
+        Slog.e(TAG, "Not applicable for HAL 1.x");
     }
 
     @Override

@@ -20,12 +20,12 @@ import android.animation.ValueAnimator;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.os.Bundle;
-import android.support.annotation.LayoutRes;
-import android.support.annotation.Nullable;
+import androidx.annotation.LayoutRes;
+import androidx.annotation.Nullable;
 import android.support.design.widget.AppBarLayout;
-import android.support.v4.widget.DrawerLayout;
-import android.support.v7.app.ActionBarDrawerToggle;
-import android.support.v7.app.AppCompatActivity;
+import androidx.drawerlayout.widget.DrawerLayout;
+import androidx.appcompat.app.ActionBarDrawerToggle;
+import androidx.appcompat.app.AppCompatActivity;
 import android.util.TypedValue;
 import android.view.LayoutInflater;
 import android.view.MenuItem;
@@ -60,8 +60,8 @@ import androidx.car.widget.ClickThroughToolbar;
  * CarDrawerAdapter for the next level to
  * {@link CarDrawerController#pushAdapter(CarDrawerAdapter)}.
  *
- * <p>Any Activity's based on this class need to set their theme to CarDrawerActivityTheme or a
- * derivative.
+ * <p>Any Activity's based on this class need to set their theme to
+ * {@code Theme.Car.Light.NoActionBar.Drawer} or a derivative.
  */
 public class CarDrawerActivity extends AppCompatActivity {
     private static final int ANIMATION_DURATION_MS = 100;

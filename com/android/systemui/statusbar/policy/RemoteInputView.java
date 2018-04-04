@@ -60,6 +60,8 @@ import com.android.systemui.statusbar.RemoteInputController;
 import com.android.systemui.statusbar.notification.NotificationViewWrapper;
 import com.android.systemui.statusbar.stack.StackStateAnimator;
 
+import java.util.function.Consumer;
+
 /**
  * Host for the remote input.
  */
@@ -90,6 +92,7 @@ public class RemoteInputView extends LinearLayout implements View.OnClickListene
 
     private boolean mResetting;
     private NotificationViewWrapper mWrapper;
+    private Consumer<Boolean> mOnVisibilityChangedListener;
 
     public RemoteInputView(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -167,6 +170,10 @@ public class RemoteInputView extends LinearLayout implements View.OnClickListene
             MetricsLogger.action(mContext, MetricsProto.MetricsEvent.ACTION_REMOTE_INPUT_FAIL,
                     mEntry.notification.getPackageName());
         }
+    }
+
+    public CharSequence getText() {
+        return mEditText.getText();
     }
 
     public static RemoteInputView inflate(Context context, ViewGroup root,
@@ -445,6 +452,18 @@ public class RemoteInputView extends LinearLayout implements View.OnClickListene
 
     public void setWrapper(NotificationViewWrapper wrapper) {
         mWrapper = wrapper;
+    }
+
+    public void setOnVisibilityChangedListener(Consumer<Boolean> visibilityChangedListener) {
+        mOnVisibilityChangedListener = visibilityChangedListener;
+    }
+
+    @Override
+    protected void onVisibilityChanged(View changedView, int visibility) {
+        super.onVisibilityChanged(changedView, visibility);
+        if (changedView == this && mOnVisibilityChangedListener != null) {
+            mOnVisibilityChangedListener.accept(visibility == VISIBLE);
+        }
     }
 
     /**

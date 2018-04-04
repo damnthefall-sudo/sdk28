@@ -29,9 +29,7 @@ import android.os.Message;
 import android.os.ParcelFileDescriptor;
 import android.os.PowerManager;
 import android.os.RemoteException;
-import android.os.SystemClock;
 import android.os.UserHandle;
-import android.provider.Settings;
 import android.util.ArraySet;
 import android.util.EventLog;
 import android.util.Slog;
@@ -39,6 +37,7 @@ import android.util.SparseIntArray;
 import android.util.proto.ProtoOutputStream;
 import android.view.Display;
 import android.view.DisplayInfo;
+import android.view.SurfaceControl;
 import android.view.WindowManager;
 
 import com.android.internal.util.ArrayUtils;
@@ -47,11 +46,9 @@ import com.android.server.EventLogTags;
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.function.Consumer;
 
-import static android.app.AppOpsManager.MODE_ALLOWED;
-import static android.app.AppOpsManager.MODE_DEFAULT;
-import static android.app.AppOpsManager.OP_NONE;
 import static android.view.Display.DEFAULT_DISPLAY;
 import static android.view.Display.INVALID_DISPLAY;
 import static android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
@@ -67,8 +64,6 @@ import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_DISPLAY;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_KEEP_SCREEN_ON;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_LAYOUT_REPEATS;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_ORIENTATION;
-import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_POWER;
-import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_VISIBILITY;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_WALLPAPER_LIGHT;
 import static com.android.server.wm.WindowManagerDebugConfig.DEBUG_WINDOW_TRACE;
 import static com.android.server.wm.WindowManagerDebugConfig.SHOW_LIGHT_TRANSACTIONS;
@@ -89,9 +84,9 @@ import static com.android.server.wm.WindowSurfacePlacer.SET_ORIENTATION_CHANGE_C
 import static com.android.server.wm.WindowSurfacePlacer.SET_UPDATE_ROTATION;
 import static com.android.server.wm.WindowSurfacePlacer.SET_WALLPAPER_ACTION_PENDING;
 import static com.android.server.wm.WindowSurfacePlacer.SET_WALLPAPER_MAY_CHANGE;
-import static com.android.server.wm.proto.RootWindowContainerProto.DISPLAYS;
-import static com.android.server.wm.proto.RootWindowContainerProto.WINDOWS;
-import static com.android.server.wm.proto.RootWindowContainerProto.WINDOW_CONTAINER;
+import static com.android.server.wm.RootWindowContainerProto.DISPLAYS;
+import static com.android.server.wm.RootWindowContainerProto.WINDOWS;
+import static com.android.server.wm.RootWindowContainerProto.WINDOW_CONTAINER;
 
 /** Root {@link WindowContainer} for the device. */
 class RootWindowContainer extends WindowContainer<DisplayContent> {
@@ -126,20 +121,19 @@ class RootWindowContainer extends WindowContainer<DisplayContent> {
     boolean mOrientationChangeComplete = true;
     boolean mWallpaperActionPending = false;
 
-    private final ArrayList<Integer> mChangedStackList = new ArrayList();
-
-    // State for the RemoteSurfaceTrace system used in testing. If this is enabled SurfaceControl
-    // instances will be replaced with an instance that writes a binary representation of all
-    // commands to mSurfaceTraceFd.
-    boolean mSurfaceTraceEnabled;
-    ParcelFileDescriptor mSurfaceTraceFd;
-    RemoteEventTrace mRemoteEventTrace;
+    private final ArrayList<TaskStack> mTmpStackList = new ArrayList();
+    private final ArrayList<Integer> mTmpStackIds = new ArrayList<>();
 
     final WallpaperController mWallpaperController;
 
     private final Handler mHandler;
 
     private String mCloseSystemDialogsReason;
+
+    // Only a seperate transaction until we seperate the apply surface changes
+    // transaction from the global transaction.
+    private final SurfaceControl.Transaction mDisplayTransaction = new SurfaceControl.Transaction();
+
     private final Consumer<WindowState> mCloseSystemDialogsConsumer = w -> {
         if (w.mHasSurface) {
             try {
@@ -191,30 +185,6 @@ class RootWindowContainer extends WindowContainer<DisplayContent> {
         }
     }
 
-    /**
-     * Retrieve the DisplayContent for the specified displayId. Will create a new DisplayContent if
-     * there is a Display for the displayId.
-     *
-     * @param displayId The display the caller is interested in.
-     * @return The DisplayContent associated with displayId or null if there is no Display for it.
-     */
-    DisplayContent getDisplayContentOrCreate(int displayId) {
-        DisplayContent dc = getDisplayContent(displayId);
-
-        if (dc == null) {
-            final Display display = mService.mDisplayManager.getDisplay(displayId);
-            if (display != null) {
-                final long callingIdentity = Binder.clearCallingIdentity();
-                try {
-                    dc = createDisplayContent(display);
-                } finally {
-                    Binder.restoreCallingIdentity(callingIdentity);
-                }
-            }
-        }
-        return dc;
-    }
-
     DisplayContent getDisplayContent(int displayId) {
         for (int i = mChildren.size() - 1; i >= 0; --i) {
             final DisplayContent current = mChildren.get(i);
@@ -225,10 +195,21 @@ class RootWindowContainer extends WindowContainer<DisplayContent> {
         return null;
     }
 
-    private DisplayContent createDisplayContent(final Display display) {
-        final DisplayContent dc = new DisplayContent(display, mService,
-                mWallpaperController);
+    DisplayContent createDisplayContent(final Display display, DisplayWindowController controller) {
         final int displayId = display.getDisplayId();
+
+        // In select scenarios, it is possible that a DisplayContent will be created on demand
+        // rather than waiting for the controller. In this case, associate the controller and return
+        // the existing display.
+        final DisplayContent existing = getDisplayContent(displayId);
+
+        if (existing != null) {
+            existing.setController(controller);
+            return existing;
+        }
+
+        final DisplayContent dc =
+                new DisplayContent(display, mService, mWallpaperController, controller);
 
         if (DEBUG_DISPLAY) Slog.v(TAG_WM, "Adding display=" + display);
 
@@ -333,7 +314,8 @@ class RootWindowContainer extends WindowContainer<DisplayContent> {
 
     /**
      * Set new display override config and return array of ids of stacks that were changed during
-     * update. If called for the default display, global configuration will also be updated.
+     * update. If called for the default display, global configuration will also be updated. Stacks
+     * that are marked for deferred removal are excluded from the returned array.
      */
     int[] setDisplayOverrideConfigurationIfNeeded(Configuration newConfiguration, int displayId) {
         final DisplayContent displayContent = getDisplayContent(displayId);
@@ -346,24 +328,42 @@ class RootWindowContainer extends WindowContainer<DisplayContent> {
         if (!configChanged) {
             return null;
         }
+
         displayContent.onOverrideConfigurationChanged(newConfiguration);
 
+        mTmpStackList.clear();
         if (displayId == DEFAULT_DISPLAY) {
             // Override configuration of the default display duplicates global config. In this case
             // we also want to update the global config.
-            return setGlobalConfigurationIfNeeded(newConfiguration);
+            setGlobalConfigurationIfNeeded(newConfiguration, mTmpStackList);
         } else {
-            return updateStackBoundsAfterConfigChange(displayId);
+            updateStackBoundsAfterConfigChange(displayId, mTmpStackList);
         }
+
+        mTmpStackIds.clear();
+        final int stackCount = mTmpStackList.size();
+
+        for (int i = 0; i < stackCount; ++i) {
+            final TaskStack stack = mTmpStackList.get(i);
+
+            // We only include stacks that are not marked for removal as they do not exist outside
+            // of WindowManager at this point.
+            if (!stack.mDeferRemoval) {
+                mTmpStackIds.add(stack.mStackId);
+            }
+        }
+
+        return mTmpStackIds.isEmpty() ? null : ArrayUtils.convertToIntArray(mTmpStackIds);
     }
 
-    private int[] setGlobalConfigurationIfNeeded(Configuration newConfiguration) {
+    private void setGlobalConfigurationIfNeeded(Configuration newConfiguration,
+            List<TaskStack> changedStacks) {
         final boolean configChanged = getConfiguration().diff(newConfiguration) != 0;
         if (!configChanged) {
-            return null;
+            return;
         }
         onConfigurationChanged(newConfiguration);
-        return updateStackBoundsAfterConfigChange();
+        updateStackBoundsAfterConfigChange(changedStacks);
     }
 
     @Override
@@ -378,26 +378,18 @@ class RootWindowContainer extends WindowContainer<DisplayContent> {
      * Callback used to trigger bounds update after configuration change and get ids of stacks whose
      * bounds were updated.
      */
-    private int[] updateStackBoundsAfterConfigChange() {
-        mChangedStackList.clear();
-
+    private void updateStackBoundsAfterConfigChange(List<TaskStack> changedStacks) {
         final int numDisplays = mChildren.size();
         for (int i = 0; i < numDisplays; ++i) {
             final DisplayContent dc = mChildren.get(i);
-            dc.updateStackBoundsAfterConfigChange(mChangedStackList);
+            dc.updateStackBoundsAfterConfigChange(changedStacks);
         }
-
-        return mChangedStackList.isEmpty() ? null : ArrayUtils.convertToIntArray(mChangedStackList);
     }
 
     /** Same as {@link #updateStackBoundsAfterConfigChange()} but only for a specific display. */
-    private int[] updateStackBoundsAfterConfigChange(int displayId) {
-        mChangedStackList.clear();
-
+    private void updateStackBoundsAfterConfigChange(int displayId, List<TaskStack> changedStacks) {
         final DisplayContent dc = getDisplayContent(displayId);
-        dc.updateStackBoundsAfterConfigChange(mChangedStackList);
-
-        return mChangedStackList.isEmpty() ? null : ArrayUtils.convertToIntArray(mChangedStackList);
+        dc.updateStackBoundsAfterConfigChange(changedStacks);
     }
 
     private void prepareFreezingTaskBounds() {
@@ -427,12 +419,7 @@ class RootWindowContainer extends WindowContainer<DisplayContent> {
 
     void updateAppOpsState() {
         forAllWindows((w) -> {
-            if (w.mAppOp == OP_NONE) {
-                return;
-            }
-            final int mode = mService.mAppOps.noteOpNoThrow(w.mAppOp, w.getOwningUid(),
-                    w.getOwningPackage());
-            w.setAppOpVisibilityLw(mode == MODE_ALLOWED || mode == MODE_DEFAULT);
+            w.updateAppOpsState();
         }, false /* traverseTopToBottom */);
     }
 
@@ -599,13 +586,18 @@ class RootWindowContainer extends WindowContainer<DisplayContent> {
                     "<<< CLOSE TRANSACTION performLayoutAndPlaceSurfaces");
         }
 
+        mService.mAnimator.executeAfterPrepareSurfacesRunnables();
+
         final WindowSurfacePlacer surfacePlacer = mService.mWindowPlacerLocked;
 
         // If we are ready to perform an app transition, check through all of the app tokens to be
         // shown and see if they are ready to go.
         if (mService.mAppTransition.isReady()) {
-            defaultDisplay.pendingLayoutChanges |=
-                    surfacePlacer.handleAppTransitionReadyLocked();
+            // This needs to be split into two expressions, as handleAppTransitionReadyLocked may
+            // modify dc.pendingLayoutChanges, which would get lost when writing
+            // defaultDisplay.pendingLayoutChanges |= handleAppTransitionReadyLocked()
+            final int layoutChanges = surfacePlacer.handleAppTransitionReadyLocked();
+            defaultDisplay.pendingLayoutChanges |= layoutChanges;
             if (DEBUG_LAYOUT_REPEATS)
                 surfacePlacer.debugLayoutRepeats("after handleAppTransitionReadyLocked",
                         defaultDisplay.pendingLayoutChanges);
@@ -735,24 +727,11 @@ class RootWindowContainer extends WindowContainer<DisplayContent> {
                     (mSustainedPerformanceModeEnabled ? 1 : 0));
         }
 
-        if (mService.mTurnOnScreen) {
-            if (mService.mAllowTheaterModeWakeFromLayout
-                    || Settings.Global.getInt(mService.mContext.getContentResolver(),
-                    Settings.Global.THEATER_MODE_ON, 0) == 0) {
-                if (DEBUG_VISIBILITY || DEBUG_POWER) {
-                    Slog.v(TAG, "Turning screen on after layout!");
-                }
-                mService.mPowerManager.wakeUp(SystemClock.uptimeMillis(),
-                        "android.server.wm:TURN_ON");
-            }
-            mService.mTurnOnScreen = false;
-        }
-
         if (mUpdateRotation) {
             if (DEBUG_ORIENTATION) Slog.d(TAG, "Performing post-rotate rotation");
             // TODO(multi-display): Update rotation for different displays separately.
             final int displayId = defaultDisplay.getDisplayId();
-            if (defaultDisplay.updateRotationUnchecked(false /* inTransaction */)) {
+            if (defaultDisplay.updateRotationUnchecked()) {
                 mService.mH.obtainMessage(SEND_NEW_CONFIGURATION, displayId).sendToTarget();
             } else {
                 mUpdateRotation = false;
@@ -762,7 +741,7 @@ class RootWindowContainer extends WindowContainer<DisplayContent> {
             // PhoneWindowManager.
             final DisplayContent vrDisplay = mService.mVr2dDisplayId != INVALID_DISPLAY
                     ? getDisplayContent(mService.mVr2dDisplayId) : null;
-            if (vrDisplay != null && vrDisplay.updateRotationUnchecked(false /* inTransaction */)) {
+            if (vrDisplay != null && vrDisplay.updateRotationUnchecked()) {
                 mService.mH.obtainMessage(SEND_NEW_CONFIGURATION, mService.mVr2dDisplayId)
                         .sendToTarget();
             }
@@ -822,7 +801,6 @@ class RootWindowContainer extends WindowContainer<DisplayContent> {
         mService.enableScreenIfNeededLocked();
 
         mService.scheduleAnimationLocked();
-        mService.mWindowPlacerLocked.destroyPendingSurfaces();
 
         if (DEBUG_WINDOW_TRACE) Slog.e(TAG,
                 "performSurfacePlacementInner exit: animating=" + mService.mAnimator.isAnimating());
@@ -863,7 +841,8 @@ class RootWindowContainer extends WindowContainer<DisplayContent> {
 
         // Give the display manager a chance to adjust properties like display rotation if it needs
         // to.
-        mService.mDisplayManagerInternal.performTraversalInTransactionFromWindowManager();
+        mService.mDisplayManagerInternal.performTraversal(mDisplayTransaction);
+        SurfaceControl.mergeToGlobalTransaction(mDisplayTransaction);
     }
 
     /**
@@ -903,10 +882,26 @@ class RootWindowContainer extends WindowContainer<DisplayContent> {
     boolean handleNotObscuredLocked(WindowState w, boolean obscured, boolean syswin) {
         final WindowManager.LayoutParams attrs = w.mAttrs;
         final int attrFlags = attrs.flags;
+        final boolean onScreen = w.isOnScreen();
         final boolean canBeSeen = w.isDisplayedLw();
         final int privateflags = attrs.privateFlags;
         boolean displayHasContent = false;
 
+        if (DEBUG_KEEP_SCREEN_ON) {
+            Slog.d(TAG_KEEP_SCREEN_ON, "handleNotObscuredLocked w: " + w
+                + ", w.mHasSurface: " + w.mHasSurface
+                + ", w.isOnScreen(): " + onScreen
+                + ", w.isDisplayedLw(): " + w.isDisplayedLw()
+                + ", w.mAttrs.userActivityTimeout: " + w.mAttrs.userActivityTimeout);
+        }
+        if (w.mHasSurface && onScreen) {
+            if (!syswin && w.mAttrs.userActivityTimeout >= 0 && mUserActivityTimeout < 0) {
+                mUserActivityTimeout = w.mAttrs.userActivityTimeout;
+                if (DEBUG_KEEP_SCREEN_ON) {
+                    Slog.d(TAG, "mUserActivityTimeout set to " + mUserActivityTimeout);
+                }
+            }
+        }
         if (w.mHasSurface && canBeSeen) {
             if ((attrFlags & FLAG_KEEP_SCREEN_ON) != 0) {
                 mHoldScreen = w.mSession;
@@ -918,9 +913,6 @@ class RootWindowContainer extends WindowContainer<DisplayContent> {
             }
             if (!syswin && w.mAttrs.screenBrightness >= 0 && mScreenBrightness < 0) {
                 mScreenBrightness = w.mAttrs.screenBrightness;
-            }
-            if (!syswin && w.mAttrs.userActivityTimeout >= 0 && mUserActivityTimeout < 0) {
-                mUserActivityTimeout = w.mAttrs.userActivityTimeout;
             }
 
             final int type = attrs.type;
@@ -1006,30 +998,6 @@ class RootWindowContainer extends WindowContainer<DisplayContent> {
                 default:
                     break;
             }
-        }
-    }
-
-    void enableSurfaceTrace(ParcelFileDescriptor pfd) {
-        final FileDescriptor fd = pfd.getFileDescriptor();
-        if (mSurfaceTraceEnabled) {
-            disableSurfaceTrace();
-        }
-        mSurfaceTraceEnabled = true;
-        mRemoteEventTrace = new RemoteEventTrace(mService, fd);
-        mSurfaceTraceFd = pfd;
-        for (int displayNdx = mChildren.size() - 1; displayNdx >= 0; --displayNdx) {
-            final DisplayContent dc = mChildren.get(displayNdx);
-            dc.enableSurfaceTrace(fd);
-        }
-    }
-
-    void disableSurfaceTrace() {
-        mSurfaceTraceEnabled = false;
-        mRemoteEventTrace = null;
-        mSurfaceTraceFd = null;
-        for (int displayNdx = mChildren.size() - 1; displayNdx >= 0; --displayNdx) {
-            final DisplayContent dc = mChildren.get(displayNdx);
-            dc.disableSurfaceTrace();
         }
     }
 

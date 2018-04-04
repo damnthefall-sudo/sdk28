@@ -31,6 +31,7 @@ import android.os.PowerManager;
 import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.os.SystemClock;
+import android.os.UserHandle;
 import android.provider.Settings;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.NotificationStats;
@@ -77,7 +78,7 @@ import java.util.List;
 public class NotificationEntryManager implements Dumpable, NotificationInflater.InflationCallback,
         ExpandableNotificationRow.ExpansionLogger, NotificationUpdateHandler,
         VisualStabilityManager.Callback {
-    private static final String TAG = "NotificationEntryManager";
+    private static final String TAG = "NotificationEntryMgr";
     protected static final boolean DEBUG = false;
     protected static final boolean ENABLE_HEADS_UP = true;
     protected static final String SETTING_HEADS_UP_TICKER = "ticker_gets_heads_up";
@@ -123,6 +124,7 @@ public class NotificationEntryManager implements Dumpable, NotificationInflater.
     protected boolean mUseHeadsUp = false;
     protected boolean mDisableNotificationAlerts;
     protected NotificationListContainer mListContainer;
+    private ExpandableNotificationRow.OnAppOpsClickListener mOnAppOpsClickListener;
 
     private final class NotificationClicker implements View.OnClickListener {
 
@@ -270,6 +272,7 @@ public class NotificationEntryManager implements Dumpable, NotificationInflater.
         mDeviceProvisionedController.addCallback(mDeviceProvisionedListener);
 
         mHeadsUpObserver.onChange(true); // set up
+        mOnAppOpsClickListener = mGutsManager::openGuts;
     }
 
     public NotificationData getNotificationData() {
@@ -296,16 +299,12 @@ public class NotificationEntryManager implements Dumpable, NotificationInflater.
         updateNotifications();
     }
 
-    private boolean shouldSuppressFullScreenIntent(String key) {
+    private boolean shouldSuppressFullScreenIntent(StatusBarNotification sbn) {
         if (mPresenter.isDeviceInVrMode()) {
             return true;
         }
 
-        if (mPowerManager.isInteractive()) {
-            return mNotificationData.shouldSuppressScreenOn(key);
-        } else {
-            return mNotificationData.shouldSuppressScreenOff(key);
-        }
+        return mNotificationData.shouldSuppressFullScreenIntent(sbn);
     }
 
     private void inflateViews(NotificationData.Entry entry, ViewGroup parent) {
@@ -333,6 +332,7 @@ public class NotificationEntryManager implements Dumpable, NotificationInflater.
         row.setOnExpandClickListener(mPresenter);
         row.setInflationCallback(this);
         row.setLongPressListener(getNotificationLongClicker());
+        mListContainer.bindRow(row);
         mRemoteInputManager.bindRow(row);
 
         // Get the app name.
@@ -359,6 +359,8 @@ public class NotificationEntryManager implements Dumpable, NotificationInflater.
         if (ENABLE_REMOTE_INPUT) {
             row.setDescendantFocusability(ViewGroup.FOCUS_BEFORE_DESCENDANTS);
         }
+
+        row.setAppOpsOnClickListener(mOnAppOpsClickListener);
 
         mCallback.onBindRow(entry, pmUser, sbn, row);
     }
@@ -621,7 +623,7 @@ public class NotificationEntryManager implements Dumpable, NotificationInflater.
         }
     }
 
-    private void updateNotification(NotificationData.Entry entry, PackageManager pmUser,
+    protected void updateNotification(NotificationData.Entry entry, PackageManager pmUser,
             StatusBarNotification sbn, ExpandableNotificationRow row) {
         row.setNeedsRedaction(mLockscreenUserManager.needsRedaction(entry));
         boolean isLowPriority = mNotificationData.isAmbient(sbn.getKey());
@@ -688,7 +690,7 @@ public class NotificationEntryManager implements Dumpable, NotificationInflater.
         NotificationData.Entry shadeEntry = createNotificationViews(notification);
         boolean isHeadsUped = shouldPeek(shadeEntry);
         if (!isHeadsUped && notification.getNotification().fullScreenIntent != null) {
-            if (shouldSuppressFullScreenIntent(key)) {
+            if (shouldSuppressFullScreenIntent(notification)) {
                 if (DEBUG) {
                     Log.d(TAG, "No Fullscreen intent: suppressed by DND: " + key);
                 }
@@ -731,6 +733,14 @@ public class NotificationEntryManager implements Dumpable, NotificationInflater.
             addNotificationInternal(notification, ranking);
         } catch (InflationException e) {
             handleInflationException(notification, e);
+        }
+    }
+
+    public void updateNotificationsForAppOps(int appOp, int uid, String pkg, boolean showIcon) {
+        if (mForegroundServiceController.getStandardLayoutKey(
+                UserHandle.getUserId(uid), pkg) != null) {
+            mNotificationData.updateAppOp(appOp, uid, pkg, showIcon);
+            updateNotifications();
         }
     }
 
@@ -836,12 +846,13 @@ public class NotificationEntryManager implements Dumpable, NotificationInflater.
             return false;
         }
 
-        if (!mPresenter.isDozing() && mNotificationData.shouldSuppressScreenOn(sbn.getKey())) {
+        if (!mPresenter.isDozing() && mNotificationData.shouldSuppressPeek(sbn)) {
             if (DEBUG) Log.d(TAG, "No peeking: suppressed by DND: " + sbn.getKey());
             return false;
         }
 
-        if (mPresenter.isDozing() && mNotificationData.shouldSuppressScreenOff(sbn.getKey())) {
+        // Peeking triggers an ambient display pulse, so disable peek is ambient is active
+        if (mPresenter.isDozing() && mNotificationData.shouldSuppressAmbient(sbn)) {
             if (DEBUG) Log.d(TAG, "No peeking: suppressed by DND: " + sbn.getKey());
             return false;
         }

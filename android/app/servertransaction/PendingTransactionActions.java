@@ -44,6 +44,7 @@ public class PendingTransactionActions {
     private boolean mCallOnPostCreate;
     private Bundle mOldState;
     private StopInfo mStopInfo;
+    private boolean mReportRelaunchToWM;
 
     public PendingTransactionActions() {
         clear();
@@ -91,6 +92,24 @@ public class PendingTransactionActions {
         mStopInfo = stopInfo;
     }
 
+    /**
+     * Check if we should report an activity relaunch to WindowManager. We report back for every
+     * relaunch request to ActivityManager, but only for those that were actually finished to we
+     * report to WindowManager.
+     */
+    public boolean shouldReportRelaunchToWindowManager() {
+        return mReportRelaunchToWM;
+    }
+
+    /**
+     * Set if we should report an activity relaunch to WindowManager. We report back for every
+     * relaunch request to ActivityManager, but only for those that were actually finished we report
+     * to WindowManager.
+     */
+    public void setReportRelaunchToWindowManager(boolean reportToWm) {
+        mReportRelaunchToWM = reportToWm;
+    }
+
     /** Reports to server about activity stop. */
     public static class StopInfo implements Runnable {
         private static final String TAG = "ActivityStopInfo";
@@ -134,7 +153,7 @@ public class PendingTransactionActions {
                 Bundle.dumpStats(pw, mPersistentState);
 
                 if (ex instanceof TransactionTooLargeException
-                        && mActivity.loadedApk.getTargetSdkVersion() < Build.VERSION_CODES.N) {
+                        && mActivity.packageInfo.getTargetSdkVersion() < Build.VERSION_CODES.N) {
                     Log.e(TAG, "App sent too much data in instance state, so it was ignored", ex);
                     return;
                 }

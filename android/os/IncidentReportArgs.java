@@ -32,6 +32,9 @@ import java.util.ArrayList;
 @TestApi
 public final class IncidentReportArgs implements Parcelable {
 
+    private static final int DEST_EXPLICIT = 100;
+    private static final int DEST_AUTO = 200;
+
     private final IntArray mSections = new IntArray();
     private final ArrayList<byte[]> mHeaders = new ArrayList<byte[]>();
     private boolean mAll;
@@ -41,6 +44,7 @@ public final class IncidentReportArgs implements Parcelable {
      * Construct an incident report args with no fields.
      */
     public IncidentReportArgs() {
+        mDest = DEST_AUTO;
     }
 
     /**
@@ -143,7 +147,14 @@ public final class IncidentReportArgs implements Parcelable {
      * @hide
      */
     public void setPrivacyPolicy(int dest) {
-        mDest = dest;
+        switch (dest) {
+            case DEST_EXPLICIT:
+            case DEST_AUTO:
+                mDest = dest;
+                break;
+            default:
+                mDest = DEST_AUTO;
+        }
     }
 
     /**
@@ -176,54 +187,6 @@ public final class IncidentReportArgs implements Parcelable {
 
     public void addHeader(byte[] header) {
         mHeaders.add(header);
-    }
-
-    /**
-     * Parses an incident report config as described in the system setting.
-     *
-     * @see IncidentManager#reportIncident
-     */
-    public static IncidentReportArgs parseSetting(String setting)
-            throws IllegalArgumentException {
-        if (setting == null || setting.length() == 0) {
-            return null;
-        }
-        setting = setting.trim();
-        if (setting.length() == 0 || "disabled".equals(setting)) {
-            return null;
-        }
-
-        final IncidentReportArgs args = new IncidentReportArgs();
-
-        if ("all".equals(setting)) {
-            args.setAll(true);
-            return args;
-        } else if ("none".equals(setting)) {
-            return args;
-        }
-
-        final String[] splits = setting.split(",");
-        final int N = splits.length;
-        for (int i=0; i<N; i++) {
-            final String str = splits[i].trim();
-            if (str.length() == 0) {
-                continue;
-            }
-            int section;
-            try {
-                section = Integer.parseInt(str);
-            } catch (NumberFormatException ex) {
-                throw new IllegalArgumentException("Malformed setting. Bad integer at section"
-                        + " index " + i + ": section='" + str + "' setting='" + setting + "'");
-            }
-            if (section < 1) {
-                throw new IllegalArgumentException("Malformed setting. Illegal section at"
-                        + " index " + i + ": section='" + str + "' setting='" + setting + "'");
-            }
-            args.addSection(section);
-        }
-
-        return args;
     }
 }
 

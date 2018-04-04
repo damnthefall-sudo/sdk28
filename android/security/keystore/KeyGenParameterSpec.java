@@ -21,6 +21,7 @@ import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.app.KeyguardManager;
 import android.hardware.fingerprint.FingerprintManager;
+import android.security.GateKeeper;
 import android.security.KeyStore;
 import android.text.TextUtils;
 
@@ -232,7 +233,7 @@ import javax.security.auth.x500.X500Principal;
  * key = (SecretKey) keyStore.getKey("key2", null);
  * }</pre>
  */
-public final class KeyGenParameterSpec implements AlgorithmParameterSpec {
+public final class KeyGenParameterSpec implements AlgorithmParameterSpec, UserAuthArgs {
 
     private static final X500Principal DEFAULT_CERT_SUBJECT = new X500Principal("CN=fake");
     private static final BigInteger DEFAULT_CERT_SERIAL_NUMBER = new BigInteger("1");
@@ -258,11 +259,14 @@ public final class KeyGenParameterSpec implements AlgorithmParameterSpec {
     private final boolean mRandomizedEncryptionRequired;
     private final boolean mUserAuthenticationRequired;
     private final int mUserAuthenticationValidityDurationSeconds;
+    private final boolean mUserPresenceRequired;
     private final byte[] mAttestationChallenge;
     private final boolean mUniqueIdIncluded;
     private final boolean mUserAuthenticationValidWhileOnBody;
     private final boolean mInvalidatedByBiometricEnrollment;
     private final boolean mIsStrongBoxBacked;
+    private final boolean mUserConfirmationRequired;
+    private final boolean mUnlockedDeviceRequired;
 
     /**
      * @hide should be built with Builder
@@ -287,11 +291,14 @@ public final class KeyGenParameterSpec implements AlgorithmParameterSpec {
             boolean randomizedEncryptionRequired,
             boolean userAuthenticationRequired,
             int userAuthenticationValidityDurationSeconds,
+            boolean userPresenceRequired,
             byte[] attestationChallenge,
             boolean uniqueIdIncluded,
             boolean userAuthenticationValidWhileOnBody,
             boolean invalidatedByBiometricEnrollment,
-            boolean isStrongBoxBacked) {
+            boolean isStrongBoxBacked,
+            boolean userConfirmationRequired,
+            boolean unlockedDeviceRequired) {
         if (TextUtils.isEmpty(keyStoreAlias)) {
             throw new IllegalArgumentException("keyStoreAlias must not be empty");
         }
@@ -332,12 +339,15 @@ public final class KeyGenParameterSpec implements AlgorithmParameterSpec {
         mBlockModes = ArrayUtils.cloneIfNotEmpty(ArrayUtils.nullToEmpty(blockModes));
         mRandomizedEncryptionRequired = randomizedEncryptionRequired;
         mUserAuthenticationRequired = userAuthenticationRequired;
+        mUserPresenceRequired = userPresenceRequired;
         mUserAuthenticationValidityDurationSeconds = userAuthenticationValidityDurationSeconds;
         mAttestationChallenge = Utils.cloneIfNotNull(attestationChallenge);
         mUniqueIdIncluded = uniqueIdIncluded;
         mUserAuthenticationValidWhileOnBody = userAuthenticationValidWhileOnBody;
         mInvalidatedByBiometricEnrollment = invalidatedByBiometricEnrollment;
         mIsStrongBoxBacked = isStrongBoxBacked;
+        mUserConfirmationRequired = userConfirmationRequired;
+        mUnlockedDeviceRequired = unlockedDeviceRequired;
     }
 
     /**
@@ -544,6 +554,26 @@ public final class KeyGenParameterSpec implements AlgorithmParameterSpec {
     }
 
     /**
+     * Returns {@code true} if the key is authorized to be used only for messages confirmed by the
+     * user.
+     *
+     * Confirmation is separate from user authentication (see
+     * {@link Builder#setUserAuthenticationRequired(boolean)}). Keys can be created that require
+     * confirmation but not user authentication, or user authentication but not confirmation, or
+     * both. Confirmation verifies that some user with physical possession of the device has
+     * approved a displayed message. User authentication verifies that the correct user is present
+     * and has authenticated.
+     *
+     * <p>This authorization applies only to secret key and private key operations. Public key
+     * operations are not restricted.
+     *
+     * @see Builder#setUserConfirmationRequired(boolean)
+     */
+    public boolean isUserConfirmationRequired() {
+        return mUserConfirmationRequired;
+    }
+
+    /**
      * Gets the duration of time (seconds) for which this key is authorized to be used after the
      * user is successfully authenticated. This has effect only if user authentication is required
      * (see {@link #isUserAuthenticationRequired()}).
@@ -559,6 +589,14 @@ public final class KeyGenParameterSpec implements AlgorithmParameterSpec {
      */
     public int getUserAuthenticationValidityDurationSeconds() {
         return mUserAuthenticationValidityDurationSeconds;
+    }
+
+    /**
+     * Returns {@code true} if the key is authorized to be used only if a test of user presence has
+     * been performed between the {@code Signature.initSign()} and {@code Signature.sign()} calls.
+     */
+    public boolean isUserPresenceRequired() {
+        return mUserPresenceRequired;
     }
 
     /**
@@ -635,6 +673,24 @@ public final class KeyGenParameterSpec implements AlgorithmParameterSpec {
     }
 
     /**
+     * Returns {@code true} if the screen must be unlocked for this key to be used for encryption or
+     * signing. Decryption and signature verification will still be available when the screen is
+     * locked.
+     *
+     * @see Builder#setUnlockedDeviceRequired(boolean)
+     */
+    public boolean isUnlockedDeviceRequired() {
+        return mUnlockedDeviceRequired;
+    }
+
+    /**
+     * @hide
+     */
+    public long getBoundToSpecificSecureUserId() {
+        return GateKeeper.INVALID_SECURE_USER_ID;
+    }
+
+    /**
      * Builder of {@link KeyGenParameterSpec} instances.
      */
     public final static class Builder {
@@ -658,11 +714,14 @@ public final class KeyGenParameterSpec implements AlgorithmParameterSpec {
         private boolean mRandomizedEncryptionRequired = true;
         private boolean mUserAuthenticationRequired;
         private int mUserAuthenticationValidityDurationSeconds = -1;
+        private boolean mUserPresenceRequired = false;
         private byte[] mAttestationChallenge = null;
         private boolean mUniqueIdIncluded = false;
         private boolean mUserAuthenticationValidWhileOnBody;
         private boolean mInvalidatedByBiometricEnrollment = true;
         private boolean mIsStrongBoxBacked = false;
+        private boolean mUserConfirmationRequired;
+        private boolean mUnlockedDeviceRequired = false;
 
         /**
          * Creates a new instance of the {@code Builder}.
@@ -718,6 +777,7 @@ public final class KeyGenParameterSpec implements AlgorithmParameterSpec {
             mUserAuthenticationRequired = sourceSpec.isUserAuthenticationRequired();
             mUserAuthenticationValidityDurationSeconds =
                 sourceSpec.getUserAuthenticationValidityDurationSeconds();
+            mUserPresenceRequired = sourceSpec.isUserPresenceRequired();
             mAttestationChallenge = sourceSpec.getAttestationChallenge();
             mUniqueIdIncluded = sourceSpec.isUniqueIdIncluded();
             mUserAuthenticationValidWhileOnBody = sourceSpec.isUserAuthenticationValidWhileOnBody();
@@ -1050,6 +1110,29 @@ public final class KeyGenParameterSpec implements AlgorithmParameterSpec {
         }
 
         /**
+         * Sets whether this key is authorized to be used only for messages confirmed by the
+         * user.
+         *
+         * Confirmation is separate from user authentication (see
+         * {@link #setUserAuthenticationRequired(boolean)}). Keys can be created that require
+         * confirmation but not user authentication, or user authentication but not confirmation,
+         * or both. Confirmation verifies that some user with physical possession of the device has
+         * approved a displayed message. User authentication verifies that the correct user is
+         * present and has authenticated.
+         *
+         * <p>This authorization applies only to secret key and private key operations. Public key
+         * operations are not restricted.
+         *
+         * @see {@link android.security.ConfirmationPrompter ConfirmationPrompter} class for
+         * more details about user confirmations.
+         */
+        @NonNull
+        public Builder setUserConfirmationRequired(boolean required) {
+            mUserConfirmationRequired = required;
+            return this;
+        }
+
+        /**
          * Sets the duration of time (seconds) for which this key is authorized to be used after the
          * user is successfully authenticated. This has effect if the key requires user
          * authentication for its use (see {@link #setUserAuthenticationRequired(boolean)}).
@@ -1091,6 +1174,16 @@ public final class KeyGenParameterSpec implements AlgorithmParameterSpec {
                 throw new IllegalArgumentException("seconds must be -1 or larger");
             }
             mUserAuthenticationValidityDurationSeconds = seconds;
+            return this;
+        }
+
+        /**
+         * Sets whether a test of user presence is required to be performed between the
+         * {@code Signature.initSign()} and {@code Signature.sign()} method calls.
+         */
+        @NonNull
+        public Builder setUserPresenceRequired(boolean required) {
+            mUserPresenceRequired = required;
             return this;
         }
 
@@ -1197,6 +1290,19 @@ public final class KeyGenParameterSpec implements AlgorithmParameterSpec {
         }
 
         /**
+         * Sets whether the keystore requires the screen to be unlocked before allowing decryption
+         * using this key. If this is set to {@code true}, any attempt to decrypt or sign using this
+         * key while the screen is locked will fail. A locked device requires a PIN, password,
+         * fingerprint, or other trusted factor to access. While the screen is locked, the key can
+         * still be used for encryption or signature verification.
+         */
+        @NonNull
+        public Builder setUnlockedDeviceRequired(boolean unlockedDeviceRequired) {
+            mUnlockedDeviceRequired = unlockedDeviceRequired;
+            return this;
+        }
+
+        /**
          * Builds an instance of {@code KeyGenParameterSpec}.
          */
         @NonNull
@@ -1221,11 +1327,14 @@ public final class KeyGenParameterSpec implements AlgorithmParameterSpec {
                     mRandomizedEncryptionRequired,
                     mUserAuthenticationRequired,
                     mUserAuthenticationValidityDurationSeconds,
+                    mUserPresenceRequired,
                     mAttestationChallenge,
                     mUniqueIdIncluded,
                     mUserAuthenticationValidWhileOnBody,
                     mInvalidatedByBiometricEnrollment,
-                    mIsStrongBoxBacked);
+                    mIsStrongBoxBacked,
+                    mUserConfirmationRequired,
+                    mUnlockedDeviceRequired);
         }
     }
 }

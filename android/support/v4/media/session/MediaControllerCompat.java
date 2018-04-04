@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014 The Android Open Source Project
+ * Copyright 2018 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,8 @@
 
 package android.support.v4.media.session;
 
+import static androidx.annotation.RestrictTo.Scope.LIBRARY;
+
 import android.app.Activity;
 import android.app.PendingIntent;
 import android.content.Context;
@@ -29,19 +31,22 @@ import android.os.Looper;
 import android.os.Message;
 import android.os.RemoteException;
 import android.os.ResultReceiver;
-import android.support.annotation.NonNull;
-import android.support.annotation.RequiresApi;
-import android.support.v4.app.BundleCompat;
-import android.support.v4.app.SupportActivity;
+import android.support.v4.media.MediaBrowserCompat;
 import android.support.v4.media.MediaDescriptionCompat;
 import android.support.v4.media.MediaMetadataCompat;
 import android.support.v4.media.RatingCompat;
-import android.support.v4.media.VolumeProviderCompat;
 import android.support.v4.media.session.MediaSessionCompat.QueueItem;
 import android.support.v4.media.session.PlaybackStateCompat.CustomAction;
 import android.text.TextUtils;
 import android.util.Log;
 import android.view.KeyEvent;
+
+import androidx.annotation.NonNull;
+import androidx.annotation.RequiresApi;
+import androidx.annotation.RestrictTo;
+import androidx.core.app.BundleCompat;
+import androidx.core.app.SupportActivity;
+import androidx.media.VolumeProviderCompat;
 
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
@@ -65,7 +70,7 @@ import java.util.List;
  * If MediaControllerCompat is created with a {@link MediaSessionCompat.Token session token}
  * from another process, following methods will not work directly after the creation if the
  * {@link MediaSessionCompat.Token session token} is not passed through a
- * {@link android.support.v4.media.MediaBrowserCompat}:
+ * {@link MediaBrowserCompat}:
  * <ul>
  * <li>{@link #getPlaybackState()}.{@link PlaybackStateCompat#getExtras() getExtras()}</li>
  * <li>{@link #isCaptioningEnabled()}</li>
@@ -82,20 +87,48 @@ import java.util.List;
 public final class MediaControllerCompat {
     static final String TAG = "MediaControllerCompat";
 
-    static final String COMMAND_GET_EXTRA_BINDER =
+    /**
+     * @hide
+     */
+    @RestrictTo(LIBRARY)
+    public static final String COMMAND_GET_EXTRA_BINDER =
             "android.support.v4.media.session.command.GET_EXTRA_BINDER";
-    static final String COMMAND_ADD_QUEUE_ITEM =
+    /**
+     * @hide
+     */
+    @RestrictTo(LIBRARY)
+    public static final String COMMAND_ADD_QUEUE_ITEM =
             "android.support.v4.media.session.command.ADD_QUEUE_ITEM";
-    static final String COMMAND_ADD_QUEUE_ITEM_AT =
+    /**
+     * @hide
+     */
+    @RestrictTo(LIBRARY)
+    public static final String COMMAND_ADD_QUEUE_ITEM_AT =
             "android.support.v4.media.session.command.ADD_QUEUE_ITEM_AT";
-    static final String COMMAND_REMOVE_QUEUE_ITEM =
+    /**
+     * @hide
+     */
+    @RestrictTo(LIBRARY)
+    public static final String COMMAND_REMOVE_QUEUE_ITEM =
             "android.support.v4.media.session.command.REMOVE_QUEUE_ITEM";
-    static final String COMMAND_REMOVE_QUEUE_ITEM_AT =
+    /**
+     * @hide
+     */
+    @RestrictTo(LIBRARY)
+    public static final String COMMAND_REMOVE_QUEUE_ITEM_AT =
             "android.support.v4.media.session.command.REMOVE_QUEUE_ITEM_AT";
 
-    static final String COMMAND_ARGUMENT_MEDIA_DESCRIPTION =
+    /**
+     * @hide
+     */
+    @RestrictTo(LIBRARY)
+    public static final String COMMAND_ARGUMENT_MEDIA_DESCRIPTION =
             "android.support.v4.media.session.command.ARGUMENT_MEDIA_DESCRIPTION";
-    static final String COMMAND_ARGUMENT_INDEX =
+    /**
+     * @hide
+     */
+    @RestrictTo(LIBRARY)
+    public static final String COMMAND_ARGUMENT_INDEX =
             "android.support.v4.media.session.command.ARGUMENT_INDEX";
 
     private static class MediaControllerExtraData extends SupportActivity.ExtraData {
@@ -115,7 +148,7 @@ public final class MediaControllerCompat {
      * {@link #getMediaController(Activity)}.
      *
      * <p>This is compatible with {@link Activity#setMediaController(MediaController)}.
-     * If {@code activity} inherits {@link android.support.v4.app.FragmentActivity}, the
+     * If {@code activity} inherits {@link androidx.fragment.app.FragmentActivity}, the
      * {@code mediaController} will be saved in the {@code activity}. In addition to that,
      * on API 21 and later, {@link Activity#setMediaController(MediaController)} will be
      * called.</p>

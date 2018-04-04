@@ -16,10 +16,18 @@
 
 package com.android.server.wm;
 
-import android.util.ArrayMap;
-import android.util.Slog;
-import android.view.SurfaceControl;
+import static com.android.server.wm.AlphaAnimationSpecProto.DURATION;
+import static com.android.server.wm.AlphaAnimationSpecProto.FROM;
+import static com.android.server.wm.AlphaAnimationSpecProto.TO;
+import static com.android.server.wm.AnimationSpecProto.ALPHA;
+
 import android.graphics.Rect;
+import android.util.proto.ProtoOutputStream;
+import android.view.SurfaceControl;
+
+import com.android.internal.annotations.VisibleForTesting;
+
+import java.io.PrintWriter;
 
 /**
  * Utility class for use by a WindowContainer implementation to add "DimLayer" support, that is
@@ -27,75 +35,168 @@ import android.graphics.Rect;
  */
 class Dimmer {
     private static final String TAG = "WindowManager";
+    private static final int DEFAULT_DIM_ANIM_DURATION = 200;
 
-    private class DimState {
-        SurfaceControl mSurfaceControl;
+    private class DimAnimatable implements SurfaceAnimator.Animatable {
+        private final SurfaceControl mDimLayer;
+
+        private DimAnimatable(SurfaceControl dimLayer) {
+            mDimLayer = dimLayer;
+        }
+
+        @Override
+        public SurfaceControl.Transaction getPendingTransaction() {
+            return mHost.getPendingTransaction();
+        }
+
+        @Override
+        public void commitPendingTransaction() {
+            mHost.commitPendingTransaction();
+        }
+
+        @Override
+        public void onAnimationLeashCreated(SurfaceControl.Transaction t, SurfaceControl leash) {
+        }
+
+        @Override
+        public void onAnimationLeashDestroyed(SurfaceControl.Transaction t) {
+        }
+
+        @Override
+        public SurfaceControl.Builder makeAnimationLeash() {
+            return mHost.makeAnimationLeash();
+        }
+
+        @Override
+        public SurfaceControl getAnimationLeashParent() {
+            return mHost.getSurfaceControl();
+        }
+
+        @Override
+        public SurfaceControl getSurfaceControl() {
+            return mDimLayer;
+        }
+
+        @Override
+        public SurfaceControl getParentSurfaceControl() {
+            return mHost.getSurfaceControl();
+        }
+
+        @Override
+        public int getSurfaceWidth() {
+            // This will determine the size of the leash created. This should be the size of the
+            // host and not the dim layer since the dim layer may get bigger during animation. If
+            // that occurs, the leash size cannot change so we need to ensure the leash is big
+            // enough that the dim layer can grow.
+            // This works because the mHost will be a Task which has the display bounds.
+            return mHost.getSurfaceWidth();
+        }
+
+        @Override
+        public int getSurfaceHeight() {
+            // See getSurfaceWidth() above for explanation.
+            return mHost.getSurfaceHeight();
+        }
+    }
+
+    @VisibleForTesting
+    class DimState {
+        /**
+         * The layer where property changes should be invoked on.
+         */
+        SurfaceControl mDimLayer;
         boolean mDimming;
+        boolean isVisible;
+        SurfaceAnimator mSurfaceAnimator;
 
         /**
-         * Used for Dims not assosciated with a WindowContainer. See {@link Dimmer#dimAbove} for
+         * Determines whether the dim layer should animate before destroying.
+         */
+        boolean mAnimateExit = true;
+
+        /**
+         * Used for Dims not associated with a WindowContainer. See {@link Dimmer#dimAbove} for
          * details on Dim lifecycle.
          */
         boolean mDontReset;
 
-        DimState(SurfaceControl ctl) {
-            mSurfaceControl = ctl;
+        DimState(SurfaceControl dimLayer) {
+            mDimLayer = dimLayer;
             mDimming = true;
+            mSurfaceAnimator = new SurfaceAnimator(new DimAnimatable(dimLayer), () -> {
+                if (!mDimming) {
+                    mDimLayer.destroy();
+                }
+            }, mHost.mService);
         }
-    };
-
-    private ArrayMap<WindowContainer, DimState> mDimLayerUsers = new ArrayMap<>();
+    }
 
     /**
      * The {@link WindowContainer} that our Dim's are bounded to. We may be dimming on behalf of the
      * host, some controller of it, or one of the hosts children.
      */
     private WindowContainer mHost;
+    private WindowContainer mLastRequestedDimContainer;
+    @VisibleForTesting
+    DimState mDimState;
 
-    Dimmer(WindowContainer host) {
-        mHost = host;
+    private final SurfaceAnimatorStarter mSurfaceAnimatorStarter;
+
+    @VisibleForTesting
+    interface SurfaceAnimatorStarter {
+        void startAnimation(SurfaceAnimator surfaceAnimator, SurfaceControl.Transaction t,
+                AnimationAdapter anim, boolean hidden);
     }
 
-    SurfaceControl makeDimLayer() {
-        final SurfaceControl control = mHost.makeChildSurface(null)
+    Dimmer(WindowContainer host) {
+        this(host, SurfaceAnimator::startAnimation);
+    }
+
+    Dimmer(WindowContainer host, SurfaceAnimatorStarter surfaceAnimatorStarter) {
+        mHost = host;
+        mSurfaceAnimatorStarter = surfaceAnimatorStarter;
+    }
+
+    private SurfaceControl makeDimLayer() {
+        return mHost.makeChildSurface(null)
                 .setParent(mHost.getSurfaceControl())
                 .setColorLayer(true)
                 .setName("Dim Layer for - " + mHost.getName())
                 .build();
-        return control;
     }
 
     /**
-     * Retreive the DimState for a given child of the host.
+     * Retrieve the DimState, creating one if it doesn't exist.
      */
-    DimState getDimState(WindowContainer container) {
-        DimState state = mDimLayerUsers.get(container);
-        if (state == null) {
+    private DimState getDimState(WindowContainer container) {
+        if (mDimState == null) {
             final SurfaceControl ctl = makeDimLayer();
-            state = new DimState(ctl);
+            mDimState = new DimState(ctl);
             /**
              * See documentation on {@link #dimAbove} to understand lifecycle management of Dim's
              * via state resetting for Dim's with containers.
              */
             if (container == null) {
-                state.mDontReset = true;
+                mDimState.mDontReset = true;
             }
-            mDimLayerUsers.put(container, state);
         }
-        return state;
+
+        mLastRequestedDimContainer = container;
+        return mDimState;
     }
 
     private void dim(SurfaceControl.Transaction t, WindowContainer container, int relativeLayer,
             float alpha) {
         final DimState d = getDimState(container);
-        t.show(d.mSurfaceControl);
         if (container != null) {
-            t.setRelativeLayer(d.mSurfaceControl,
-                    container.getSurfaceControl(), relativeLayer);
+            // The dim method is called from WindowState.prepareSurfaces(), which is always called
+            // in the correct Z from lowest Z to highest. This ensures that the dim layer is always
+            // relative to the highest Z layer with a dim.
+            t.setRelativeLayer(d.mDimLayer, container.getSurfaceControl(), relativeLayer);
         } else {
-            t.setLayer(d.mSurfaceControl, Integer.MAX_VALUE);
+            t.setLayer(d.mDimLayer, Integer.MAX_VALUE);
         }
-        t.setAlpha(d.mSurfaceControl, alpha);
+        t.setAlpha(d.mDimLayer, alpha);
 
         d.mDimming = true;
     }
@@ -107,16 +208,18 @@ class Dimmer {
      */
     void stopDim(SurfaceControl.Transaction t) {
         DimState d = getDimState(null);
-        t.hide(d.mSurfaceControl);
+        t.hide(d.mDimLayer);
+        d.isVisible = false;
         d.mDontReset = false;
     }
+
     /**
      * Place a Dim above the entire host container. The caller is responsible for calling stopDim to
      * remove this effect. If the Dim can be assosciated with a particular child of the host
      * consider using the other variant of dimAbove which ties the Dim lifetime to the child
      * lifetime more explicitly.
      *
-     * @param t A transaction in which to apply the Dim.
+     * @param t     A transaction in which to apply the Dim.
      * @param alpha The alpha at which to Dim.
      */
     void dimAbove(SurfaceControl.Transaction t, float alpha) {
@@ -128,9 +231,9 @@ class Dimmer {
      * for each call to {@link WindowContainer#prepareSurfaces} the Dim state will be reset
      * and the child should call dimAbove again to request the Dim to continue.
      *
-     * @param t A transaction in which to apply the Dim.
+     * @param t         A transaction in which to apply the Dim.
      * @param container The container which to dim above. Should be a child of our host.
-     * @param alpha The alpha at which to Dim.
+     * @param alpha     The alpha at which to Dim.
      */
     void dimAbove(SurfaceControl.Transaction t, WindowContainer container, float alpha) {
         dim(t, container, 1, alpha);
@@ -139,9 +242,9 @@ class Dimmer {
     /**
      * Like {@link #dimAbove} but places the dim below the given container.
      *
-     * @param t A transaction in which to apply the Dim.
+     * @param t         A transaction in which to apply the Dim.
      * @param container The container which to dim below. Should be a child of our host.
-     * @param alpha The alpha at which to Dim.
+     * @param alpha     The alpha at which to Dim.
      */
 
     void dimBelow(SurfaceControl.Transaction t, WindowContainer container, float alpha) {
@@ -157,11 +260,14 @@ class Dimmer {
      * a chance to request dims to continue.
      */
     void resetDimStates() {
-        for (int i = mDimLayerUsers.size() - 1; i >= 0; i--) {
-            final DimState state = mDimLayerUsers.valueAt(i);
-            if (state.mDontReset == false) {
-                state.mDimming = false;
-            }
+        if (mDimState != null && !mDimState.mDontReset) {
+            mDimState.mDimming = false;
+        }
+    }
+
+    void dontAnimateExit() {
+        if (mDimState != null) {
+            mDimState.mAnimateExit = false;
         }
     }
 
@@ -169,27 +275,103 @@ class Dimmer {
      * Call after invoking {@link WindowContainer#prepareSurfaces} on children as
      * described in {@link #resetDimStates}.
      *
-     * @param t A transaction in which to update the dims.
+     * @param t      A transaction in which to update the dims.
      * @param bounds The bounds at which to dim.
      * @return true if any Dims were updated.
      */
     boolean updateDims(SurfaceControl.Transaction t, Rect bounds) {
-        boolean didSomething = false;
-        for (int i = mDimLayerUsers.size() - 1; i >= 0; i--) {
-            DimState state = mDimLayerUsers.valueAt(i);
-            // TODO: We want to animate the addition and removal of Dim's instead of immediately
-            // acting. When we do this we need to take care to account for the "Replacing Windows"
-            // case (and seamless dim transfer).
-            if (state.mDimming == false) {
-                mDimLayerUsers.removeAt(i);
-                state.mSurfaceControl.destroy();
-            } else {
-                didSomething = true;
-                // TODO: Once we use geometry from hierarchy this falls away.
-                t.setSize(state.mSurfaceControl, bounds.width(), bounds.height());
-                t.setPosition(state.mSurfaceControl, bounds.left, bounds.top);
-            }
+        if (mDimState == null) {
+            return false;
         }
-        return didSomething;
+
+        if (!mDimState.mDimming) {
+            if (!mDimState.mAnimateExit) {
+                t.destroy(mDimState.mDimLayer);
+            } else {
+                startDimExit(mLastRequestedDimContainer, mDimState.mSurfaceAnimator, t);
+            }
+            mDimState = null;
+            return false;
+        } else {
+            // TODO: Once we use geometry from hierarchy this falls away.
+            t.setSize(mDimState.mDimLayer, bounds.width(), bounds.height());
+            t.setPosition(mDimState.mDimLayer, bounds.left, bounds.top);
+            if (!mDimState.isVisible) {
+                mDimState.isVisible = true;
+                t.show(mDimState.mDimLayer);
+                startDimEnter(mLastRequestedDimContainer, mDimState.mSurfaceAnimator, t);
+            }
+            return true;
+        }
+    }
+
+    private void startDimEnter(WindowContainer container, SurfaceAnimator animator,
+            SurfaceControl.Transaction t) {
+        startAnim(container, animator, t, 0 /* startAlpha */, 1 /* endAlpha */);
+    }
+
+    private void startDimExit(WindowContainer container, SurfaceAnimator animator,
+            SurfaceControl.Transaction t) {
+        startAnim(container, animator, t, 1 /* startAlpha */, 0 /* endAlpha */);
+    }
+
+    private void startAnim(WindowContainer container, SurfaceAnimator animator,
+            SurfaceControl.Transaction t, float startAlpha, float endAlpha) {
+        mSurfaceAnimatorStarter.startAnimation(animator, t, new LocalAnimationAdapter(
+                new AlphaAnimationSpec(startAlpha, endAlpha, getDimDuration(container)),
+                mHost.mService.mSurfaceAnimationRunner), false /* hidden */);
+    }
+
+    private long getDimDuration(WindowContainer container) {
+        // If there's no container, then there isn't an animation occurring while dimming. Set the
+        // duration to 0 so it immediately dims to the set alpha.
+        if (container == null) {
+            return 0;
+        }
+
+        // Otherwise use the same duration as the animation on the WindowContainer
+        AnimationAdapter animationAdapter = container.mSurfaceAnimator.getAnimation();
+        return animationAdapter == null ? DEFAULT_DIM_ANIM_DURATION
+                : animationAdapter.getDurationHint();
+    }
+
+    private static class AlphaAnimationSpec implements LocalAnimationAdapter.AnimationSpec {
+        private final long mDuration;
+        private final float mFromAlpha;
+        private final float mToAlpha;
+
+        AlphaAnimationSpec(float fromAlpha, float toAlpha, long duration) {
+            mFromAlpha = fromAlpha;
+            mToAlpha = toAlpha;
+            mDuration = duration;
+        }
+
+        @Override
+        public long getDuration() {
+            return mDuration;
+        }
+
+        @Override
+        public void apply(SurfaceControl.Transaction t, SurfaceControl sc, long currentPlayTime) {
+            float alpha = ((float) currentPlayTime / getDuration()) * (mToAlpha - mFromAlpha)
+                    + mFromAlpha;
+            t.setAlpha(sc, alpha);
+        }
+
+        @Override
+        public void dump(PrintWriter pw, String prefix) {
+            pw.print(prefix); pw.print("from="); pw.print(mFromAlpha);
+            pw.print(" to="); pw.print(mToAlpha);
+            pw.print(" duration="); pw.println(mDuration);
+        }
+
+        @Override
+        public void writeToProtoInner(ProtoOutputStream proto) {
+            final long token = proto.start(ALPHA);
+            proto.write(FROM, mFromAlpha);
+            proto.write(TO, mToAlpha);
+            proto.write(DURATION, mDuration);
+            proto.end(token);
+        }
     }
 }

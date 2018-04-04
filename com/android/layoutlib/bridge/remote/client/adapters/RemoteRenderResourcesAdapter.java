@@ -17,6 +17,7 @@
 package com.android.layoutlib.bridge.remote.client.adapters;
 
 import com.android.ide.common.rendering.api.RenderResources;
+import com.android.ide.common.rendering.api.ResourceReference;
 import com.android.ide.common.rendering.api.ResourceValue;
 import com.android.ide.common.rendering.api.StyleResourceValue;
 import com.android.layout.remote.api.RemoteRenderResources;
@@ -81,19 +82,13 @@ public class RemoteRenderResourcesAdapter implements RemoteRenderResources {
     }
 
     @Override
-    public ResourceValue findItemInTheme(String attrName, boolean isFrameworkAttr) {
-        return mDelegate.findItemInTheme(attrName, isFrameworkAttr);
+    public ResourceValue findItemInTheme(ResourceReference attr) {
+        return mDelegate.findItemInTheme(attr);
     }
 
     @Override
-    public ResourceValue findItemInStyle(StyleResourceValue style, String attrName,
-            boolean isFrameworkAttr) {
-        return mDelegate.findItemInStyle(style, attrName, isFrameworkAttr);
-    }
-
-    @Override
-    public ResourceValue findResValue(String reference, boolean forceFrameworkOnly) {
-        return mDelegate.findResValue(reference, forceFrameworkOnly);
+    public ResourceValue findItemInStyle(StyleResourceValue style, ResourceReference attr) {
+        return mDelegate.findItemInStyle(style, attr);
     }
 
     @Override
@@ -103,7 +98,7 @@ public class RemoteRenderResourcesAdapter implements RemoteRenderResources {
 
     @Override
     public ResourceValue resolveValue(ResourceType type, String name, String value,
-            boolean isFrameworkValue) throws RemoteException {
+            boolean isFrameworkValue) {
         return mDelegate.resolveValue(type, name, value, isFrameworkValue);
     }
 
@@ -115,5 +110,15 @@ public class RemoteRenderResourcesAdapter implements RemoteRenderResources {
     @Override
     public StyleResourceValue getStyle(String styleName, boolean isFramework) {
         return mDelegate.getStyle(styleName, isFramework);
+    }
+
+    @Override
+    public ResourceValue dereference(ResourceValue resourceValue) {
+        return mDelegate.dereference(resourceValue);
+    }
+
+    @Override
+    public ResourceValue getUnresolvedResource(ResourceReference reference) {
+        return mDelegate.getUnresolvedResource(reference);
     }
 }

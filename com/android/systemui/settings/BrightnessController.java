@@ -31,6 +31,7 @@ import android.os.PowerManager;
 import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.os.UserHandle;
+import android.os.UserManager;
 import android.provider.Settings;
 import android.service.vr.IVrManager;
 import android.service.vr.IVrStateCallbacks;
@@ -39,6 +40,7 @@ import android.widget.ImageView;
 
 import com.android.internal.logging.MetricsLogger;
 import com.android.internal.logging.nano.MetricsProto.MetricsEvent;
+import com.android.settingslib.RestrictedLockUtils;
 import com.android.systemui.Dependency;
 
 import java.util.ArrayList;
@@ -79,7 +81,7 @@ public class BrightnessController implements ToggleSlider.Listener {
     private volatile boolean mIsVrModeEnabled;
     private boolean mListening;
     private boolean mExternalChange;
-    private boolean mControlInitialized;
+    private boolean mControlValueInitialized;
 
     private ValueAnimator mSliderAnimator;
 
@@ -335,6 +337,7 @@ public class BrightnessController implements ToggleSlider.Listener {
 
         mBackgroundHandler.post(mStopListeningRunnable);
         mListening = false;
+        mControlValueInitialized = false;
     }
 
     @Override
@@ -365,7 +368,9 @@ public class BrightnessController implements ToggleSlider.Listener {
         } else {
             final int val = value + mMinimumBacklight;
             if (stopTracking) {
-                MetricsLogger.action(mContext, MetricsEvent.ACTION_BRIGHTNESS, val);
+                final int metric = mAutomatic ?
+                        MetricsEvent.ACTION_BRIGHTNESS_AUTO : MetricsEvent.ACTION_BRIGHTNESS;
+                MetricsLogger.action(mContext, metric, val);
             }
             setBrightness(val);
             if (!tracking) {
@@ -382,6 +387,18 @@ public class BrightnessController implements ToggleSlider.Listener {
         for (BrightnessStateChangeCallback cb : mChangeCallbacks) {
             cb.onBrightnessLevelChanged();
         }
+    }
+
+    public void checkRestrictionAndSetEnabled() {
+        mBackgroundHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                ((ToggleSliderView)mControl).setEnforcedAdmin(
+                        RestrictedLockUtils.checkIfRestrictionEnforced(mContext,
+                                UserManager.DISALLOW_CONFIG_BRIGHTNESS,
+                                mUserTracker.getCurrentUserId()));
+            }
+        });
     }
 
     private void setMode(int mode) {
@@ -414,10 +431,10 @@ public class BrightnessController implements ToggleSlider.Listener {
     }
 
     private void animateSliderTo(int target) {
-        if (!mControlInitialized) {
+        if (!mControlValueInitialized) {
             // Don't animate the first value since it's default state isn't meaningful to users.
             mControl.setValue(target);
-            mControlInitialized = true;
+            mControlValueInitialized = true;
         }
         if (mSliderAnimator != null && mSliderAnimator.isStarted()) {
             mSliderAnimator.cancel();

@@ -41,6 +41,10 @@ import android.os.AsyncTask;
 import android.os.Environment;
 import android.os.UserHandle;
 import android.os.UserManager;
+import android.service.usb.UsbProfileGroupSettingsManagerProto;
+import android.service.usb.UsbSettingsAccessoryPreferenceProto;
+import android.service.usb.UsbSettingsDevicePreferenceProto;
+import android.service.usb.UserPackageProto;
 import android.util.AtomicFile;
 import android.util.Log;
 import android.util.Slog;
@@ -52,8 +56,8 @@ import com.android.internal.annotations.GuardedBy;
 import com.android.internal.annotations.Immutable;
 import com.android.internal.content.PackageMonitor;
 import com.android.internal.util.FastXmlSerializer;
-import com.android.internal.util.IndentingPrintWriter;
 import com.android.internal.util.XmlUtils;
+import com.android.internal.util.dump.DualDumpOutputStream;
 
 import libcore.io.IoUtils;
 
@@ -154,6 +158,15 @@ class UsbProfileGroupSettingsManager {
         public String toString() {
             return user.getIdentifier() + "/" + packageName;
         }
+
+        public void dump(DualDumpOutputStream dump, String idName, long id) {
+            long token = dump.start(idName, id);
+
+            dump.write("user_id", UserPackageProto.USER_ID, user.getIdentifier());
+            dump.write("package_name", UserPackageProto.PACKAGE_NAME, packageName);
+
+            dump.end(token);
+        }
     }
 
     private class MyPackageMonitor extends PackageMonitor {
@@ -208,7 +221,7 @@ class UsbProfileGroupSettingsManager {
         mParentUser = user;
         mSettingsFile = new AtomicFile(new File(
                 Environment.getUserSystemDirectory(user.getIdentifier()),
-                "usb_device_manager.xml"));
+                "usb_device_manager.xml"), "usb-state");
 
         mDisablePermissionDialogs = context.getResources().getBoolean(
                 com.android.internal.R.bool.config_disableUsbPermissionDialogs);
@@ -301,6 +314,7 @@ class UsbProfileGroupSettingsManager {
      * Upgrade any single-user settings from {@link #sSingleUserSettingsFile}.
      * Should only by called by owner.
      */
+    @GuardedBy("mLock")
     private void upgradeSingleUserLocked() {
         if (sSingleUserSettingsFile.exists()) {
             mDevicePreferenceMap.clear();
@@ -334,6 +348,7 @@ class UsbProfileGroupSettingsManager {
         }
     }
 
+    @GuardedBy("mLock")
     private void readSettingsLocked() {
         if (DEBUG) Slog.v(TAG, "readSettingsLocked()");
 
@@ -373,6 +388,7 @@ class UsbProfileGroupSettingsManager {
      * <p>In the uncommon case that the system crashes in between the scheduling and the write the
      * update is lost.</p>
      */
+    @GuardedBy("mLock")
     private void scheduleWriteSettingsLocked() {
         if (mIsWriteSettingsScheduled) {
             return;
@@ -856,6 +872,7 @@ class UsbProfileGroupSettingsManager {
         return null;
     }
 
+    @GuardedBy("mLock")
     private boolean clearCompatibleMatchesLocked(@NonNull UserPackage userPackage,
             @NonNull DeviceFilter filter) {
         ArrayList<DeviceFilter> keysToRemove = new ArrayList<>();
@@ -879,6 +896,7 @@ class UsbProfileGroupSettingsManager {
         return !keysToRemove.isEmpty();
     }
 
+    @GuardedBy("mLock")
     private boolean clearCompatibleMatchesLocked(@NonNull UserPackage userPackage,
             @NonNull AccessoryFilter filter) {
         ArrayList<AccessoryFilter> keysToRemove = new ArrayList<>();
@@ -902,6 +920,7 @@ class UsbProfileGroupSettingsManager {
         return !keysToRemove.isEmpty();
     }
 
+    @GuardedBy("mLock")
     private boolean handlePackageAddedLocked(UserPackage userPackage, ActivityInfo aInfo,
             String metaDataName) {
         XmlResourceParser parser = null;
@@ -1109,17 +1128,38 @@ class UsbProfileGroupSettingsManager {
         }
     }
 
-    public void dump(IndentingPrintWriter pw) {
+    public void dump(@NonNull DualDumpOutputStream dump, @NonNull String idName, long id) {
+        long token = dump.start(idName, id);
+
         synchronized (mLock) {
-            pw.println("Device preferences:");
+            dump.write("parent_user_id", UsbProfileGroupSettingsManagerProto.PARENT_USER_ID,
+                    mParentUser.getIdentifier());
+
             for (DeviceFilter filter : mDevicePreferenceMap.keySet()) {
-                pw.println("  " + filter + ": " + mDevicePreferenceMap.get(filter));
+                long devicePrefToken = dump.start("device_preferences",
+                        UsbProfileGroupSettingsManagerProto.DEVICE_PREFERENCES);
+
+                filter.dump(dump, "filter", UsbSettingsDevicePreferenceProto.FILTER);
+
+                mDevicePreferenceMap.get(filter).dump(dump, "user_package",
+                        UsbSettingsDevicePreferenceProto.USER_PACKAGE);
+
+                dump.end(devicePrefToken);
             }
-            pw.println("Accessory preferences:");
             for (AccessoryFilter filter : mAccessoryPreferenceMap.keySet()) {
-                pw.println("  " + filter + ": " + mAccessoryPreferenceMap.get(filter));
+                long accessoryPrefToken = dump.start("accessory_preferences",
+                        UsbProfileGroupSettingsManagerProto.ACCESSORY_PREFERENCES);
+
+                filter.dump(dump, "filter", UsbSettingsAccessoryPreferenceProto.FILTER);
+
+                mAccessoryPreferenceMap.get(filter).dump(dump, "user_package",
+                        UsbSettingsAccessoryPreferenceProto.USER_PACKAGE);
+
+                dump.end(accessoryPrefToken);
             }
         }
+
+        dump.end(token);
     }
 
     private static Intent createDeviceAttachedIntent(UsbDevice device) {

@@ -35,9 +35,9 @@ import static com.android.server.am.ActivityManagerDebugConfig.DEBUG_STACK;
 import static com.android.server.am.ActivityManagerDebugConfig.POSTFIX_STACK;
 import static com.android.server.am.ActivityManagerDebugConfig.TAG_AM;
 import static com.android.server.am.ActivityManagerDebugConfig.TAG_WITH_CLASS_NAME;
-import static com.android.server.am.proto.ActivityDisplayProto.CONFIGURATION_CONTAINER;
-import static com.android.server.am.proto.ActivityDisplayProto.STACKS;
-import static com.android.server.am.proto.ActivityDisplayProto.ID;
+import static com.android.server.am.ActivityDisplayProto.CONFIGURATION_CONTAINER;
+import static com.android.server.am.ActivityDisplayProto.STACKS;
+import static com.android.server.am.ActivityDisplayProto.ID;
 
 import android.annotation.Nullable;
 import android.app.ActivityManagerInternal;
@@ -106,21 +106,21 @@ class ActivityDisplay extends ConfigurationContainer<ActivityStack>
 
     private DisplayWindowController mWindowContainerController;
 
+    @VisibleForTesting
     ActivityDisplay(ActivityStackSupervisor supervisor, int displayId) {
+        this(supervisor, supervisor.mDisplayManager.getDisplay(displayId));
+    }
+
+    ActivityDisplay(ActivityStackSupervisor supervisor, Display display) {
         mSupervisor = supervisor;
-        mDisplayId = displayId;
-        final Display display = supervisor.mDisplayManager.getDisplay(displayId);
-        if (display == null) {
-            throw new IllegalStateException("Display does not exist displayId=" + displayId);
-        }
+        mDisplayId = display.getDisplayId();
         mDisplay = display;
         mWindowContainerController = createWindowContainerController();
-
         updateBounds();
     }
 
     protected DisplayWindowController createWindowContainerController() {
-        return new DisplayWindowController(mDisplayId, this);
+        return new DisplayWindowController(mDisplay, this);
     }
 
     void updateBounds() {
@@ -158,6 +158,8 @@ class ActivityDisplay extends ConfigurationContainer<ActivityStack>
     }
 
     private void positionChildAt(ActivityStack stack, int position) {
+        // TODO: Keep in sync with WindowContainer.positionChildAt(), once we change that to adjust
+        //       the position internally, also update the logic here
         mStacks.remove(stack);
         final int insertPosition = getTopInsertPosition(stack, position);
         mStacks.add(insertPosition, stack);
@@ -424,7 +426,7 @@ class ActivityDisplay extends ConfigurationContainer<ActivityStack>
             }
         } finally {
             final ActivityStack topFullscreenStack =
-                    getStack(WINDOWING_MODE_FULLSCREEN, ACTIVITY_TYPE_STANDARD);
+                    getTopStackInWindowingMode(WINDOWING_MODE_FULLSCREEN);
             if (topFullscreenStack != null && mHomeStack != null && !isTopStack(mHomeStack)) {
                 // Whenever split-screen is dismissed we want the home stack directly behind the
                 // current top fullscreen stack so it shows up when the top stack is finished.
@@ -580,6 +582,16 @@ class ActivityDisplay extends ConfigurationContainer<ActivityStack>
         return false;
     }
 
+    ActivityStack getTopStackInWindowingMode(int windowingMode) {
+        for (int i = mStacks.size() - 1; i >= 0; --i) {
+            final ActivityStack current = mStacks.get(i);
+            if (windowingMode == current.getWindowingMode()) {
+                return current;
+            }
+        }
+        return null;
+    }
+
     int getIndexOf(ActivityStack stack) {
         return mStacks.indexOf(stack);
     }
@@ -647,6 +659,30 @@ class ActivityDisplay extends ConfigurationContainer<ActivityStack>
         return false;
     }
 
+    void remove() {
+        final boolean destroyContentOnRemoval = shouldDestroyContentOnRemove();
+        while (getChildCount() > 0) {
+            final ActivityStack stack = getChildAt(0);
+            if (destroyContentOnRemoval) {
+                // Override the stack configuration to make it equal to the current applied one, so
+                // that we don't accidentally report configuration change to activities that are
+                // going to be finished.
+                stack.onOverrideConfigurationChanged(stack.getConfiguration());
+                mSupervisor.moveStackToDisplayLocked(stack.mStackId, DEFAULT_DISPLAY,
+                        false /* onTop */);
+                stack.finishAllActivitiesLocked(true /* immediately */);
+            } else {
+                // Moving all tasks to fullscreen stack, because it's guaranteed to be
+                // a valid launch stack for all activities. This way the task history from
+                // external display will be preserved on primary after move.
+                mSupervisor.moveTasksToFullscreenStackLocked(stack, true /* onTop */);
+            }
+        }
+
+        mWindowContainerController.removeContainer();
+        mWindowContainerController = null;
+    }
+
     /** Update and get all UIDs that are present on the display and have access to it. */
     IntArray getPresentUIDs() {
         mDisplayAccessUIDs.clear();
@@ -656,7 +692,7 @@ class ActivityDisplay extends ConfigurationContainer<ActivityStack>
         return mDisplayAccessUIDs;
     }
 
-    boolean shouldDestroyContentOnRemove() {
+    private boolean shouldDestroyContentOnRemove() {
         return mDisplay.getRemoveMode() == REMOVE_MODE_DESTROY_CONTENT;
     }
 
@@ -684,8 +720,8 @@ class ActivityDisplay extends ConfigurationContainer<ActivityStack>
      * used in conjunction with {@link #moveHomeStackBehindStack}.
      */
     void moveHomeStackBehindBottomMostVisibleStack() {
-        if (mHomeStack == null) {
-            // Skip if there is no home stack
+        if (mHomeStack == null || mHomeStack.shouldBeVisible(null)) {
+            // Skip if there is no home stack, or if it is already visible
             return;
         }
 
@@ -716,11 +752,19 @@ class ActivityDisplay extends ConfigurationContainer<ActivityStack>
      * conjunction with {@link #moveHomeStackBehindBottomMostVisibleStack}.
      */
     void moveHomeStackBehindStack(ActivityStack behindStack) {
-        if (behindStack == null) {
+        if (behindStack == null || behindStack == mHomeStack) {
             return;
         }
 
-        positionChildAt(mHomeStack, Math.max(0, mStacks.indexOf(behindStack) - 1));
+        // Note that positionChildAt will first remove the given stack before inserting into the
+        // list, so we need to adjust the insertion index to account for the removed index
+        // TODO: Remove this logic when WindowContainer.positionChildAt() is updated to adjust the
+        //       position internally
+        final int homeStackIndex = mStacks.indexOf(mHomeStack);
+        final int behindStackIndex = mStacks.indexOf(behindStack);
+        final int insertIndex = homeStackIndex <= behindStackIndex
+                ? behindStackIndex - 1 : behindStackIndex;
+        positionChildAt(mHomeStack, Math.max(0, insertIndex));
     }
 
     boolean isSleeping() {

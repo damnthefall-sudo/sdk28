@@ -40,9 +40,11 @@ import android.view.ThreadedRenderer;
 import android.view.WindowManager.LayoutParams;
 
 import com.android.internal.annotations.VisibleForTesting;
+import com.android.internal.graphics.ColorUtils;
 import com.android.server.policy.WindowManagerPolicy.ScreenOffListener;
 import com.android.server.policy.WindowManagerPolicy.StartingSurface;
 import com.android.server.wm.TaskSnapshotSurface.SystemBarBackgroundPainter;
+import com.android.server.wm.utils.InsetUtils;
 
 import com.google.android.collect.Sets;
 
@@ -90,6 +92,7 @@ class TaskSnapshotController {
     private final TaskSnapshotPersister mPersister = new TaskSnapshotPersister(
             Environment::getDataSystemCeDirectory);
     private final TaskSnapshotLoader mLoader = new TaskSnapshotLoader(mPersister);
+    private final ArraySet<Task> mSkipClosingAppSnapshotTasks = new ArraySet<>();
     private final ArraySet<Task> mTmpTasks = new ArraySet<>();
     private final Handler mHandler = new Handler();
 
@@ -147,10 +150,20 @@ class TaskSnapshotController {
         // either closing or hidden.
         getClosingTasks(closingApps, mTmpTasks);
         snapshotTasks(mTmpTasks);
-
+        mSkipClosingAppSnapshotTasks.clear();
     }
 
-    private void snapshotTasks(ArraySet<Task> tasks) {
+    /**
+     * Adds the given {@param tasks} to the list of tasks which should not have their snapshots
+     * taken upon the next processing of the set of closing apps. The caller is responsible for
+     * calling {@link #snapshotTasks} to ensure that the task has an up-to-date snapshot.
+     */
+    @VisibleForTesting
+    void addSkipClosingAppSnapshotTasks(ArraySet<Task> tasks) {
+        mSkipClosingAppSnapshotTasks.addAll(tasks);
+    }
+
+    void snapshotTasks(ArraySet<Task> tasks) {
         for (int i = tasks.size() - 1; i >= 0; i--) {
             final Task task = tasks.valueAt(i);
             final int mode = getSnapshotMode(task);
@@ -223,6 +236,28 @@ class TaskSnapshotController {
             return null;
         }
 
+        if (top.hasCommittedReparentToAnimationLeash()) {
+            if (DEBUG_SCREENSHOT) {
+                Slog.w(TAG_WM, "Failed to take screenshot. App is animating " + top);
+            }
+            return null;
+        }
+
+        final boolean hasVisibleChild = top.forAllWindows(
+                // Ensure at least one window for the top app is visible before attempting to take
+                // a screenshot. Visible here means that the WSA surface is shown and has an alpha
+                // greater than 0.
+                ws -> (ws.mAppToken == null || ws.mAppToken.isSurfaceShowing())
+                        && ws.mWinAnimator != null && ws.mWinAnimator.getShown()
+                        && ws.mWinAnimator.mLastAlpha > 0f, true);
+
+        if (!hasVisibleChild) {
+            if (DEBUG_SCREENSHOT) {
+                Slog.w(TAG_WM, "Failed to take screenshot. No visible windows for " + task);
+            }
+            return null;
+        }
+
         final boolean isLowRamDevice = ActivityManager.isLowRamDeviceStatic();
         final float scaleFraction = isLowRamDevice ? REDUCED_SCALE : 1f;
         task.getBounds(mTmpRect);
@@ -233,31 +268,33 @@ class TaskSnapshotController {
 
         if (buffer == null || buffer.getWidth() <= 1 || buffer.getHeight() <= 1) {
             if (DEBUG_SCREENSHOT) {
-                Slog.w(TAG_WM, "Failed to take screenshot");
+                Slog.w(TAG_WM, "Failed to take screenshot for " + task);
             }
             return null;
         }
         return new TaskSnapshot(buffer, top.getConfiguration().orientation,
-                getInsetsFromTaskBounds(mainWindow, task),
-                isLowRamDevice /* reduced */, scaleFraction /* scale */);
+                getInsets(mainWindow),
+                isLowRamDevice /* reduced */, scaleFraction /* scale */,
+                true /* isRealSnapshot */);
     }
 
     private boolean shouldDisableSnapshots() {
         return mIsRunningOnWear || mIsRunningOnTv || mIsRunningOnIoT;
     }
 
-    private Rect getInsetsFromTaskBounds(WindowState state, Task task) {
-        final Rect r = new Rect();
-        r.set(state.getContentFrameLw());
-        r.intersectUnchecked(state.getStableFrameLw());
+    private Rect getInsets(WindowState state) {
+        // XXX(b/72757033): These are insets relative to the window frame, but we're really
+        // interested in the insets relative to the task bounds.
+        final Rect insets = minRect(state.mContentInsets, state.mStableInsets);
+        InsetUtils.addInsets(insets, state.mAppToken.getLetterboxInsets());
+        return insets;
+    }
 
-        final Rect taskBounds = task.getBounds();
-
-        r.set(Math.max(0, r.left - taskBounds.left),
-                Math.max(0, r.top - taskBounds.top),
-                Math.max(0, taskBounds.right - r.right),
-                Math.max(0, taskBounds.bottom - r.bottom));
-        return r;
+    private Rect minRect(Rect rect1, Rect rect2) {
+        return new Rect(Math.min(rect1.left, rect2.left),
+                Math.min(rect1.top, rect2.top),
+                Math.min(rect1.right, rect2.right),
+                Math.min(rect1.bottom, rect2.bottom));
     }
 
     /**
@@ -272,7 +309,7 @@ class TaskSnapshotController {
 
             // If the task of the app is not visible anymore, it means no other app in that task
             // is opening. Thus, the task is closing.
-            if (task != null && !task.isVisible()) {
+            if (task != null && !task.isVisible() && !mSkipClosingAppSnapshotTasks.contains(task)) {
                 outClosingTasks.add(task);
             }
         }
@@ -303,7 +340,8 @@ class TaskSnapshotController {
         if (mainWindow == null) {
             return null;
         }
-        final int color = task.getTaskDescription().getBackgroundColor();
+        final int color = ColorUtils.setAlphaComponent(
+                task.getTaskDescription().getBackgroundColor(), 255);
         final int statusBarColor = task.getTaskDescription().getStatusBarColor();
         final int navigationBarColor = task.getTaskDescription().getNavigationBarColor();
         final LayoutParams attrs = mainWindow.getAttrs();
@@ -326,7 +364,8 @@ class TaskSnapshotController {
         }
         return new TaskSnapshot(hwBitmap.createGraphicBufferHandle(),
                 topChild.getConfiguration().orientation, mainWindow.mStableInsets,
-                ActivityManager.isLowRamDeviceStatic() /* reduced */, 1.0f /* scale */);
+                ActivityManager.isLowRamDeviceStatic() /* reduced */, 1.0f /* scale */,
+                false /* isRealSnapshot */);
     }
 
     /**

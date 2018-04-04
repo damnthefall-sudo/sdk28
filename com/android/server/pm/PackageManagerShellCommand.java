@@ -16,6 +16,12 @@
 
 package com.android.server.pm;
 
+import static android.content.pm.PackageManager.INTENT_FILTER_DOMAIN_VERIFICATION_STATUS_ALWAYS;
+import static android.content.pm.PackageManager.INTENT_FILTER_DOMAIN_VERIFICATION_STATUS_ALWAYS_ASK;
+import static android.content.pm.PackageManager.INTENT_FILTER_DOMAIN_VERIFICATION_STATUS_ASK;
+import static android.content.pm.PackageManager.INTENT_FILTER_DOMAIN_VERIFICATION_STATUS_NEVER;
+import static android.content.pm.PackageManager.INTENT_FILTER_DOMAIN_VERIFICATION_STATUS_UNDEFINED;
+
 import android.accounts.IAccountManager;
 import android.app.ActivityManager;
 import android.app.ActivityManagerInternal;
@@ -28,12 +34,15 @@ import android.content.IntentSender;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.FeatureInfo;
 import android.content.pm.IPackageDataObserver;
+import android.content.pm.IPackageInstaller;
 import android.content.pm.IPackageManager;
 import android.content.pm.InstrumentationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageInstaller;
+import android.content.pm.PackageInstaller.SessionParams;
 import android.content.pm.PackageItemInfo;
 import android.content.pm.PackageManager;
+import android.content.pm.PackageManager.NameNotFoundException;
 import android.content.pm.PackageParser;
 import android.content.pm.PackageParser.ApkLite;
 import android.content.pm.PackageParser.PackageLite;
@@ -41,9 +50,6 @@ import android.content.pm.PackageParser.PackageParserException;
 import android.content.pm.ParceledListSlice;
 import android.content.pm.PermissionGroupInfo;
 import android.content.pm.PermissionInfo;
-import android.content.pm.PackageInstaller.SessionInfo;
-import android.content.pm.PackageInstaller.SessionParams;
-import android.content.pm.PackageManager.NameNotFoundException;
 import android.content.pm.ResolveInfo;
 import android.content.pm.UserInfo;
 import android.content.pm.VersionedPackage;
@@ -51,12 +57,14 @@ import android.content.pm.dex.DexMetadataHelper;
 import android.content.res.AssetManager;
 import android.content.res.Resources;
 import android.net.Uri;
+import android.os.BaseBundle;
 import android.os.Binder;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.os.IUserManager;
 import android.os.ParcelFileDescriptor;
+import android.os.PersistableBundle;
 import android.os.Process;
 import android.os.RemoteException;
 import android.os.ServiceManager;
@@ -73,7 +81,6 @@ import android.util.PrintWriterPrinter;
 
 import com.android.internal.content.PackageHelper;
 import com.android.internal.util.ArrayUtils;
-import com.android.internal.util.SizedInputStream;
 import com.android.server.LocalServices;
 import com.android.server.SystemConfig;
 
@@ -81,25 +88,13 @@ import dalvik.system.DexFile;
 
 import libcore.io.IoUtils;
 
+import java.io.FileDescriptor;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.net.URISyntaxException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Map;
-import java.util.WeakHashMap;
+import java.util.*;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.TimeUnit;
-
-import static android.content.pm.PackageManager.INTENT_FILTER_DOMAIN_VERIFICATION_STATUS_ALWAYS;
-import static android.content.pm.PackageManager.INTENT_FILTER_DOMAIN_VERIFICATION_STATUS_ALWAYS_ASK;
-import static android.content.pm.PackageManager.INTENT_FILTER_DOMAIN_VERIFICATION_STATUS_ASK;
-import static android.content.pm.PackageManager.INTENT_FILTER_DOMAIN_VERIFICATION_STATUS_NEVER;
-import static android.content.pm.PackageManager.INTENT_FILTER_DOMAIN_VERIFICATION_STATUS_UNDEFINED;
 
 class PackageManagerShellCommand extends ShellCommand {
     /** Path for streaming APK content */
@@ -238,6 +233,8 @@ class PackageManagerShellCommand extends ShellCommand {
                     return runSetHarmfulAppWarning();
                 case "get-harmful-app-warning":
                     return runGetHarmfulAppWarning();
+                case "uninstall-system-updates":
+                    return uninstallSystemUpdates();
                 default: {
                     String nextArg = getNextArg();
                     if (nextArg == null) {
@@ -258,6 +255,47 @@ class PackageManagerShellCommand extends ShellCommand {
             pw.println("Remote exception: " + e);
         }
         return -1;
+    }
+
+    private int uninstallSystemUpdates() {
+        final PrintWriter pw = getOutPrintWriter();
+        List<String> failedUninstalls = new LinkedList<>();
+        try {
+            final ParceledListSlice<ApplicationInfo> packages =
+                    mInterface.getInstalledApplications(
+                            PackageManager.MATCH_SYSTEM_ONLY, UserHandle.USER_SYSTEM);
+            final IPackageInstaller installer = mInterface.getPackageInstaller();
+            List<ApplicationInfo> list = packages.getList();
+            for (ApplicationInfo info : list) {
+                if (info.isUpdatedSystemApp()) {
+                    pw.println("Uninstalling updates to " + info.packageName + "...");
+                    final LocalIntentReceiver receiver = new LocalIntentReceiver();
+                    installer.uninstall(new VersionedPackage(info.packageName,
+                                    info.versionCode), null /*callerPackageName*/, 0 /* flags */,
+                            receiver.getIntentSender(), 0);
+
+                    final Intent result = receiver.getResult();
+                    final int status = result.getIntExtra(PackageInstaller.EXTRA_STATUS,
+                            PackageInstaller.STATUS_FAILURE);
+                    if (status != PackageInstaller.STATUS_SUCCESS) {
+                        failedUninstalls.add(info.packageName);
+                    }
+                }
+            }
+        } catch (RemoteException e) {
+            pw.println("Failure ["
+                    + e.getClass().getName() + " - "
+                    + e.getMessage() + "]");
+            return 0;
+        }
+        if (!failedUninstalls.isEmpty()) {
+            pw.println("Failure [Couldn't uninstall packages: "
+                    + TextUtils.join(", ", failedUninstalls)
+                    + "]");
+            return 0;
+        }
+        pw.println("Success");
+        return 1;
     }
 
     private void setParamsSize(InstallParams params, String inPath) {
@@ -1467,11 +1505,38 @@ class PackageManagerShellCommand extends ShellCommand {
     private int runSuspend(boolean suspendedState) {
         final PrintWriter pw = getOutPrintWriter();
         int userId = UserHandle.USER_SYSTEM;
+        final PersistableBundle appExtras = new PersistableBundle();
+        final PersistableBundle launcherExtras = new PersistableBundle();
         String opt;
         while ((opt = getNextOption()) != null) {
             switch (opt) {
                 case "--user":
                     userId = UserHandle.parseUserArg(getNextArgRequired());
+                    break;
+                case "--ael":
+                case "--aes":
+                case "--aed":
+                case "--lel":
+                case "--les":
+                case "--led":
+                    final String key = getNextArgRequired();
+                    final String val = getNextArgRequired();
+                    if (!suspendedState) {
+                        break;
+                    }
+                    final PersistableBundle bundleToInsert =
+                            opt.startsWith("--a") ? appExtras : launcherExtras;
+                    switch (opt.charAt(4)) {
+                        case 'l':
+                            bundleToInsert.putLong(key, Long.valueOf(val));
+                            break;
+                        case 'd':
+                            bundleToInsert.putDouble(key, Double.valueOf(val));
+                            break;
+                        case 's':
+                            bundleToInsert.putString(key, val);
+                            break;
+                    }
                     break;
                 default:
                     pw.println("Error: Unknown option: " + opt);
@@ -1479,15 +1544,16 @@ class PackageManagerShellCommand extends ShellCommand {
             }
         }
 
-        String packageName = getNextArg();
+        final String packageName = getNextArg();
         if (packageName == null) {
             pw.println("Error: package name not specified");
             return 1;
         }
-
+        final String callingPackage =
+                (Binder.getCallingUid() == Process.ROOT_UID) ? "root" : "com.android.shell";
         try {
             mInterface.setPackagesSuspendedAsUser(new String[]{packageName}, suspendedState,
-                    userId);
+                    appExtras, launcherExtras, callingPackage, userId);
             pw.println("Package " + packageName + " new suspended state: "
                     + mInterface.isPackageSuspendedForUser(packageName, userId));
             return 0;
@@ -1555,6 +1621,15 @@ class PackageManagerShellCommand extends ShellCommand {
         }
     }
 
+    private boolean isProductApp(String pkg) {
+        try {
+            final PackageInfo info = mInterface.getPackageInfo(pkg, 0, UserHandle.USER_SYSTEM);
+            return info != null && info.applicationInfo.isProduct();
+        } catch (RemoteException e) {
+            return false;
+        }
+    }
+
     private int runGetPrivappPermissions() {
         final String pkg = getNextArg();
         if (pkg == null) {
@@ -1562,9 +1637,14 @@ class PackageManagerShellCommand extends ShellCommand {
             return 1;
         }
 
-        ArraySet<String> privAppPermissions = isVendorApp(pkg) ?
-                SystemConfig.getInstance().getVendorPrivAppPermissions(pkg)
-                    : SystemConfig.getInstance().getPrivAppPermissions(pkg);
+        ArraySet<String> privAppPermissions = null;
+        if (isVendorApp(pkg)) {
+            privAppPermissions = SystemConfig.getInstance().getVendorPrivAppPermissions(pkg);
+        } else if (isProductApp(pkg)) {
+            privAppPermissions = SystemConfig.getInstance().getProductPrivAppPermissions(pkg);
+        } else {
+            privAppPermissions = SystemConfig.getInstance().getPrivAppPermissions(pkg);
+        }
 
         getOutPrintWriter().println(privAppPermissions == null
                 ? "{}" : privAppPermissions.toString());
@@ -1578,9 +1658,14 @@ class PackageManagerShellCommand extends ShellCommand {
             return 1;
         }
 
-        ArraySet<String> privAppPermissions = isVendorApp(pkg) ?
-                SystemConfig.getInstance().getVendorPrivAppDenyPermissions(pkg)
-                    : SystemConfig.getInstance().getPrivAppDenyPermissions(pkg);
+        ArraySet<String> privAppPermissions = null;
+        if (isVendorApp(pkg)) {
+            privAppPermissions = SystemConfig.getInstance().getVendorPrivAppDenyPermissions(pkg);
+        } else if (isProductApp(pkg)) {
+            privAppPermissions = SystemConfig.getInstance().getProductPrivAppDenyPermissions(pkg);
+        } else {
+            privAppPermissions = SystemConfig.getInstance().getPrivAppDenyPermissions(pkg);
+        }
 
         getOutPrintWriter().println(privAppPermissions == null
                 ? "{}" : privAppPermissions.toString());
@@ -2194,7 +2279,7 @@ class PackageManagerShellCommand extends ShellCommand {
         final PrintWriter pw = getOutPrintWriter();
         final ParcelFileDescriptor fd;
         if (STDIN_PATH.equals(inPath)) {
-            fd = null;
+            fd = new ParcelFileDescriptor(getInFileDescriptor());
         } else if (inPath != null) {
             fd = openFileForSystem(inPath, "r");
             if (fd == null) {
@@ -2206,53 +2291,27 @@ class PackageManagerShellCommand extends ShellCommand {
                 return -1;
             }
         } else {
-            fd = null;
+            fd = new ParcelFileDescriptor(getInFileDescriptor());
         }
         if (sizeBytes <= 0) {
             getErrPrintWriter().println("Error: must specify a APK size");
             return 1;
         }
 
-        final SessionInfo info = mInterface.getPackageInstaller().getSessionInfo(sessionId);
-
         PackageInstaller.Session session = null;
-        InputStream in = null;
-        OutputStream out = null;
         try {
             session = new PackageInstaller.Session(
                     mInterface.getPackageInstaller().openSession(sessionId));
-
-            if (fd != null) {
-                in = new ParcelFileDescriptor.AutoCloseInputStream(fd);
-            } else {
-                in = new SizedInputStream(getRawInputStream(), sizeBytes);
-            }
-            out = session.openWrite(splitName, 0, sizeBytes);
-
-            int total = 0;
-            byte[] buffer = new byte[1024 * 1024];
-            int c;
-            while ((c = in.read(buffer)) != -1) {
-                total += c;
-                out.write(buffer, 0, c);
-
-                if (info.sizeBytes > 0) {
-                    final float fraction = ((float) c / (float) info.sizeBytes);
-                    session.addProgress(fraction);
-                }
-            }
-            session.fsync(out);
+            session.write(splitName, 0, sizeBytes, fd);
 
             if (logSuccess) {
-                pw.println("Success: streamed " + total + " bytes");
+                pw.println("Success: streamed " + sizeBytes + " bytes");
             }
             return 0;
         } catch (IOException e) {
             getErrPrintWriter().println("Error: failed to write; " + e.getMessage());
             return 1;
         } finally {
-            IoUtils.closeQuietly(out);
-            IoUtils.closeQuietly(in);
             IoUtils.closeQuietly(session);
         }
     }
@@ -2714,6 +2773,10 @@ class PackageManagerShellCommand extends ShellCommand {
         pw.println("");
         pw.println("  get-harmful-app-warning [--user <USER_ID>] <PACKAGE>");
         pw.println("    Return the harmful app warning message for the given app, if present");
+        pw.println();
+        pw.println("  uninstall-system-updates");
+        pw.println("    Remove updates to all system applications and fall back to their /system " +
+                "version.");
         pw.println();
         Intent.printIntentArgsHelp(pw , "");
     }

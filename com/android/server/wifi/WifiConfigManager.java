@@ -25,6 +25,7 @@ import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.net.IpConfiguration;
+import android.net.MacAddress;
 import android.net.ProxyInfo;
 import android.net.StaticIpConfiguration;
 import android.net.wifi.ScanResult;
@@ -43,6 +44,7 @@ import android.text.TextUtils;
 import android.util.ArraySet;
 import android.util.LocalLog;
 import android.util.Log;
+import android.util.Pair;
 
 import com.android.internal.R;
 import com.android.internal.annotations.VisibleForTesting;
@@ -427,6 +429,17 @@ public class WifiConfigManager {
     }
 
     /**
+     * Helper method to mask randomized MAC address from the provided WifiConfiguration Object.
+     * This is needed when the network configurations are being requested via the public
+     * WifiManager API's. This method puts "02:00:00:00:00:00" as the MAC address.
+     * @param configuration WifiConfiguration to hide the MAC address
+     */
+    private void maskRandomizedMacAddressInWifiConfiguration(WifiConfiguration configuration) {
+        MacAddress defaultMac = MacAddress.fromString(WifiInfo.DEFAULT_MAC_ADDRESS);
+        configuration.setRandomizedMacAddress(defaultMac);
+    }
+
+    /**
      * Helper method to create a copy of the provided internal WifiConfiguration object to be
      * passed to external modules.
      *
@@ -440,6 +453,7 @@ public class WifiConfigManager {
         if (maskPasswords) {
             maskPasswordsInWifiConfiguration(network);
         }
+        maskRandomizedMacAddressInWifiConfiguration(network);
         return network;
     }
 
@@ -551,6 +565,24 @@ public class WifiConfigManager {
     }
 
     /**
+     * Retrieves the configured network corresponding to the provided networkId
+     * without any masking.
+     *
+     * WARNING: Don't use this to pass network configurations except in the wifi stack, when
+     * there is a need for passwords and randomized MAC address.
+     *
+     * @param networkId networkId of the requested network.
+     * @return Copy of WifiConfiguration object if found, null otherwise.
+     */
+    public WifiConfiguration getConfiguredNetworkWithoutMasking(int networkId) {
+        WifiConfiguration config = getInternalConfiguredNetwork(networkId);
+        if (config == null) {
+            return null;
+        }
+        return new WifiConfiguration(config);
+    }
+
+    /**
      * Helper method to retrieve all the internal WifiConfiguration objects corresponding to all
      * the networks in our database.
      */
@@ -583,7 +615,6 @@ public class WifiConfigManager {
      */
     private WifiConfiguration getInternalConfiguredNetwork(int networkId) {
         if (networkId == WifiConfiguration.INVALID_NETWORK_ID) {
-            Log.w(TAG, "Looking up network with invalid networkId -1");
             return null;
         }
         WifiConfiguration internalConfig = mConfiguredNetworks.getForCurrentUser(networkId);
@@ -1608,7 +1639,7 @@ public class WifiConfigManager {
     /**
      * Set default GW MAC address for the provided network.
      *
-     * @param networkId  network ID corresponding to the network.
+     * @param networkId network ID corresponding to the network.
      * @param macAddress MAC address of the gateway to be set.
      * @return true if the network was found, false otherwise.
      */
@@ -1618,6 +1649,22 @@ public class WifiConfigManager {
             return false;
         }
         config.defaultGwMacAddress = macAddress;
+        return true;
+    }
+
+    /**
+     * Set randomized MAC address for the provided network.
+     *
+     * @param networkId network ID corresponding to the network.
+     * @param macAddress Randomized MAC address to be used for network connection.
+     * @return true if the network was found, false otherwise.
+    */
+    public boolean setNetworkRandomizedMacAddress(int networkId, MacAddress macAddress) {
+        WifiConfiguration config = getInternalConfiguredNetwork(networkId);
+        if (config == null) {
+            return false;
+        }
+        config.setRandomizedMacAddress(macAddress);
         return true;
     }
 
@@ -1996,7 +2043,14 @@ public class WifiConfigManager {
                 scanDetail.setSeen();
                 result.level = info.getRssi();
                 // Average the RSSI value
-                result.averageRssi(previousRssi, previousSeen, SCAN_RESULT_MAXIMUM_AGE_MS);
+                long maxAge = SCAN_RESULT_MAXIMUM_AGE_MS;
+                long age = result.seen - previousSeen;
+                if (previousSeen > 0 && age > 0 && age < maxAge / 2) {
+                    // Average the RSSI with previously seen instances of this scan result
+                    double alpha = 0.5 - (double) age / (double) maxAge;
+                    result.level = (int) ((double) result.level * (1 - alpha)
+                                        + (double) previousRssi * alpha);
+                }
                 if (mVerboseLoggingEnabled) {
                     Log.v(TAG, "Updating scan detail cache freq=" + result.frequency
                             + " BSSID=" + result.BSSID
@@ -2300,8 +2354,7 @@ public class WifiConfigManager {
      * So, re-sort the network list based on the frequency of connection to those networks
      * and whether it was last seen in the scan results.
      *
-     * TODO (b/30399964): Recalculate the list whenever network status changes.
-     * @return list of networks with updated priorities.
+     * @return list of networks in the order of priority.
      */
     public List<WifiScanner.PnoSettings.PnoNetwork> retrievePnoNetworkList() {
         List<WifiScanner.PnoSettings.PnoNetwork> pnoList = new ArrayList<>();
@@ -2317,12 +2370,9 @@ public class WifiConfigManager {
             }
         }
         Collections.sort(networks, sScanListComparator);
-        // Let's use the network list size - 1 as the highest priority and then go down from there.
-        // So, the most frequently connected network has the highest priority now.
-        int priority = networks.size() - 1;
+        // The most frequently connected network has the highest priority now.
         for (WifiConfiguration config : networks) {
-            pnoList.add(WifiConfigurationUtil.createPnoNetwork(config, priority));
-            priority--;
+            pnoList.add(WifiConfigurationUtil.createPnoNetwork(config));
         }
         return pnoList;
     }
@@ -2336,7 +2386,7 @@ public class WifiConfigManager {
      * So, re-sort the network list based on the frequency of connection to those networks
      * and whether it was last seen in the scan results.
      *
-     * @return list of networks with updated priorities.
+     * @return list of networks in the order of priority.
      */
     public List<WifiScanner.ScanSettings.HiddenNetwork> retrieveHiddenNetworkList() {
         List<WifiScanner.ScanSettings.HiddenNetwork> hiddenList = new ArrayList<>();
@@ -2350,13 +2400,10 @@ public class WifiConfigManager {
             }
         }
         Collections.sort(networks, sScanListComparator);
-        // Let's use the network list size - 1 as the highest priority and then go down from there.
-        // So, the most frequently connected network has the highest priority now.
-        int priority = networks.size() - 1;
+        // The most frequently connected network has the highest priority now.
         for (WifiConfiguration config : networks) {
             hiddenList.add(
                     new WifiScanner.ScanSettings.HiddenNetwork(config.SSID));
-            priority--;
         }
         return hiddenList;
     }
@@ -2410,13 +2457,17 @@ public class WifiConfigManager {
         if (mVerboseLoggingEnabled) localLog("resetSimNetworks");
         for (WifiConfiguration config : getInternalConfiguredNetworks()) {
             if (TelephonyUtil.isSimConfig(config)) {
-                String currentIdentity = null;
+                Pair<String, String> currentIdentity = null;
                 if (simPresent) {
                     currentIdentity = TelephonyUtil.getSimIdentity(mTelephonyManager,
                         new TelephonyUtil(), config);
                 }
                 // Update the loaded config
-                config.enterpriseConfig.setIdentity(currentIdentity);
+                if (currentIdentity == null) {
+                    Log.d(TAG, "Identity is null");
+                    return;
+                }
+                config.enterpriseConfig.setIdentity(currentIdentity.first);
                 if (config.enterpriseConfig.getEapMethod() != WifiEnterpriseConfig.Eap.PEAP) {
                     config.enterpriseConfig.setAnonymousIdentity("");
                 }
@@ -2729,6 +2780,14 @@ public class WifiConfigManager {
      * false otherwise.
      */
     public boolean loadFromStore() {
+        // If the user unlock comes in before we load from store, which means the user store have
+        // not been setup yet for the current user. Setup the user store before the read so that
+        // configurations for the current user will also being loaded.
+        if (mDeferredUserUnlockRead) {
+            Log.i(TAG, "Handling user unlock before loading from store.");
+            mWifiConfigStore.setUserStore(WifiConfigStore.createUserFile(mCurrentUserId));
+            mDeferredUserUnlockRead = false;
+        }
         if (!mWifiConfigStore.areStoresPresent()) {
             Log.d(TAG, "New store files not found. No saved networks loaded!");
             if (!mWifiConfigStoreLegacy.areStoresPresent()) {
@@ -2736,14 +2795,6 @@ public class WifiConfigManager {
                 mPendingStoreRead = false;
             }
             return true;
-        }
-        // If the user unlock comes in before we load from store, which means the user store have
-        // not been setup yet for the current user.  Setup the user store before the read so that
-        // configurations for the current user will also being loaded.
-        if (mDeferredUserUnlockRead) {
-            Log.i(TAG, "Handling user unlock before loading from store.");
-            mWifiConfigStore.setUserStore(WifiConfigStore.createUserFile(mCurrentUserId));
-            mDeferredUserUnlockRead = false;
         }
         try {
             mWifiConfigStore.read();

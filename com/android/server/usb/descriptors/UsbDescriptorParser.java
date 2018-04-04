@@ -26,7 +26,7 @@ import java.util.ArrayList;
  */
 public final class UsbDescriptorParser {
     private static final String TAG = "UsbDescriptorParser";
-    private static final boolean DEBUG = true;
+    private static final boolean DEBUG = false;
 
     private final String mDeviceAddr;
 
@@ -42,11 +42,6 @@ public final class UsbDescriptorParser {
     // This may well be different than the overall USB Spec.
     // Obtained from the first AudioClass Header descriptor.
     private int mACInterfacesSpec = UsbDeviceDescriptor.USBSPEC_1_0;
-
-    public UsbDescriptorParser(String deviceAddr) {
-        mDeviceAddr = deviceAddr;
-        mDescriptors = new ArrayList<UsbDescriptor>(DESCRIPTORS_ALLOC_SIZE);
-    }
 
     /**
      * Connect this parser to an existing set of already parsed descriptors.
@@ -214,7 +209,7 @@ public final class UsbDescriptorParser {
     /**
      * @hide
      */
-    public boolean parseDescriptors(byte[] descriptors) {
+    public void parseDescriptors(byte[] descriptors) {
         if (DEBUG) {
             Log.d(TAG, "parseDescriptors() - start");
         }
@@ -248,17 +243,6 @@ public final class UsbDescriptorParser {
         if (DEBUG) {
             Log.d(TAG, "parseDescriptors() - end " + mDescriptors.size() + " descriptors.");
         }
-        return true;
-    }
-
-    /**
-     * @hide
-     */
-    public boolean parseDevice() {
-        byte[] rawDescriptors = getRawDescriptors();
-
-        return rawDescriptors != null
-            ? parseDescriptors(rawDescriptors) : false;
     }
 
     public byte[] getRawDescriptors() {
@@ -358,12 +342,162 @@ public final class UsbDescriptorParser {
         return list;
     }
 
+    /*
+     * Attribute predicates
+     */
     /**
      * @hide
      */
-    public boolean hasHIDDescriptor() {
+    public boolean hasInput() {
+        if (DEBUG) {
+            Log.d(TAG, "---- hasInput()");
+        }
+        ArrayList<UsbDescriptor> acDescriptors =
+                getACInterfaceDescriptors(UsbACInterface.ACI_INPUT_TERMINAL,
+                UsbACInterface.AUDIO_AUDIOCONTROL);
+        boolean hasInput = false;
+        for (UsbDescriptor descriptor : acDescriptors) {
+            if (descriptor instanceof UsbACTerminal) {
+                UsbACTerminal inDescr = (UsbACTerminal) descriptor;
+                // Check for input and bi-directional terminal types
+                int type = inDescr.getTerminalType();
+                if (DEBUG) {
+                    Log.d(TAG, "  type:0x" + Integer.toHexString(type));
+                }
+                int terminalCategory = type & ~0xFF;
+                if (terminalCategory != UsbTerminalTypes.TERMINAL_USB_UNDEFINED
+                        && terminalCategory != UsbTerminalTypes.TERMINAL_OUT_UNDEFINED) {
+                    // If not explicitly a USB connection or output, it could be an input.
+                    hasInput = true;
+                    break;
+                }
+            } else {
+                Log.w(TAG, "Undefined Audio Input terminal l: " + descriptor.getLength()
+                        + " t:0x" + Integer.toHexString(descriptor.getType()));
+            }
+        }
+
+        if (DEBUG) {
+            Log.d(TAG, "hasInput() = " + hasInput);
+        }
+        return hasInput;
+    }
+
+    /**
+     * @hide
+     */
+    public boolean hasOutput() {
+        if (DEBUG) {
+            Log.d(TAG, "---- hasOutput()");
+        }
+        ArrayList<UsbDescriptor> acDescriptors =
+                getACInterfaceDescriptors(UsbACInterface.ACI_OUTPUT_TERMINAL,
+                UsbACInterface.AUDIO_AUDIOCONTROL);
+        boolean hasOutput = false;
+        for (UsbDescriptor descriptor : acDescriptors) {
+            if (descriptor instanceof UsbACTerminal) {
+                UsbACTerminal outDescr = (UsbACTerminal) descriptor;
+                // Check for output and bi-directional terminal types
+                int type = outDescr.getTerminalType();
+                if (DEBUG) {
+                    Log.d(TAG, "  type:0x" + Integer.toHexString(type));
+                }
+                int terminalCategory = type & ~0xFF;
+                if (terminalCategory != UsbTerminalTypes.TERMINAL_USB_UNDEFINED
+                        && terminalCategory != UsbTerminalTypes.TERMINAL_IN_UNDEFINED) {
+                    // If not explicitly a USB connection or input, it could be an output.
+                    hasOutput = true;
+                    break;
+                }
+            } else {
+                Log.w(TAG, "Undefined Audio Input terminal l: " + descriptor.getLength()
+                        + " t:0x" + Integer.toHexString(descriptor.getType()));
+            }
+        }
+        if (DEBUG) {
+            Log.d(TAG, "hasOutput() = " + hasOutput);
+        }
+        return hasOutput;
+    }
+
+    /**
+     * @hide
+     */
+    public boolean hasMic() {
+        boolean hasMic = false;
+
+        ArrayList<UsbDescriptor> acDescriptors =
+                getACInterfaceDescriptors(UsbACInterface.ACI_INPUT_TERMINAL,
+                UsbACInterface.AUDIO_AUDIOCONTROL);
+        for (UsbDescriptor descriptor : acDescriptors) {
+            if (descriptor instanceof UsbACTerminal) {
+                UsbACTerminal inDescr = (UsbACTerminal) descriptor;
+                if (inDescr.getTerminalType() == UsbTerminalTypes.TERMINAL_IN_MIC
+                        || inDescr.getTerminalType() == UsbTerminalTypes.TERMINAL_BIDIR_HEADSET
+                        || inDescr.getTerminalType() == UsbTerminalTypes.TERMINAL_BIDIR_UNDEFINED
+                        || inDescr.getTerminalType() == UsbTerminalTypes.TERMINAL_EXTERN_LINE) {
+                    hasMic = true;
+                    break;
+                }
+            } else {
+                Log.w(TAG, "Undefined Audio Input terminal l: " + descriptor.getLength()
+                        + " t:0x" + Integer.toHexString(descriptor.getType()));
+            }
+        }
+        return hasMic;
+    }
+
+    /**
+     * @hide
+     */
+    public boolean hasSpeaker() {
+        boolean hasSpeaker = false;
+
+        ArrayList<UsbDescriptor> acDescriptors =
+                getACInterfaceDescriptors(UsbACInterface.ACI_OUTPUT_TERMINAL,
+                        UsbACInterface.AUDIO_AUDIOCONTROL);
+        for (UsbDescriptor descriptor : acDescriptors) {
+            if (descriptor instanceof UsbACTerminal) {
+                UsbACTerminal outDescr = (UsbACTerminal) descriptor;
+                if (outDescr.getTerminalType() == UsbTerminalTypes.TERMINAL_OUT_SPEAKER
+                        || outDescr.getTerminalType() == UsbTerminalTypes.TERMINAL_OUT_HEADPHONES
+                        || outDescr.getTerminalType() == UsbTerminalTypes.TERMINAL_BIDIR_HEADSET) {
+                    hasSpeaker = true;
+                    break;
+                }
+            } else {
+                Log.w(TAG, "Undefined Audio Output terminal l: " + descriptor.getLength()
+                        + " t:0x" + Integer.toHexString(descriptor.getType()));
+            }
+        }
+
+        return hasSpeaker;
+    }
+
+    /**
+     *@ hide
+     */
+    public boolean hasAudioInterface() {
+        ArrayList<UsbDescriptor> descriptors =
+                getInterfaceDescriptorsForClass(UsbDescriptor.CLASSID_AUDIO);
+        return !descriptors.isEmpty();
+    }
+
+    /**
+     * @hide
+     */
+    public boolean hasHIDInterface() {
         ArrayList<UsbDescriptor> descriptors =
                 getInterfaceDescriptorsForClass(UsbDescriptor.CLASSID_HID);
+        return !descriptors.isEmpty();
+    }
+
+    /**
+     * @hide
+     */
+    public boolean hasStorageInterface() {
+        ArrayList<UsbDescriptor> descriptors =
+                getInterfaceDescriptorsForClass(UsbDescriptor.CLASSID_STORAGE);
         return !descriptors.isEmpty();
     }
 
@@ -397,54 +531,18 @@ public final class UsbDescriptorParser {
         }
 
         float probability = 0.0f;
-        ArrayList<UsbDescriptor> acDescriptors;
 
         // Look for a microphone
-        boolean hasMic = false;
-        acDescriptors = getACInterfaceDescriptors(UsbACInterface.ACI_INPUT_TERMINAL,
-                UsbACInterface.AUDIO_AUDIOCONTROL);
-        for (UsbDescriptor descriptor : acDescriptors) {
-            if (descriptor instanceof UsbACTerminal) {
-                UsbACTerminal inDescr = (UsbACTerminal) descriptor;
-                if (inDescr.getTerminalType() == UsbTerminalTypes.TERMINAL_IN_MIC
-                        || inDescr.getTerminalType() == UsbTerminalTypes.TERMINAL_BIDIR_HEADSET
-                        || inDescr.getTerminalType() == UsbTerminalTypes.TERMINAL_BIDIR_UNDEFINED
-                        || inDescr.getTerminalType() == UsbTerminalTypes.TERMINAL_EXTERN_LINE) {
-                    hasMic = true;
-                    break;
-                }
-            } else {
-                Log.w(TAG, "Undefined Audio Input terminal l: " + descriptor.getLength()
-                        + " t:0x" + Integer.toHexString(descriptor.getType()));
-            }
-        }
+        boolean hasMic = hasMic();
 
         // Look for a "speaker"
-        boolean hasSpeaker = false;
-        acDescriptors =
-                getACInterfaceDescriptors(UsbACInterface.ACI_OUTPUT_TERMINAL,
-                        UsbACInterface.AUDIO_AUDIOCONTROL);
-        for (UsbDescriptor descriptor : acDescriptors) {
-            if (descriptor instanceof UsbACTerminal) {
-                UsbACTerminal outDescr = (UsbACTerminal) descriptor;
-                if (outDescr.getTerminalType() == UsbTerminalTypes.TERMINAL_OUT_SPEAKER
-                        || outDescr.getTerminalType()
-                            == UsbTerminalTypes.TERMINAL_OUT_HEADPHONES
-                        || outDescr.getTerminalType() == UsbTerminalTypes.TERMINAL_BIDIR_HEADSET) {
-                    hasSpeaker = true;
-                    break;
-                }
-            } else {
-                Log.w(TAG, "Undefined Audio Output terminal l: " + descriptor.getLength()
-                        + " t:0x" + Integer.toHexString(descriptor.getType()));
-            }
-        }
+        boolean hasSpeaker = hasSpeaker();
 
         if (hasMic && hasSpeaker) {
             probability += 0.75f;
         }
 
-        if (hasMic && hasHIDDescriptor()) {
+        if (hasMic && hasHIDInterface()) {
             probability += 0.25f;
         }
 
@@ -497,7 +595,7 @@ public final class UsbDescriptorParser {
             probability += 0.75f;
         }
 
-        if (hasSpeaker && hasHIDDescriptor()) {
+        if (hasSpeaker && hasHIDInterface()) {
             probability += 0.25f;
         }
 

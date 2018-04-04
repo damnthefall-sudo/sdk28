@@ -55,9 +55,11 @@ import static com.android.resources.ResourceType.MENU;
 public class AppCompatActionBar extends BridgeActionBar {
 
     private Object mWindowDecorActionBar;
-    private static final String WINDOW_ACTION_BAR_CLASS = "android.support.v7.internal.app.WindowDecorActionBar";
-    // This is used on v23.1.1 and later.
-    private static final String WINDOW_ACTION_BAR_CLASS_NEW = "android.support.v7.app.WindowDecorActionBar";
+    private static final String[] WINDOW_ACTION_BAR_CLASS_NAMES = {
+            "android.support.v7.internal.app.WindowDecorActionBar",
+            "android.support.v7.app.WindowDecorActionBar",     // This is used on v23.1.1 and later.
+            "androidx.app.WindowDecorActionBar"                // User from v27
+    };
 
     private Class<?> mWindowActionBarClass;
 
@@ -86,13 +88,16 @@ public class AppCompatActionBar extends BridgeActionBar {
             Object[] constructorArgs = {getDecorContent()};
             LayoutlibCallback callback = params.getLayoutlibCallback();
 
-            // Check if the old action bar class is present.
-            String actionBarClass = WINDOW_ACTION_BAR_CLASS;
-            try {
-                callback.findClass(actionBarClass);
-            } catch (ClassNotFoundException expected) {
-                // Failed to find the old class, use the newer one.
-                actionBarClass = WINDOW_ACTION_BAR_CLASS_NEW;
+            // Find the correct WindowActionBar class
+            String actionBarClass = null;
+            for  (int i = WINDOW_ACTION_BAR_CLASS_NAMES.length - 1; i >= 0; i--) {
+                actionBarClass = WINDOW_ACTION_BAR_CLASS_NAMES[i];
+                try {
+                    callback.findClass(actionBarClass);
+
+                    break;
+                } catch (ClassNotFoundException ignore) {
+                }
             }
 
             mWindowDecorActionBar = callback.loadView(actionBarClass,

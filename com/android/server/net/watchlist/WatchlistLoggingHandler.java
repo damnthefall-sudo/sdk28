@@ -22,12 +22,14 @@ import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.PackageManager.NameNotFoundException;
+import android.content.pm.UserInfo;
 import android.os.Bundle;
 import android.os.DropBoxManager;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
 import android.os.UserHandle;
+import android.os.UserManager;
 import android.provider.Settings;
 import android.text.TextUtils;
 import android.util.Slog;
@@ -41,6 +43,7 @@ import java.io.File;
 import java.io.IOException;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.GregorianCalendar;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -59,6 +62,8 @@ class WatchlistLoggingHandler extends Handler {
     static final int LOG_WATCHLIST_EVENT_MSG = 1;
     @VisibleForTesting
     static final int REPORT_RECORDS_IF_NECESSARY_MSG = 2;
+    @VisibleForTesting
+    static final int FORCE_REPORT_RECORDS_NOW_FOR_TEST_MSG = 3;
 
     private static final long ONE_DAY_MS = TimeUnit.DAYS.toMillis(1);
     private static final String DROPBOX_TAG = "network_watchlist_report";
@@ -108,7 +113,15 @@ class WatchlistLoggingHandler extends Handler {
                 break;
             }
             case REPORT_RECORDS_IF_NECESSARY_MSG:
-                tryAggregateRecords();
+                tryAggregateRecords(getLastMidnightTime());
+                break;
+            case FORCE_REPORT_RECORDS_NOW_FOR_TEST_MSG:
+                if (msg.obj instanceof Long) {
+                    long lastRecordTime = (Long) msg.obj;
+                    tryAggregateRecords(lastRecordTime);
+                } else {
+                    Slog.e(TAG, "Msg.obj needs to be a Long object.");
+                }
                 break;
             default: {
                 Slog.d(TAG, "WatchlistLoggingHandler received an unknown of message.");
@@ -118,10 +131,35 @@ class WatchlistLoggingHandler extends Handler {
     }
 
     /**
+     * Return if a given package has testOnly is true.
+     */
+    private boolean isPackageTestOnly(int uid) {
+        final ApplicationInfo ai;
+        try {
+            final String[] packageNames = mPm.getPackagesForUid(uid);
+            if (packageNames == null || packageNames.length == 0) {
+                Slog.e(TAG, "Couldn't find package: " + packageNames);
+                return false;
+            }
+            ai = mPm.getApplicationInfo(packageNames[0], 0);
+        } catch (NameNotFoundException e) {
+            // Should not happen.
+            return false;
+        }
+        return (ai.flags & ApplicationInfo.FLAG_TEST_ONLY) != 0;
+    }
+
+    /**
      * Report network watchlist records if we collected enough data.
      */
     public void reportWatchlistIfNecessary() {
         final Message msg = obtainMessage(REPORT_RECORDS_IF_NECESSARY_MSG);
+        sendMessage(msg);
+    }
+
+    public void forceReportWatchlistForTest(long lastReportTime) {
+        final Message msg = obtainMessage(FORCE_REPORT_RECORDS_NOW_FOR_TEST_MSG);
+        msg.obj = lastReportTime;
         sendMessage(msg);
     }
 
@@ -146,61 +184,82 @@ class WatchlistLoggingHandler extends Handler {
         }
         final String cncDomain = searchAllSubDomainsInWatchlist(hostname);
         if (cncDomain != null) {
-            insertRecord(getDigestFromUid(uid), cncDomain, timestamp);
+            insertRecord(uid, cncDomain, timestamp);
         } else {
             final String cncIp = searchIpInWatchlist(ipAddresses);
             if (cncIp != null) {
-                insertRecord(getDigestFromUid(uid), cncIp, timestamp);
+                insertRecord(uid, cncIp, timestamp);
             }
         }
     }
 
-    private boolean insertRecord(byte[] digest, String cncHost, long timestamp) {
+    private boolean insertRecord(int uid, String cncHost, long timestamp) {
+        if (DEBUG) {
+            Slog.i(TAG, "trying to insert record with host: " + cncHost + ", uid: " + uid);
+        }
+        if (!mConfig.isConfigSecure() && !isPackageTestOnly(uid)) {
+            // Skip package if config is not secure and package is not TestOnly app.
+            if (DEBUG) {
+                Slog.i(TAG, "uid: " + uid + " is not test only package");
+            }
+            return true;
+        }
+        final byte[] digest = getDigestFromUid(uid);
+        if (digest == null) {
+            Slog.e(TAG, "Cannot get digest from uid: " + uid);
+            return false;
+        }
         final boolean result = mDbHelper.insertNewRecord(digest, cncHost, timestamp);
-        tryAggregateRecords();
         return result;
     }
 
-    private boolean shouldReportNetworkWatchlist() {
+    private boolean shouldReportNetworkWatchlist(long lastRecordTime) {
         final long lastReportTime = Settings.Global.getLong(mResolver,
                 Settings.Global.NETWORK_WATCHLIST_LAST_REPORT_TIME, 0L);
-        final long currentTimestamp = System.currentTimeMillis();
-        if (currentTimestamp < lastReportTime) {
+        if (lastRecordTime < lastReportTime) {
             Slog.i(TAG, "Last report time is larger than current time, reset report");
-            mDbHelper.cleanup();
+            mDbHelper.cleanup(lastReportTime);
             return false;
         }
-        return currentTimestamp >= lastReportTime + ONE_DAY_MS;
+        return lastRecordTime >= lastReportTime + ONE_DAY_MS;
     }
 
-    private void tryAggregateRecords() {
-        // Check if it's necessary to generate watchlist report now.
-        if (!shouldReportNetworkWatchlist()) {
-            Slog.i(TAG, "No need to aggregate record yet.");
-            return;
-        }
-        Slog.i(TAG, "Start aggregating watchlist records.");
-        if (mDropBoxManager != null && mDropBoxManager.isTagEnabled(DROPBOX_TAG)) {
-            Settings.Global.putLong(mResolver,
-                    Settings.Global.NETWORK_WATCHLIST_LAST_REPORT_TIME,
-                    System.currentTimeMillis());
-            final WatchlistReportDbHelper.AggregatedResult aggregatedResult =
-                    mDbHelper.getAggregatedRecords();
-            if (aggregatedResult == null) {
-                Slog.i(TAG, "Cannot get result from database");
+    private void tryAggregateRecords(long lastRecordTime) {
+        long startTime = System.currentTimeMillis();
+        try {
+            // Check if it's necessary to generate watchlist report now.
+            if (!shouldReportNetworkWatchlist(lastRecordTime)) {
+                Slog.i(TAG, "No need to aggregate record yet.");
                 return;
             }
-            // Get all digests for watchlist report, it should include all installed
-            // application digests and previously recorded app digests.
-            final List<String> digestsForReport = getAllDigestsForReport(aggregatedResult);
-            final byte[] secretKey = mSettings.getPrivacySecretKey();
-            final byte[] encodedResult = ReportEncoder.encodeWatchlistReport(mConfig,
-                    secretKey, digestsForReport, aggregatedResult);
-            if (encodedResult != null) {
-                addEncodedReportToDropBox(encodedResult);
+            Slog.i(TAG, "Start aggregating watchlist records.");
+            if (mDropBoxManager != null && mDropBoxManager.isTagEnabled(DROPBOX_TAG)) {
+                Settings.Global.putLong(mResolver,
+                        Settings.Global.NETWORK_WATCHLIST_LAST_REPORT_TIME,
+                        lastRecordTime);
+                final WatchlistReportDbHelper.AggregatedResult aggregatedResult =
+                        mDbHelper.getAggregatedRecords(lastRecordTime);
+                if (aggregatedResult == null) {
+                    Slog.i(TAG, "Cannot get result from database");
+                    return;
+                }
+                // Get all digests for watchlist report, it should include all installed
+                // application digests and previously recorded app digests.
+                final List<String> digestsForReport = getAllDigestsForReport(aggregatedResult);
+                final byte[] secretKey = mSettings.getPrivacySecretKey();
+                final byte[] encodedResult = ReportEncoder.encodeWatchlistReport(mConfig,
+                        secretKey, digestsForReport, aggregatedResult);
+                if (encodedResult != null) {
+                    addEncodedReportToDropBox(encodedResult);
+                }
+            } else {
+                Slog.w(TAG, "Network Watchlist dropbox tag is not enabled");
             }
+            mDbHelper.cleanup(lastRecordTime);
+        } finally {
+            long endTime = System.currentTimeMillis();
+            Slog.i(TAG, "Milliseconds spent on tryAggregateRecords(): " + (endTime - startTime));
         }
-        mDbHelper.cleanup();
     }
 
     /**
@@ -210,15 +269,34 @@ class WatchlistLoggingHandler extends Handler {
      * if an app is really visited C&C site.
      * (2) App digests that previously recorded in database.
      */
-    private List<String> getAllDigestsForReport(WatchlistReportDbHelper.AggregatedResult record) {
+    @VisibleForTesting
+    List<String> getAllDigestsForReport(WatchlistReportDbHelper.AggregatedResult record) {
         // Step 1: Get all installed application digests.
+        final List<UserInfo> users = ((UserManager) mContext.getSystemService(
+                Context.USER_SERVICE)).getUsers();
+        final int totalUsers = users.size();
         final List<ApplicationInfo> apps = mContext.getPackageManager().getInstalledApplications(
                 PackageManager.MATCH_ANY_USER | PackageManager.MATCH_ALL);
         final HashSet<String> result = new HashSet<>(apps.size() + record.appDigestCNCList.size());
         final int size = apps.size();
         for (int i = 0; i < size; i++) {
-            byte[] digest = getDigestFromUid(apps.get(i).uid);
-            result.add(HexDump.toHexString(digest));
+            final int appUid = apps.get(i).uid;
+            boolean added = false;
+            // As the uid returned by getInstalledApplications() is for primary user only, it
+            // may exist in secondary users but not primary user, so we need to loop and see if
+            // that user has the app enabled.
+            for (int j = 0; j < totalUsers && !added; j++) {
+                int uid = UserHandle.getUid(users.get(j).id, appUid);
+                byte[] digest = getDigestFromUid(uid);
+                if (digest != null) {
+                    result.add(HexDump.toHexString(digest));
+                    added = true;
+                }
+            }
+            if (!added) {
+                Slog.e(TAG, "Cannot get digest from uid: " + apps.get(i).uid
+                        + ",pkg: " + apps.get(i).packageName);
+            }
         }
         // Step 2: Add all digests from records
         result.addAll(record.appDigestCNCList.keySet());
@@ -255,9 +333,9 @@ class WatchlistLoggingHandler extends Handler {
                         return null;
                     }
                 }
-            } else {
-                Slog.e(TAG, "Should not happen");
             }
+            // Not able to find a package name for this uid, possibly the package is installed on
+            // another user.
             return null;
         });
     }
@@ -329,5 +407,20 @@ class WatchlistLoggingHandler extends Handler {
             index = host.indexOf(".");
         }
         return subDomainList.toArray(new String[0]);
+    }
+
+    static long getLastMidnightTime() {
+        return getMidnightTimestamp(0);
+    }
+
+    static long getMidnightTimestamp(int daysBefore) {
+        java.util.Calendar date = new GregorianCalendar();
+        // reset hour, minutes, seconds and millis
+        date.set(java.util.Calendar.HOUR_OF_DAY, 0);
+        date.set(java.util.Calendar.MINUTE, 0);
+        date.set(java.util.Calendar.SECOND, 0);
+        date.set(java.util.Calendar.MILLISECOND, 0);
+        date.add(java.util.Calendar.DAY_OF_MONTH, -daysBefore);
+        return date.getTimeInMillis();
     }
 }

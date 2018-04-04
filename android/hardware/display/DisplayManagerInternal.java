@@ -23,6 +23,7 @@ import android.util.IntArray;
 import android.util.SparseArray;
 import android.view.Display;
 import android.view.DisplayInfo;
+import android.view.SurfaceControl;
 
 /**
  * Display manager local system service interface.
@@ -115,7 +116,7 @@ public abstract class DisplayManagerInternal {
      * Called by the window manager to perform traversals while holding a
      * surface flinger transaction.
      */
-    public abstract void performTraversalInTransactionFromWindowManager();
+    public abstract void performTraversal(SurfaceControl.Transaction t);
 
     /**
      * Tells the display manager about properties of the display that depend on the windows on it.
@@ -174,9 +175,9 @@ public abstract class DisplayManagerInternal {
     public abstract boolean isUidPresentOnDisplay(int uid, int displayId);
 
     /**
-     * Persist brightness slider events.
+     * Persist brightness slider events and ambient brightness stats.
      */
-    public abstract void persistBrightnessSliderEvents();
+    public abstract void persistBrightnessTrackerState();
 
     /**
      * Notifies the display manager that resource overlays have changed.

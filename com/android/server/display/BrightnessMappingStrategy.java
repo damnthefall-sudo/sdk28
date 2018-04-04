@@ -200,6 +200,14 @@ public abstract class BrightnessMappingStrategy {
      */
     public abstract void clearUserDataPoints();
 
+    /** @return true if there are any short term adjustments applied to the curve */
+    public abstract boolean hasUserDataPoints();
+
+    /** @return true if the current brightness config is the default one */
+    public abstract boolean isDefaultConfig();
+
+    public abstract BrightnessConfiguration getDefaultConfig();
+
     public abstract void dump(PrintWriter pw);
 
     private static float normalizeAbsoluteBrightness(int brightness) {
@@ -390,6 +398,19 @@ public abstract class BrightnessMappingStrategy {
         }
 
         @Override
+        public boolean hasUserDataPoints() {
+            return mUserLux != -1;
+        }
+
+        @Override
+        public boolean isDefaultConfig() {
+            return true;
+        }
+
+        @Override
+        public BrightnessConfiguration getDefaultConfig() { return null; }
+
+        @Override
         public void dump(PrintWriter pw) {
             pw.println("SimpleMappingStrategy");
             pw.println("  mSpline=" + mSpline);
@@ -505,6 +526,19 @@ public abstract class BrightnessMappingStrategy {
                 mUserBrightness = -1;
             }
         }
+
+        @Override
+        public boolean hasUserDataPoints() {
+            return mUserLux != -1;
+        }
+
+        @Override
+        public boolean isDefaultConfig() {
+            return mDefaultConfig.equals(mConfig);
+        }
+
+        @Override
+        public BrightnessConfiguration getDefaultConfig() { return mDefaultConfig; }
 
         @Override
         public void dump(PrintWriter pw) {

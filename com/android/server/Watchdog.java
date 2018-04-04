@@ -87,6 +87,7 @@ public class Watchdog extends Thread {
         "media.metrics", // system/bin/mediametrics
         "media.codec", // vendor/bin/hw/android.hardware.media.omx@1.0-service
         "com.android.bluetooth",  // Bluetooth service
+        "statsd",  // Stats daemon
     };
 
     public static final List<String> HAL_INTERFACES_OF_INTEREST = Arrays.asList(
@@ -557,14 +558,7 @@ public class Watchdog extends Thread {
                 Slog.w(TAG, "Restart not allowed: Watchdog is *not* killing the system process");
             } else {
                 Slog.w(TAG, "*** WATCHDOG KILLING SYSTEM PROCESS: " + subject);
-                for (int i=0; i<blockedCheckers.size(); i++) {
-                    Slog.w(TAG, blockedCheckers.get(i).getName() + " stack trace:");
-                    StackTraceElement[] stackTrace
-                            = blockedCheckers.get(i).getThread().getStackTrace();
-                    for (StackTraceElement element: stackTrace) {
-                        Slog.w(TAG, "    at " + element);
-                    }
-                }
+                WatchdogDiagnostics.diagnoseCheckers(blockedCheckers);
                 Slog.w(TAG, "*** GOODBYE!");
                 Process.killProcess(Process.myPid());
                 System.exit(10);

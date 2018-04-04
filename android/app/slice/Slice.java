@@ -65,20 +65,32 @@ public final class Slice implements Parcelable {
             HINT_TOGGLE,
             HINT_HORIZONTAL,
             HINT_PARTIAL,
-            HINT_SEE_MORE
+            HINT_SEE_MORE,
+            HINT_KEYWORDS,
+            HINT_ERROR,
+            HINT_TTL,
+            HINT_LAST_UPDATED,
+            HINT_PERMISSION_REQUEST,
     })
     @Retention(RetentionPolicy.SOURCE)
     public @interface SliceHint {}
-
     /**
-     * The meta-data key that allows an activity to easily be linked directly to a slice.
-     * <p>
-     * An activity can be statically linked to a slice uri by including a meta-data item
-     * for this key that contains a valid slice uri for the same application declaring
-     * the activity.
      * @hide
      */
-    public static final String SLICE_METADATA_KEY = "android.metadata.SLICE_URI";
+    @StringDef(prefix = { "SUBTYPE_" }, value = {
+            SUBTYPE_COLOR,
+            SUBTYPE_CONTENT_DESCRIPTION,
+            SUBTYPE_MAX,
+            SUBTYPE_MESSAGE,
+            SUBTYPE_PRIORITY,
+            SUBTYPE_RANGE,
+            SUBTYPE_SOURCE,
+            SUBTYPE_TOGGLE,
+            SUBTYPE_VALUE,
+            SUBTYPE_LAYOUT_DIRECTION,
+    })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface SliceSubtype {}
 
     /**
      * Hint that this content is a title of other content in the slice. This can also indicate that
@@ -146,44 +158,97 @@ public final class Slice implements Parcelable {
      */
     public static final String HINT_PARTIAL     = "partial";
     /**
-     * A hint representing that this item is the max value possible for the slice containing this.
-     * Used to indicate the maximum integer value for a {@link #SUBTYPE_SLIDER}.
-     */
-    public static final String HINT_MAX = "max";
-    /**
      * A hint representing that this item should be used to indicate that there's more
      * content associated with this slice.
      */
     public static final String HINT_SEE_MORE = "see_more";
     /**
-     * A hint used when implementing app-specific slice permissions.
-     * Tells the system that for this slice the return value of
-     * {@link SliceProvider#onBindSlice(Uri, List)} may be different depending on
-     * {@link SliceProvider#getBindingPackage} and should not be cached for multiple
-     * apps.
+     * @see Builder#setCallerNeeded
+     * @hide
      */
     public static final String HINT_CALLER_NEEDED = "caller_needed";
+    /**
+     * A hint to indicate that the contents of this subslice represent a list of keywords
+     * related to the parent slice.
+     * Expected to be on an item of format {@link SliceItem#FORMAT_SLICE}.
+     */
+    public static final String HINT_KEYWORDS = "keywords";
+    /**
+     * A hint to indicate that this slice represents an error.
+     */
+    public static final String HINT_ERROR = "error";
+    /**
+     * Hint indicating an item representing a time-to-live for the content.
+     */
+    public static final String HINT_TTL = "ttl";
+    /**
+     * Hint indicating an item representing when the content was created or last updated.
+     */
+    public static final String HINT_LAST_UPDATED = "last_updated";
+    /**
+     * A hint to indicate that this slice represents a permission request for showing
+     * slices.
+     */
+    public static final String HINT_PERMISSION_REQUEST = "permission_request";
+    /**
+     * Subtype to indicate that this item indicates the layout direction for content
+     * in the slice.
+     * Expected to be an item of format {@link SliceItem#FORMAT_INT}.
+     */
+    public static final String SUBTYPE_LAYOUT_DIRECTION = "layout_direction";
     /**
      * Key to retrieve an extra added to an intent when a control is changed.
      */
     public static final String EXTRA_TOGGLE_STATE = "android.app.slice.extra.TOGGLE_STATE";
     /**
+     * Key to retrieve an extra added to an intent when the value of a slider is changed.
+     * @deprecated remove once support lib is update to use EXTRA_RANGE_VALUE instead
+     */
+    @Deprecated
+    public static final String EXTRA_SLIDER_VALUE = "android.app.slice.extra.SLIDER_VALUE";
+    /**
+     * Key to retrieve an extra added to an intent when the value of an input range is changed.
+     */
+    public static final String EXTRA_RANGE_VALUE = "android.app.slice.extra.RANGE_VALUE";
+    /**
      * Subtype to indicate that this is a message as part of a communication
      * sequence in this slice.
+     * Expected to be on an item of format {@link SliceItem#FORMAT_SLICE}.
      */
     public static final String SUBTYPE_MESSAGE = "message";
     /**
      * Subtype to tag the source (i.e. sender) of a {@link #SUBTYPE_MESSAGE}.
+     * Expected to be on an item of format {@link SliceItem#FORMAT_TEXT},
+     * {@link SliceItem#FORMAT_IMAGE} or an {@link SliceItem#FORMAT_SLICE} containing them.
      */
     public static final String SUBTYPE_SOURCE = "source";
     /**
      * Subtype to tag an item as representing a color.
+     * Expected to be on an item of format {@link SliceItem#FORMAT_INT}.
      */
     public static final String SUBTYPE_COLOR = "color";
     /**
-     * Subtype to tag an item represents a slider.
+     * Subtype to tag an item as representing a slider.
+     * @deprecated remove once support lib is update to use SUBTYPE_RANGE instead
      */
+    @Deprecated
     public static final String SUBTYPE_SLIDER = "slider";
+    /**
+     * Subtype to tag an item as representing a range.
+     * Expected to be on an item of format {@link SliceItem#FORMAT_SLICE} containing
+     * a {@link #SUBTYPE_VALUE} and possibly a {@link #SUBTYPE_MAX}.
+     */
+    public static final String SUBTYPE_RANGE = "range";
+    /**
+     * Subtype to tag an item as representing the max int value for a {@link #SUBTYPE_RANGE}.
+     * Expected to be on an item of format {@link SliceItem#FORMAT_INT}.
+     */
+    public static final String SUBTYPE_MAX = "max";
+    /**
+     * Subtype to tag an item as representing the current int value for a {@link #SUBTYPE_RANGE}.
+     * Expected to be on an item of format {@link SliceItem#FORMAT_INT}.
+     */
+    public static final String SUBTYPE_VALUE = "value";
     /**
      * Subtype to indicate that this content has a toggle action associated with it. To indicate
      * that the toggle is on, use {@link #HINT_SELECTED}. When the toggle state changes, the
@@ -193,12 +258,19 @@ public final class Slice implements Parcelable {
     public static final String SUBTYPE_TOGGLE = "toggle";
     /**
      * Subtype to tag an item representing priority.
+     * Expected to be on an item of format {@link SliceItem#FORMAT_INT}.
      */
     public static final String SUBTYPE_PRIORITY = "priority";
     /**
      * Subtype to tag an item to use as a content description.
+     * Expected to be on an item of format {@link SliceItem#FORMAT_TEXT}.
      */
     public static final String SUBTYPE_CONTENT_DESCRIPTION = "content_description";
+    /**
+     * Subtype to tag an item as representing a time in milliseconds since midnight,
+     * January 1, 1970 UTC.
+     */
+    public static final String SUBTYPE_MILLIS = "millis";
 
     private final SliceItem[] mItems;
     private final @SliceHint String[] mHints;
@@ -275,6 +347,14 @@ public final class Slice implements Parcelable {
     }
 
     /**
+     * Returns whether the caller for this slice matters.
+     * @see Builder#setCallerNeeded
+     */
+    public boolean isCallerNeeded() {
+        return hasHint(HINT_CALLER_NEEDED);
+    }
+
+    /**
      * A Builder used to construct {@link Slice}s
      */
     public static class Builder {
@@ -285,11 +365,21 @@ public final class Slice implements Parcelable {
         private SliceSpec mSpec;
 
         /**
-         * Create a builder which will construct a {@link Slice} for the Given Uri.
-         * @param uri Uri to tag for this slice.
+         * @deprecated TO BE REMOVED
          */
+        @Deprecated
         public Builder(@NonNull Uri uri) {
             mUri = uri;
+        }
+
+        /**
+         * Create a builder which will construct a {@link Slice} for the given Uri.
+         * @param uri Uri to tag for this slice.
+         * @param spec the spec for this slice.
+         */
+        public Builder(@NonNull Uri uri, SliceSpec spec) {
+            mUri = uri;
+            mSpec = spec;
         }
 
         /**
@@ -303,10 +393,17 @@ public final class Slice implements Parcelable {
         }
 
         /**
-         * Add hints to the Slice being constructed
+         * Tells the system whether for this slice the return value of
+         * {@link SliceProvider#onBindSlice(Uri, List)} may be different depending on
+         * {@link SliceProvider#getCallingPackage()} and should not be cached for multiple
+         * apps.
          */
-        public Builder addHints(@SliceHint String... hints) {
-            mHints.addAll(Arrays.asList(hints));
+        public Builder setCallerNeeded(boolean callerNeeded) {
+            if (callerNeeded) {
+                mHints.add(HINT_CALLER_NEEDED);
+            } else {
+                mHints.remove(HINT_CALLER_NEEDED);
+            }
             return this;
         }
 
@@ -314,11 +411,12 @@ public final class Slice implements Parcelable {
          * Add hints to the Slice being constructed
          */
         public Builder addHints(@SliceHint List<String> hints) {
-            return addHints(hints.toArray(new String[hints.size()]));
+            mHints.addAll(hints);
+            return this;
         }
 
         /**
-         * Add the spec for this slice.
+         * @deprecated TO BE REMOVED
          */
         public Builder setSpec(SliceSpec spec) {
             mSpec = spec;
@@ -327,27 +425,13 @@ public final class Slice implements Parcelable {
 
         /**
          * Add a sub-slice to the slice being constructed
-         */
-        public Builder addSubSlice(@NonNull Slice slice) {
-            return addSubSlice(slice, null);
-        }
-
-        /**
-         * Add a sub-slice to the slice being constructed
          * @param subType Optional template-specific type information
          * @see {@link SliceItem#getSubType()}
          */
-        public Builder addSubSlice(@NonNull Slice slice, @Nullable String subType) {
+        public Builder addSubSlice(@NonNull Slice slice, @Nullable @SliceSubtype String subType) {
             mItems.add(new SliceItem(slice, SliceItem.FORMAT_SLICE, subType,
                     slice.getHints().toArray(new String[slice.getHints().size()])));
             return this;
-        }
-
-        /**
-         * Add an action to the slice being constructed
-         */
-        public Slice.Builder addAction(@NonNull PendingIntent action, @NonNull Slice s) {
-            return addAction(action, s, null);
         }
 
         /**
@@ -356,7 +440,7 @@ public final class Slice implements Parcelable {
          * @see {@link SliceItem#getSubType()}
          */
         public Slice.Builder addAction(@NonNull PendingIntent action, @NonNull Slice s,
-                @Nullable String subType) {
+                @Nullable @SliceSubtype String subType) {
             List<String> hints = s.getHints();
             s.mSpec = null;
             mItems.add(new SliceItem(action, s, SliceItem.FORMAT_ACTION, subType, hints.toArray(
@@ -369,103 +453,66 @@ public final class Slice implements Parcelable {
          * @param subType Optional template-specific type information
          * @see {@link SliceItem#getSubType()}
          */
-        public Builder addText(CharSequence text, @Nullable String subType,
-                @SliceHint String... hints) {
+        public Builder addText(CharSequence text, @Nullable @SliceSubtype String subType,
+                @SliceHint List<String> hints) {
             mItems.add(new SliceItem(text, SliceItem.FORMAT_TEXT, subType, hints));
             return this;
         }
 
         /**
-         * Add text to the slice being constructed
-         * @param subType Optional template-specific type information
-         * @see {@link SliceItem#getSubType()}
-         */
-        public Builder addText(CharSequence text, @Nullable String subType,
-                @SliceHint List<String> hints) {
-            return addText(text, subType, hints.toArray(new String[hints.size()]));
-        }
-
-        /**
          * Add an image to the slice being constructed
          * @param subType Optional template-specific type information
          * @see {@link SliceItem#getSubType()}
          */
-        public Builder addIcon(Icon icon, @Nullable String subType, @SliceHint String... hints) {
+        public Builder addIcon(Icon icon, @Nullable @SliceSubtype String subType,
+                @SliceHint List<String> hints) {
             mItems.add(new SliceItem(icon, SliceItem.FORMAT_IMAGE, subType, hints));
             return this;
         }
 
         /**
-         * Add an image to the slice being constructed
-         * @param subType Optional template-specific type information
-         * @see {@link SliceItem#getSubType()}
-         */
-        public Builder addIcon(Icon icon, @Nullable String subType, @SliceHint List<String> hints) {
-            return addIcon(icon, subType, hints.toArray(new String[hints.size()]));
-        }
-
-        /**
          * Add remote input to the slice being constructed
          * @param subType Optional template-specific type information
          * @see {@link SliceItem#getSubType()}
          */
-        public Slice.Builder addRemoteInput(RemoteInput remoteInput, @Nullable String subType,
+        public Slice.Builder addRemoteInput(RemoteInput remoteInput,
+                @Nullable @SliceSubtype String subType,
                 @SliceHint List<String> hints) {
-            return addRemoteInput(remoteInput, subType, hints.toArray(new String[hints.size()]));
-        }
-
-        /**
-         * Add remote input to the slice being constructed
-         * @param subType Optional template-specific type information
-         * @see {@link SliceItem#getSubType()}
-         */
-        public Slice.Builder addRemoteInput(RemoteInput remoteInput, @Nullable String subType,
-                @SliceHint String... hints) {
             mItems.add(new SliceItem(remoteInput, SliceItem.FORMAT_REMOTE_INPUT,
                     subType, hints));
             return this;
         }
 
         /**
-         * Add a color to the slice being constructed
+         * Add an integer to the slice being constructed
          * @param subType Optional template-specific type information
          * @see {@link SliceItem#getSubType()}
          */
-        public Builder addInt(int value, @Nullable String subType, @SliceHint String... hints) {
+        public Builder addInt(int value, @Nullable @SliceSubtype String subType,
+                @SliceHint List<String> hints) {
             mItems.add(new SliceItem(value, SliceItem.FORMAT_INT, subType, hints));
             return this;
         }
 
         /**
-         * Add a color to the slice being constructed
-         * @param subType Optional template-specific type information
-         * @see {@link SliceItem#getSubType()}
+         * @deprecated TO BE REMOVED.
          */
-        public Builder addInt(int value, @Nullable String subType,
+        @Deprecated
+        public Slice.Builder addTimestamp(long time, @Nullable @SliceSubtype String subType,
                 @SliceHint List<String> hints) {
-            return addInt(value, subType, hints.toArray(new String[hints.size()]));
+            return addLong(time, subType, hints);
         }
 
         /**
-         * Add a timestamp to the slice being constructed
+         * Add a long to the slice being constructed
          * @param subType Optional template-specific type information
          * @see {@link SliceItem#getSubType()}
          */
-        public Slice.Builder addTimestamp(long time, @Nullable String subType,
-                @SliceHint String... hints) {
-            mItems.add(new SliceItem(time, SliceItem.FORMAT_TIMESTAMP, subType,
-                    hints));
+        public Slice.Builder addLong(long value, @Nullable @SliceSubtype String subType,
+                @SliceHint List<String> hints) {
+            mItems.add(new SliceItem(value, SliceItem.FORMAT_LONG, subType,
+                    hints.toArray(new String[hints.size()])));
             return this;
-        }
-
-        /**
-         * Add a timestamp to the slice being constructed
-         * @param subType Optional template-specific type information
-         * @see {@link SliceItem#getSubType()}
-         */
-        public Slice.Builder addTimestamp(long time, @Nullable String subType,
-                @SliceHint List<String> hints) {
-            return addTimestamp(time, subType, hints.toArray(new String[hints.size()]));
         }
 
         /**
@@ -475,23 +522,11 @@ public final class Slice implements Parcelable {
          * @param subType Optional template-specific type information
          * @see {@link SliceItem#getSubType()}
          */
-        public Slice.Builder addBundle(Bundle bundle, @Nullable String subType,
-                @SliceHint String... hints) {
+        public Slice.Builder addBundle(Bundle bundle, @Nullable @SliceSubtype String subType,
+                @SliceHint List<String> hints) {
             mItems.add(new SliceItem(bundle, SliceItem.FORMAT_BUNDLE, subType,
                     hints));
             return this;
-        }
-
-        /**
-         * Add a bundle to the slice being constructed.
-         * <p>Expected to be used for support library extension, should not be used for general
-         * development
-         * @param subType Optional template-specific type information
-         * @see {@link SliceItem#getSubType()}
-         */
-        public Slice.Builder addBundle(Bundle bundle, @Nullable String subType,
-                @SliceHint List<String> hints) {
-            return addBundle(bundle, subType, hints.toArray(new String[hints.size()]));
         }
 
         /**
