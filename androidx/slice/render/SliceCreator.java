@@ -36,11 +36,11 @@ import android.text.style.ForegroundColorSpan;
 
 import androidx.core.graphics.drawable.IconCompat;
 import androidx.slice.Slice;
+import androidx.slice.SliceProvider;
 import androidx.slice.builders.GridRowBuilder;
 import androidx.slice.builders.ListBuilder;
 import androidx.slice.builders.MessagingSliceBuilder;
 import androidx.slice.builders.SliceAction;
-import androidx.slice.compat.SliceProviderCompat;
 import androidx.slice.view.test.R;
 
 import java.util.Arrays;
@@ -126,7 +126,7 @@ public class SliceCreator {
     private Slice createWeather(Uri sliceUri) {
         SliceAction primaryAction = new SliceAction(getBroadcastIntent(ACTION_TOAST,
                 "open weather app"),
-                IconCompat.createWithResource(getContext(), R.drawable.weather_1),
+                IconCompat.createWithResource(getContext(), R.drawable.weather_1), SMALL_IMAGE,
                 "Weather is happening!");
         ListBuilder b = new ListBuilder(getContext(), sliceUri, -TimeUnit.HOURS.toMillis(8));
         GridRowBuilder gb = new GridRowBuilder(b);
@@ -486,9 +486,10 @@ public class SliceCreator {
                         .setTitle("Star rating")
                         .setSubtitle("Pick a rating from 0 to 5")
                         .setThumb(icon)
+                        .setMin(5)
                         .setInputAction(getBroadcastIntent(ACTION_TOAST, "range changed"))
-                        .setMax(5)
-                        .setValue(3)
+                        .setMax(10)
+                        .setValue(7)
                         .setPrimaryAction(primaryAction)
                         .setContentDescription("Slider for star ratings"))
                 .build();
@@ -512,7 +513,7 @@ public class SliceCreator {
     }
 
     private Slice createPermissionSlice(Uri uri) {
-        return SliceProviderCompat.createPermissionSlice(getContext(), uri,
+        return SliceProvider.createPermissionSlice(getContext(), uri,
                 getContext().getPackageName());
     }
 

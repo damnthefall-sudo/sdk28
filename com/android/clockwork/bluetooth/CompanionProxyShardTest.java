@@ -224,12 +224,14 @@ public class CompanionProxyShardTest {
                 CompanionProxyShard.State.SYSPROXY_DISCONNECTED);
         when(mockBluetoothDevice.getBondState()).thenReturn(BluetoothDevice.BOND_NONE);
 
+        ShadowLooper.pauseMainLooper();
         mCompanionProxyShard.onStartNetwork();
 
+        ShadowLooper.runMainLooperOneTask();
         assertEquals(0, mCompanionProxyShard.connectNativeCount);
         verify(mockParcelFileDescriptor, never()).detachFd();
 
-        assertEquals(CompanionProxyShard.State.SYSPROXY_DISCONNECTED,
+        assertEquals(CompanionProxyShard.State.BLUETOOTH_SOCKET_REQUESTING,
                 mCompanionProxyShard.mState.current());
 
         ensureMessageQueueEmpty();
@@ -247,7 +249,7 @@ public class CompanionProxyShardTest {
 
         ShadowLooper.runMainLooperOneTask();
 
-        assertEquals(CompanionProxyShard.State.SYSPROXY_DISCONNECTED,
+        assertEquals(CompanionProxyShard.State.BLUETOOTH_SOCKET_REQUESTING,
                 mCompanionProxyShard.mState.current());
         ensureMessageQueueEmpty();
         // Restore bluetooth adapter to return a valid instance
@@ -261,11 +263,12 @@ public class CompanionProxyShardTest {
 
         when(mockBluetoothAdapter.isEnabled()).thenReturn(false);
 
+        ShadowLooper.pauseMainLooper();
         mCompanionProxyShard.onStartNetwork();
 
         ShadowLooper.runMainLooperOneTask();
 
-        assertEquals(CompanionProxyShard.State.SYSPROXY_DISCONNECTED,
+        assertEquals(CompanionProxyShard.State.BLUETOOTH_SOCKET_REQUESTING,
                 mCompanionProxyShard.mState.current());
         ensureMessageQueueEmpty();
      }

@@ -509,7 +509,6 @@ public class WearBluetoothMediator implements
         @WorkerThread
         @Override
         public void handleMessage(Message msg) {
-            Log.e(TAG, "CMM handleMessage" + msg);
             if (Log.isLoggable(TAG, Log.DEBUG)) {
                 Log.d(TAG, "handleMessage: " + msg);
             }

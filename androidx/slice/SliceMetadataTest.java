@@ -47,7 +47,6 @@ import androidx.core.util.Pair;
 import androidx.slice.builders.GridRowBuilder;
 import androidx.slice.builders.ListBuilder;
 import androidx.slice.builders.SliceAction;
-import androidx.slice.compat.SliceProviderCompat;
 import androidx.slice.core.SliceActionImpl;
 import androidx.slice.core.SliceHints;
 import androidx.slice.render.SliceRenderActivity;
@@ -452,15 +451,20 @@ public class SliceMetadataTest {
         ListBuilder lb = new ListBuilder(mContext, uri, ListBuilder.INFINITY);
         lb.addInputRange(new ListBuilder.InputRangeBuilder(lb)
                 .setTitle("another title")
-                .setValue(5)
+                .setValue(7)
+                .setMin(5)
                 .setMax(10)
-                .setAction(pi));
+                .setInputAction(pi));
 
         Slice sliderSlice = lb.build();
         SliceMetadata sliderInfo = SliceMetadata.from(mContext, sliderSlice);
+
         Pair<Integer, Integer> values = sliderInfo.getRange();
         assertEquals(5, (int) values.first);
         assertEquals(10, (int) values.second);
+
+        int currentValue = sliderInfo.getRangeValue();
+        assertEquals(7, currentValue);
     }
 
     @Test
@@ -476,9 +480,8 @@ public class SliceMetadataTest {
         Slice sliderSlice = lb.build();
         SliceMetadata progressInfo = SliceMetadata.from(mContext, sliderSlice);
         Pair<Integer, Integer> values = progressInfo.getRange();
-        assertEquals(5, (int) values.first);
+        assertEquals(0, (int) values.first);
         assertEquals(10, (int) values.second);
-
     }
 
     @Test
@@ -593,7 +596,7 @@ public class SliceMetadataTest {
     public void testIsPermissionSlice() {
         Uri uri = Uri.parse("content://pkg/slice");
         Slice permissionSlice =
-                SliceProviderCompat.createPermissionSlice(mContext, uri, mContext.getPackageName());
+                SliceProvider.createPermissionSlice(mContext, uri, mContext.getPackageName());
 
         SliceMetadata metadata = SliceMetadata.from(mContext, permissionSlice);
         assertEquals(true, metadata.isPermissionSlice());

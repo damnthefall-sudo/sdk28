@@ -69,12 +69,12 @@ public class BluetoothShardRunner {
 
     @MainThread
     void stopProxyShard() {
-        mCompanionShardStops += 1;
         if (mProxyShard != null) {
              if (Log.isLoggable(TAG, Log.DEBUG)) {
                  Log.d(TAG, "BluetoothShardRunner Stopping CompanionProxyShard.");
              }
             Util.close(mProxyShard);
+            mCompanionShardStops += 1;
         }
         mProxyShard = null;
     }

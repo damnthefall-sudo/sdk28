@@ -3568,7 +3568,8 @@ class DisplayContent extends WindowContainer<DisplayContent.DisplayChildWindowCo
                     if (s.inSplitScreenWindowingMode() && mSplitScreenDividerAnchor != null) {
                         t.setLayer(mSplitScreenDividerAnchor, layer++);
                     }
-                    if (s.isAppAnimating() && state != ALWAYS_ON_TOP_STATE) {
+                    if ((s.isTaskAnimating() || s.isAppAnimating())
+                            && state != ALWAYS_ON_TOP_STATE) {
                         // Ensure the animation layer ends up above the
                         // highest animating stack and no higher.
                         layerForAnimationLayer = layer++;
@@ -3727,8 +3728,12 @@ class DisplayContent extends WindowContainer<DisplayContent.DisplayChildWindowCo
 
             mLastWindowForcedOrientation = SCREEN_ORIENTATION_UNSPECIFIED;
 
-            if (policy.isKeyguardShowingAndNotOccluded()
-                    || mService.mAppTransition.getAppTransition() == TRANSIT_KEYGUARD_UNOCCLUDE) {
+            // Only allow force setting the orientation when all unknown visibilities have been
+            // resolved, as otherwise we just may be starting another occluding activity.
+            final boolean isUnoccluding =
+                    mService.mAppTransition.getAppTransition() == TRANSIT_KEYGUARD_UNOCCLUDE
+                            && mService.mUnknownAppVisibilityController.allResolved();
+            if (policy.isKeyguardShowingAndNotOccluded() || isUnoccluding) {
                 return mLastKeyguardForcedOrientation;
             }
 

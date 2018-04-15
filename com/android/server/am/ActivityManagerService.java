@@ -27,6 +27,7 @@ import static android.Manifest.permission.MANAGE_ACTIVITY_STACKS;
 import static android.Manifest.permission.READ_FRAME_BUFFER;
 import static android.Manifest.permission.REMOVE_TASKS;
 import static android.Manifest.permission.START_TASKS_FROM_RECENTS;
+import static android.Manifest.permission.STOP_APP_SWITCHES;
 import static android.app.ActivityManager.LOCK_TASK_MODE_NONE;
 import static android.app.ActivityManager.RESIZE_MODE_PRESERVE_WINDOW;
 import static android.app.ActivityManager.SPLIT_SCREEN_CREATE_MODE_TOP_OR_LEFT;
@@ -38,6 +39,7 @@ import static android.app.ActivityManagerInternal.ASSIST_KEY_STRUCTURE;
 import static android.app.ActivityThread.PROC_START_SEQ_IDENT;
 import static android.app.AppOpsManager.OP_ASSIST_STRUCTURE;
 import static android.app.AppOpsManager.OP_NONE;
+import static android.app.WindowConfiguration.ACTIVITY_TYPE_HOME;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_STANDARD;
 import static android.app.WindowConfiguration.ACTIVITY_TYPE_UNDEFINED;
 import static android.app.WindowConfiguration.WINDOWING_MODE_FREEFORM;
@@ -50,6 +52,7 @@ import static android.app.WindowConfiguration.WINDOWING_MODE_UNDEFINED;
 import static android.content.Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS;
 import static android.content.Intent.FLAG_ACTIVITY_NEW_TASK;
 import static android.content.Intent.FLAG_ACTIVITY_TASK_ON_HOME;
+import static android.content.pm.ApplicationInfo.HIDDEN_API_ENFORCEMENT_DEFAULT;
 import static android.content.pm.PackageManager.FEATURE_ACTIVITIES_ON_SECONDARY_DISPLAYS;
 import static android.content.pm.PackageManager.FEATURE_FREEFORM_WINDOW_MANAGEMENT;
 import static android.content.pm.PackageManager.FEATURE_LEANBACK_ONLY;
@@ -116,6 +119,7 @@ import static android.provider.Settings.Global.DEBUG_APP;
 import static android.provider.Settings.Global.DEVELOPMENT_ENABLE_FREEFORM_WINDOWS_SUPPORT;
 import static android.provider.Settings.Global.DEVELOPMENT_FORCE_RESIZABLE_ACTIVITIES;
 import static android.provider.Settings.Global.DEVELOPMENT_FORCE_RTL;
+import static android.provider.Settings.Global.HIDE_ERROR_DIALOGS;
 import static android.provider.Settings.Global.NETWORK_ACCESS_TIMEOUT_MS;
 import static android.provider.Settings.Global.WAIT_FOR_DEBUGGER;
 import static android.provider.Settings.System.FONT_SCALE;
@@ -204,6 +208,8 @@ import static android.view.WindowManager.TRANSIT_NONE;
 import static android.view.WindowManager.TRANSIT_TASK_IN_PLACE;
 import static android.view.WindowManager.TRANSIT_TASK_OPEN;
 import static android.view.WindowManager.TRANSIT_TASK_TO_FRONT;
+import static com.android.server.wm.RecentsAnimationController.REORDER_MOVE_TO_ORIGINAL_POSITION;
+import static com.android.server.wm.RecentsAnimationController.REORDER_KEEP_IN_PLACE;
 import static org.xmlpull.v1.XmlPullParser.END_DOCUMENT;
 import static org.xmlpull.v1.XmlPullParser.START_TAG;
 
@@ -257,7 +263,6 @@ import android.app.WaitResult;
 import android.app.WindowConfiguration.ActivityType;
 import android.app.WindowConfiguration.WindowingMode;
 import android.app.admin.DevicePolicyCache;
-import android.app.admin.DevicePolicyManager;
 import android.app.assist.AssistContent;
 import android.app.assist.AssistStructure;
 import android.app.backup.IBackupManager;
@@ -762,7 +767,7 @@ public class ActivityManagerService extends IActivityManager.Stub
     /**
      * The controller for all operations related to locktask.
      */
-    final LockTaskController mLockTaskController;
+    private final LockTaskController mLockTaskController;
 
     final UserController mUserController;
 
@@ -1279,17 +1284,24 @@ public class ActivityManagerService extends IActivityManager.Stub
 
     private final class FontScaleSettingObserver extends ContentObserver {
         private final Uri mFontScaleUri = Settings.System.getUriFor(FONT_SCALE);
+        private final Uri mHideErrorDialogsUri = Settings.Global.getUriFor(HIDE_ERROR_DIALOGS);
 
         public FontScaleSettingObserver() {
             super(mHandler);
             ContentResolver resolver = mContext.getContentResolver();
             resolver.registerContentObserver(mFontScaleUri, false, this, UserHandle.USER_ALL);
+            resolver.registerContentObserver(mHideErrorDialogsUri, false, this,
+                    UserHandle.USER_ALL);
         }
 
         @Override
         public void onChange(boolean selfChange, Uri uri, @UserIdInt int userId) {
             if (mFontScaleUri.equals(uri)) {
                 updateFontScaleIfNeeded(userId);
+            } else if (mHideErrorDialogsUri.equals(uri)) {
+                synchronized (ActivityManagerService.this) {
+                    updateShouldShowDialogsLocked(getGlobalConfiguration());
+                }
             }
         }
     }
@@ -1918,6 +1930,8 @@ public class ActivityManagerService extends IActivityManager.Stub
     static final int FIRST_COMPAT_MODE_MSG = 300;
     static final int FIRST_SUPERVISOR_STACK_MSG = 100;
 
+    static final String SERVICE_RECORD_KEY = "servicerecord";
+
     static ServiceThread sKillThread = null;
     static KillHandler sKillHandler = null;
 
@@ -1944,7 +1958,7 @@ public class ActivityManagerService extends IActivityManager.Stub
     final ActivityManagerConstants mConstants;
 
     // Encapsulates the global setting "hidden_api_blacklist_exemptions"
-    final HiddenApiBlacklist mHiddenApiBlacklist;
+    final HiddenApiSettings mHiddenApiBlacklist;
 
     PackageManagerInternal mPackageManagerInt;
 
@@ -2166,7 +2180,8 @@ public class ActivityManagerService extends IActivityManager.Stub
                 mServices.serviceForegroundTimeout((ServiceRecord)msg.obj);
             } break;
             case SERVICE_FOREGROUND_CRASH_MSG: {
-                mServices.serviceForegroundCrash((ProcessRecord)msg.obj);
+                mServices.serviceForegroundCrash(
+                    (ProcessRecord) msg.obj, msg.getData().getCharSequence(SERVICE_RECORD_KEY));
             } break;
             case DISPATCH_PENDING_INTENT_CANCEL_MSG: {
                 RemoteCallbackList<IResultReceiver> callbacks
@@ -2878,17 +2893,20 @@ public class ActivityManagerService extends IActivityManager.Stub
     }
 
     /**
-     * Encapsulates the global setting "hidden_api_blacklist_exemptions", including tracking the
-     * latest value via a content observer.
+     * Encapsulates global settings related to hidden API enforcement behaviour, including tracking
+     * the latest value via a content observer.
      */
-    static class HiddenApiBlacklist extends ContentObserver {
+    static class HiddenApiSettings extends ContentObserver {
 
         private final Context mContext;
         private boolean mBlacklistDisabled;
         private String mExemptionsStr;
         private List<String> mExemptions = Collections.emptyList();
+        private int mLogSampleRate = -1;
+        @HiddenApiEnforcementPolicy private int mPolicyPreP = HIDDEN_API_ENFORCEMENT_DEFAULT;
+        @HiddenApiEnforcementPolicy private int mPolicyP = HIDDEN_API_ENFORCEMENT_DEFAULT;
 
-        public HiddenApiBlacklist(Handler handler, Context context) {
+        public HiddenApiSettings(Handler handler, Context context) {
             super(handler);
             mContext = context;
         }
@@ -2896,6 +2914,18 @@ public class ActivityManagerService extends IActivityManager.Stub
         public void registerObserver() {
             mContext.getContentResolver().registerContentObserver(
                     Settings.Global.getUriFor(Settings.Global.HIDDEN_API_BLACKLIST_EXEMPTIONS),
+                    false,
+                    this);
+            mContext.getContentResolver().registerContentObserver(
+                    Settings.Global.getUriFor(Settings.Global.HIDDEN_API_ACCESS_LOG_SAMPLING_RATE),
+                    false,
+                    this);
+            mContext.getContentResolver().registerContentObserver(
+                    Settings.Global.getUriFor(Settings.Global.HIDDEN_API_POLICY_PRE_P_APPS),
+                    false,
+                    this);
+            mContext.getContentResolver().registerContentObserver(
+                    Settings.Global.getUriFor(Settings.Global.HIDDEN_API_POLICY_P_APPS),
                     false,
                     this);
             update();
@@ -2917,11 +2947,39 @@ public class ActivityManagerService extends IActivityManager.Stub
                 }
                 zygoteProcess.setApiBlacklistExemptions(mExemptions);
             }
+            int logSampleRate = Settings.Global.getInt(mContext.getContentResolver(),
+                    Settings.Global.HIDDEN_API_ACCESS_LOG_SAMPLING_RATE, -1);
+            if (logSampleRate < 0 || logSampleRate > 0x10000) {
+                logSampleRate = -1;
+            }
+            if (logSampleRate != -1 && logSampleRate != mLogSampleRate) {
+                mLogSampleRate = logSampleRate;
+                zygoteProcess.setHiddenApiAccessLogSampleRate(mLogSampleRate);
+            }
+            mPolicyPreP = getValidEnforcementPolicy(Settings.Global.HIDDEN_API_POLICY_PRE_P_APPS);
+            mPolicyP = getValidEnforcementPolicy(Settings.Global.HIDDEN_API_POLICY_P_APPS);
+        }
 
+        private @HiddenApiEnforcementPolicy int getValidEnforcementPolicy(String settingsKey) {
+            int policy = Settings.Global.getInt(mContext.getContentResolver(), settingsKey,
+                    ApplicationInfo.HIDDEN_API_ENFORCEMENT_DEFAULT);
+            if (ApplicationInfo.isValidHiddenApiEnforcementPolicy(policy)) {
+                return policy;
+            } else {
+                return ApplicationInfo.HIDDEN_API_ENFORCEMENT_DEFAULT;
+            }
         }
 
         boolean isDisabled() {
             return mBlacklistDisabled;
+        }
+
+        @HiddenApiEnforcementPolicy int getPolicyForPrePApps() {
+            return mPolicyPreP;
+        }
+
+        @HiddenApiEnforcementPolicy int getPolicyForPApps() {
+            return mPolicyP;
         }
 
         public void onChange(boolean selfChange) {
@@ -3096,7 +3154,7 @@ public class ActivityManagerService extends IActivityManager.Stub
             }
         };
 
-        mHiddenApiBlacklist = new HiddenApiBlacklist(mHandler, mContext);
+        mHiddenApiBlacklist = new HiddenApiSettings(mHandler, mContext);
 
         Watchdog.getInstance().addMonitor(this);
         Watchdog.getInstance().addThread(mHandler);
@@ -4212,6 +4270,9 @@ public class ActivityManagerService extends IActivityManager.Stub
             }
 
             if (!disableHiddenApiChecks && !mHiddenApiBlacklist.isDisabled()) {
+                app.info.maybeUpdateHiddenApiEnforcementPolicy(
+                        mHiddenApiBlacklist.getPolicyForPrePApps(),
+                        mHiddenApiBlacklist.getPolicyForPApps());
                 @HiddenApiEnforcementPolicy int policy =
                         app.info.getHiddenApiEnforcementPolicy();
                 int policyBits = (policy << Zygote.API_ENFORCEMENT_POLICY_SHIFT);
@@ -5238,12 +5299,14 @@ public class ActivityManagerService extends IActivityManager.Stub
     }
 
     @Override
-    public void cancelRecentsAnimation() {
+    public void cancelRecentsAnimation(boolean restoreHomeStackPosition) {
         enforceCallerIsRecentsOrHasPermission(MANAGE_ACTIVITY_STACKS, "cancelRecentsAnimation()");
         final long origId = Binder.clearCallingIdentity();
         try {
             synchronized (this) {
-                mWindowManager.cancelRecentsAnimation();
+                mWindowManager.cancelRecentsAnimation(restoreHomeStackPosition
+                        ? REORDER_MOVE_TO_ORIGINAL_POSITION
+                        : REORDER_KEEP_IN_PLACE, "cancelRecentsAnimation");
             }
         } finally {
             Binder.restoreCallingIdentity(origId);
@@ -7635,7 +7698,7 @@ public class ActivityManagerService extends IActivityManager.Stub
             // target APIs higher than O MR1. Since access to the serial
             // is now behind a permission we push down the value.
             final String buildSerial = (appInfo.targetSandboxVersion < 2
-                    && appInfo.targetSdkVersion <= Build.VERSION_CODES.O_MR1)
+                    && appInfo.targetSdkVersion < Build.VERSION_CODES.P)
                             ? sTheRealBuildSerial : Build.UNKNOWN;
 
             // Check if this is a secondary process that should be incorporated into some
@@ -12392,6 +12455,10 @@ public class ActivityManagerService extends IActivityManager.Stub
         return mActivityStartController;
     }
 
+    LockTaskController getLockTaskController() {
+        return mLockTaskController;
+    }
+
     ClientLifecycleManager getLifecycleManager() {
         return mLifecycleManager;
     }
@@ -12951,9 +13018,13 @@ public class ActivityManagerService extends IActivityManager.Stub
         } catch (RemoteException exc) {
             // Ignore.
         }
+        return isBackgroundRestrictedNoCheck(callingUid, packageName);
+    }
+
+    boolean isBackgroundRestrictedNoCheck(final int uid, final String packageName) {
         final int mode = mAppOpsService.checkOperation(AppOpsManager.OP_RUN_ANY_IN_BACKGROUND,
-                callingUid, packageName);
-        return (mode != AppOpsManager.MODE_ALLOWED);
+                uid, packageName);
+        return mode != AppOpsManager.MODE_ALLOWED;
     }
 
     @Override
@@ -13335,12 +13406,7 @@ public class ActivityManagerService extends IActivityManager.Stub
 
     @Override
     public void stopAppSwitches() {
-        if (checkCallingPermission(android.Manifest.permission.STOP_APP_SWITCHES)
-                != PackageManager.PERMISSION_GRANTED) {
-            throw new SecurityException("viewquires permission "
-                    + android.Manifest.permission.STOP_APP_SWITCHES);
-        }
-
+        enforceCallerIsRecentsOrHasPermission(STOP_APP_SWITCHES, "stopAppSwitches");
         synchronized(this) {
             mAppSwitchesAllowedTime = SystemClock.uptimeMillis()
                     + APP_SWITCH_DELAY_TIME;
@@ -13350,12 +13416,7 @@ public class ActivityManagerService extends IActivityManager.Stub
     }
 
     public void resumeAppSwitches() {
-        if (checkCallingPermission(android.Manifest.permission.STOP_APP_SWITCHES)
-                != PackageManager.PERMISSION_GRANTED) {
-            throw new SecurityException("Requires permission "
-                    + android.Manifest.permission.STOP_APP_SWITCHES);
-        }
-
+        enforceCallerIsRecentsOrHasPermission(STOP_APP_SWITCHES, "resumeAppSwitches");
         synchronized(this) {
             // Note that we don't execute any pending app switches... we will
             // let those wait until either the timeout, or the next start
@@ -13382,9 +13443,11 @@ public class ActivityManagerService extends IActivityManager.Stub
             return true;
         }
 
-        int perm = checkComponentPermission(
-                android.Manifest.permission.STOP_APP_SWITCHES, sourcePid,
-                sourceUid, -1, true);
+        if (mRecentTasks.isCallerRecents(sourceUid)) {
+            return true;
+        }
+
+        int perm = checkComponentPermission(STOP_APP_SWITCHES, sourcePid, sourceUid, -1, true);
         if (perm == PackageManager.PERMISSION_GRANTED) {
             return true;
         }
@@ -13395,9 +13458,7 @@ public class ActivityManagerService extends IActivityManager.Stub
         // If the actual IPC caller is different from the logical source, then
         // also see if they are allowed to control app switches.
         if (callingUid != -1 && callingUid != sourceUid) {
-            perm = checkComponentPermission(
-                    android.Manifest.permission.STOP_APP_SWITCHES, callingPid,
-                    callingUid, -1, true);
+            perm = checkComponentPermission(STOP_APP_SWITCHES, callingPid, callingUid, -1, true);
             if (perm == PackageManager.PERMISSION_GRANTED) {
                 return true;
             }
@@ -16995,6 +17056,11 @@ public class ActivityManagerService extends IActivityManager.Stub
                     pw.println("ms");
                 }
                 mUidObservers.finishBroadcast();
+
+                pw.println();
+                pw.println("  ServiceManager statistics:");
+                ServiceManager.sStatLogger.dump(pw, "    ");
+                pw.println();
             }
         }
         pw.println("  mForceBackgroundCheck=" + mForceBackgroundCheck);
@@ -21058,6 +21124,7 @@ public class ActivityManagerService extends IActivityManager.Stub
             }
         }
 
+        final String action = intent.getAction();
         BroadcastOptions brOptions = null;
         if (bOptions != null) {
             brOptions = new BroadcastOptions(bOptions);
@@ -21078,11 +21145,16 @@ public class ActivityManagerService extends IActivityManager.Stub
                     throw new SecurityException(msg);
                 }
             }
+            if (brOptions.isDontSendToRestrictedApps()
+                    && isBackgroundRestrictedNoCheck(callingUid, callerPackage)) {
+                Slog.i(TAG, "Not sending broadcast " + action + " - app " + callerPackage
+                        + " has background restrictions");
+                return ActivityManager.START_CANCELED;
+            }
         }
 
         // Verify that protected broadcasts are only being sent by system code,
         // and that system code is only sending protected broadcasts.
-        final String action = intent.getAction();
         final boolean isProtectedBroadcast;
         try {
             isProtectedBroadcast = AppGlobals.getPackageManager().isProtectedBroadcast(action);
@@ -21904,8 +21976,6 @@ public class ActivityManagerService extends IActivityManager.Stub
         "com.android.frameworks.locationtests",
         "com.android.frameworks.coretests.privacy",
         "com.android.settings.ui",
-        "com.android.perftests.core",
-        "com.android.perftests.multiuser",
     };
 
     public boolean startInstrumentation(ComponentName className,
@@ -22443,7 +22513,7 @@ public class ActivityManagerService extends IActivityManager.Stub
                 mUserController.getCurrentUserId());
 
         // TODO: If our config changes, should we auto dismiss any currently showing dialogs?
-        mShowDialogs = shouldShowDialogs(mTempConfig);
+        updateShouldShowDialogsLocked(mTempConfig);
 
         AttributeCache ac = AttributeCache.instance();
         if (ac != null) {
@@ -22698,7 +22768,7 @@ public class ActivityManagerService extends IActivityManager.Stub
      * A thought: SystemUI might also want to get told about this, the Power
      * dialog / global actions also might want different behaviors.
      */
-    private static boolean shouldShowDialogs(Configuration config) {
+    private void updateShouldShowDialogsLocked(Configuration config) {
         final boolean inputMethodExists = !(config.keyboard == Configuration.KEYBOARD_NOKEYS
                                    && config.touchscreen == Configuration.TOUCHSCREEN_NOTOUCH
                                    && config.navigation == Configuration.NAVIGATION_NONAV);
@@ -22707,7 +22777,9 @@ public class ActivityManagerService extends IActivityManager.Stub
                 && !(modeType == Configuration.UI_MODE_TYPE_WATCH && Build.IS_USER)
                 && modeType != Configuration.UI_MODE_TYPE_TELEVISION
                 && modeType != Configuration.UI_MODE_TYPE_VR_HEADSET);
-        return inputMethodExists && uiModeSupportsDialogs;
+        final boolean hideDialogsSet = Settings.Global.getInt(mContext.getContentResolver(),
+                HIDE_ERROR_DIALOGS, 0) != 0;
+        mShowDialogs = inputMethodExists && uiModeSupportsDialogs && !hideDialogsSet;
     }
 
     @Override
@@ -26614,7 +26686,7 @@ public class ActivityManagerService extends IActivityManager.Stub
                 record.waitingForNetwork = false;
                 final long totalTime = SystemClock.uptimeMillis() - startTime;
                 if (totalTime >= mWaitForNetworkTimeoutMs || DEBUG_NETWORK) {
-                    Slog.wtf(TAG_NETWORK, "Total time waited for network rules to get updated: "
+                    Slog.w(TAG_NETWORK, "Total time waited for network rules to get updated: "
                             + totalTime + ". Uid: " + callingUid + " procStateSeq: "
                             + procStateSeq + " UidRec: " + record
                             + " validateUidRec: " + mValidateUids.get(callingUid));

@@ -20,6 +20,8 @@ import static android.app.ActivityManager.StackId.INVALID_STACK_ID;
 import static android.app.AppOpsManager.MODE_ALLOWED;
 import static android.app.AppOpsManager.MODE_DEFAULT;
 import static android.app.AppOpsManager.OP_NONE;
+import static android.app.AppOpsManager.OP_SYSTEM_ALERT_WINDOW;
+import static android.app.AppOpsManager.OP_TOAST_WINDOW;
 import static android.os.PowerManager.DRAW_WAKE_LOCK;
 import static android.os.Trace.TRACE_TAG_WINDOW_MANAGER;
 import static android.view.Display.DEFAULT_DISPLAY;
@@ -64,7 +66,6 @@ import static android.view.WindowManager.LayoutParams.TYPE_INPUT_METHOD_DIALOG;
 import static android.view.WindowManager.LayoutParams.TYPE_MAGNIFICATION_OVERLAY;
 import static android.view.WindowManager.LayoutParams.TYPE_NAVIGATION_BAR;
 import static android.view.WindowManager.LayoutParams.TYPE_NAVIGATION_BAR_PANEL;
-import static android.view.WindowManager.LayoutParams.TYPE_STATUS_BAR;
 import static android.view.WindowManager.LayoutParams.TYPE_TOAST;
 import static android.view.WindowManager.LayoutParams.TYPE_WALLPAPER;
 import static android.view.WindowManager.LayoutParams.isSystemAlertWindowType;
@@ -178,6 +179,7 @@ import android.util.MergedConfiguration;
 import android.util.Slog;
 import android.util.TimeUtils;
 import android.util.proto.ProtoOutputStream;
+import android.view.Display;
 import android.view.DisplayCutout;
 import android.view.DisplayInfo;
 import android.view.Gravity;
@@ -266,6 +268,8 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
      * animation is done.
      */
     boolean mPolicyVisibilityAfterAnim = true;
+    // overlay window is hidden because the owning app is suspended
+    private boolean mHiddenWhileSuspended;
     private boolean mAppOpVisibility = true;
     boolean mPermanentlyHidden; // the window should never be shown again
     // This is a non-system overlay window that is currently force hidden.
@@ -630,6 +634,11 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
      * Used for testing because the real PowerManager is final.
      */
     private PowerManagerWrapper mPowerManagerWrapper;
+
+    /**
+     * A frame number in which changes requested in this layout will be rendered.
+     */
+    private long mFrameNumber = -1;
 
     /**
      * Compares two window sub-layers and returns -1 if the first is lesser than the second in terms
@@ -1366,6 +1375,7 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
         // Window was not laid out for this display yet, so make sure mLayoutSeq does not match.
         if (dc != null) {
             mLayoutSeq = dc.mLayoutSeq - 1;
+            mInputWindowHandle.displayId = dc.getDisplayId();
         }
     }
 
@@ -1378,7 +1388,7 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
     public int getDisplayId() {
         final DisplayContent displayContent = getDisplayContent();
         if (displayContent == null) {
-            return -1;
+            return Display.INVALID_DISPLAY;
         }
         return displayContent.getDisplayId();
     }
@@ -1996,6 +2006,11 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
                     // Try starting an animation.
                     if (mWinAnimator.applyAnimationLocked(transit, false)) {
                         mAnimatingExit = true;
+
+                        // mAnimatingExit affects canAffectSystemUiFlags(). Run layout such that
+                        // any change from that is performed immediately.
+                        setDisplayLayoutNeeded();
+                        mService.requestTraversal();
                     }
                     //TODO (multidisplay): Magnification is supported only for the default display.
                     if (mService.mAccessibilityController != null && displayId == DEFAULT_DISPLAY) {
@@ -2482,6 +2497,10 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
             // to handle their windows being removed from under them.
             return false;
         }
+        if (mHiddenWhileSuspended) {
+            // Being hidden due to owner package being suspended.
+            return false;
+        }
         if (mForceHideNonSystemOverlayWindow) {
             // This is an alert window that is currently force hidden.
             return false;
@@ -2575,6 +2594,22 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
             hideLw(true /* doAnimation */, true /* requestAnim */);
         } else {
             showLw(true /* doAnimation */, true /* requestAnim */);
+        }
+    }
+
+    void setHiddenWhileSuspended(boolean hide) {
+        if (mOwnerCanAddInternalSystemWindow
+                || (!isSystemAlertWindowType(mAttrs.type) && mAttrs.type != TYPE_TOAST)) {
+            return;
+        }
+        if (mHiddenWhileSuspended == hide) {
+            return;
+        }
+        mHiddenWhileSuspended = hide;
+        if (hide) {
+            hideLw(true, true);
+        } else {
+            showLw(true, true);
         }
     }
 
@@ -3298,7 +3333,8 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
             pw.println(Integer.toHexString(mSystemUiVisibility));
         }
         if (!mPolicyVisibility || !mPolicyVisibilityAfterAnim || !mAppOpVisibility
-                || isParentWindowHidden()|| mPermanentlyHidden || mForceHideNonSystemOverlayWindow) {
+                || isParentWindowHidden()|| mPermanentlyHidden || mForceHideNonSystemOverlayWindow
+                || mHiddenWhileSuspended) {
             pw.print(prefix); pw.print("mPolicyVisibility=");
                     pw.print(mPolicyVisibility);
                     pw.print(" mPolicyVisibilityAfterAnim=");
@@ -3307,6 +3343,7 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
                     pw.print(mAppOpVisibility);
                     pw.print(" parentHidden="); pw.print(isParentWindowHidden());
                     pw.print(" mPermanentlyHidden="); pw.print(mPermanentlyHidden);
+                    pw.print(" mHiddenWhileSuspended="); pw.print(mHiddenWhileSuspended);
                     pw.print(" mForceHideNonSystemOverlayWindow="); pw.println(
                     mForceHideNonSystemOverlayWindow);
         }
@@ -4623,7 +4660,7 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
                 mLastSurfaceInsets.set(mAttrs.surfaceInsets);
                 t.deferTransactionUntil(mSurfaceControl,
                         mWinAnimator.mSurfaceController.mSurfaceControl.getHandle(),
-                        mAttrs.frameNumber);
+                        getFrameNumber());
             }
         }
     }
@@ -4737,6 +4774,14 @@ class WindowState extends WindowContainer<WindowState> implements WindowManagerP
     @Override
     public boolean isInputMethodTarget() {
         return mService.mInputMethodTarget == this;
+    }
+
+    long getFrameNumber() {
+        return mFrameNumber;
+    }
+
+    void setFrameNumber(long frameNumber) {
+        mFrameNumber = frameNumber;
     }
 
     private final class MoveAnimationSpec implements AnimationSpec {

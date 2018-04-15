@@ -246,11 +246,6 @@ public class CompanionProxyShard implements Closeable, ProxyServiceManager.Proxy
                         Log.d(TAG, "CompanionProxyShard [ " + mInstance + " ] Request to start"
                                 + " companion sysproxy network");
                     }
-                    if (companionIsNotAvailable()) {
-                        Log.e(TAG, "CompanionProxyShard [ " + mInstance + " ] Unable to start"
-                                + " sysproxy bluetooth off or companion unpaired");
-                        return;
-                    }
                     if (mState.checkState(State.SYSPROXY_CONNECTED)) {
                         if (Log.isLoggable(TAG, Log.DEBUG)) {
                             Log.d(TAG, "CompanionProxyShard [ " + mInstance + " ] companion proxy"
@@ -302,6 +297,7 @@ public class CompanionProxyShard implements Closeable, ProxyServiceManager.Proxy
                     }
                     if (!mIsClosed && mState.current() != State.SYSPROXY_DISCONNECTED) {
                         disconnectAndNotify(Reason.SYSPROXY_DISCONNECTED);
+                        setUpRetry();
                     }
                     mState.advanceState(mInstance, State.SYSPROXY_DISCONNECTED);
                     break;
@@ -324,17 +320,21 @@ public class CompanionProxyShard implements Closeable, ProxyServiceManager.Proxy
                     mHandler.removeMessages(WHAT_START_SYSPROXY);
                     mHandler.removeMessages(WHAT_RESET_CONNECTION);
                     disconnectNativeInBackground();
-                    // Setup a reconnect sequence if shard has not been closed.
-                    if (!mIsClosed) {
-                        final int nextRetry = mReconnectBackoff.getNextBackoff();
-                        mHandler.sendEmptyMessageDelayed(WHAT_START_SYSPROXY, nextRetry * 1000);
-                        Log.w(TAG, "CompanionProxyShard [ " + mInstance + " ] Proxy reset"
-                                + " Attempting reconnect in " + nextRetry + " seconds");
-                    }
+                    setUpRetry();
                     break;
             }
         }
     };
+
+    private void setUpRetry() {
+        // Setup a reconnect sequence if shard has not been closed.
+        if (!mIsClosed) {
+            final int nextRetry = mReconnectBackoff.getNextBackoff();
+            mHandler.sendEmptyMessageDelayed(WHAT_START_SYSPROXY, nextRetry * 1000);
+            Log.w(TAG, "CompanionProxyShard [ " + mInstance + " ] Proxy reset"
+                    + " Attempting reconnect in " + nextRetry + " seconds");
+        }
+    }
 
     /** Use binder API to directly request rfcomm socket from bluetooth module */
     @MainThread
@@ -569,29 +569,6 @@ public class CompanionProxyShard implements Closeable, ProxyServiceManager.Proxy
         if (!mIsClosed) {
             mListener.onProxyConnectionChange(isConnected, mProxyServiceManager.getNetworkScore());
         }
-    }
-
-    /** Check if bluetooth is on and companion paired before connecting to sysproxy */
-    private boolean companionIsNotAvailable() {
-        return !isBluetoothOn() || companionHasBecomeUnpaired();
-    }
-
-    private boolean companionHasBecomeUnpaired() {
-        final boolean unpaired = mCompanionDevice.getBondState() == BluetoothDevice.BOND_NONE;
-        if (unpaired) {
-            Log.w(TAG, "CompanionProxyShard [ " + mInstance + " ] Companion has become unpaired");
-        }
-        return unpaired;
-    }
-
-    private boolean isBluetoothOn() {
-        final BluetoothAdapter adapter = BluetoothAdapter.getDefaultAdapter();
-        if (adapter != null && adapter.isEnabled()) {
-            return true;
-        }
-        Log.w(TAG, "CompanionProxyShard [ " + mInstance + " ] Bluetooth adapter is off or in"
-                + " unknown state");
-        return false;
     }
 
     private abstract static class DefaultPriorityAsyncTask<Params, Progress, Result>

@@ -19,7 +19,6 @@ package androidx.slice.widget;
 import static android.app.slice.Slice.HINT_HORIZONTAL;
 import static android.app.slice.Slice.SUBTYPE_MESSAGE;
 import static android.app.slice.Slice.SUBTYPE_SOURCE;
-import static android.app.slice.SliceItem.FORMAT_IMAGE;
 import static android.app.slice.SliceItem.FORMAT_INT;
 import static android.app.slice.SliceItem.FORMAT_TEXT;
 
@@ -29,6 +28,7 @@ import android.app.slice.Slice;
 import android.content.Context;
 import android.util.AttributeSet;
 import android.view.LayoutInflater;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewGroup.LayoutParams;
@@ -64,15 +64,30 @@ public class LargeSliceAdapter extends RecyclerView.Adapter<LargeSliceAdapter.Sl
     private SliceView.OnSliceActionListener mSliceObserver;
     private int mColor;
     private AttributeSet mAttrs;
+    private int mDefStyleAttr;
+    private int mDefStyleRes;
     private List<SliceItem> mSliceActions;
     private boolean mShowLastUpdated;
     private long mLastUpdated;
+    private SliceView mParent;
+    private LargeTemplateView mTemplateView;
 
     public LargeSliceAdapter(Context context) {
         mContext = context;
         setHasStableIds(true);
     }
 
+    /**
+     * Sets the SliceView parent and the template parent.
+     */
+    public void setParents(SliceView parent, LargeTemplateView templateView) {
+        mParent = parent;
+        mTemplateView = templateView;
+    }
+
+    /**
+     * Sets the observer to pass down to child views.
+     */
     public void setSliceObserver(SliceView.OnSliceActionListener observer) {
         mSliceObserver = observer;
     }
@@ -105,8 +120,10 @@ public class LargeSliceAdapter extends RecyclerView.Adapter<LargeSliceAdapter.Sl
     /**
      * Sets the attribute set to use for views in the list.
      */
-    public void setStyle(AttributeSet attrs) {
+    public void setStyle(AttributeSet attrs, int defStyleAttr, int defStyleRes) {
         mAttrs = attrs;
+        mDefStyleAttr = defStyleAttr;
+        mDefStyleRes = defStyleRes;
         notifyDataSetChanged();
     }
 
@@ -151,17 +168,7 @@ public class LargeSliceAdapter extends RecyclerView.Adapter<LargeSliceAdapter.Sl
     @Override
     public void onBindViewHolder(SliceViewHolder holder, int position) {
         SliceWrapper slice = mSlices.get(position);
-        if (holder.mSliceView != null) {
-            final boolean isHeader = position == HEADER_INDEX;
-            holder.mSliceView.setTint(mColor);
-            holder.mSliceView.setStyle(mAttrs);
-            holder.mSliceView.setSliceItem(slice.mItem, isHeader, position, mSliceObserver);
-            if (isHeader && holder.mSliceView instanceof RowView) {
-                holder.mSliceView.setSliceActions(mSliceActions);
-                holder.mSliceView.setLastUpdated(mLastUpdated);
-                holder.mSliceView.setShowLastUpdated(mShowLastUpdated);
-            }
-        }
+        holder.bind(slice.mItem, position);
     }
 
     private void notifyHeaderChanged() {
@@ -184,7 +191,8 @@ public class LargeSliceAdapter extends RecyclerView.Adapter<LargeSliceAdapter.Sl
                         null);
                 break;
         }
-        ((SliceChildView) v).setMode(MODE_LARGE);
+        int mode = mParent != null ? mParent.getMode() : MODE_LARGE;
+        ((SliceChildView) v).setMode(mode);
         return v;
     }
 
@@ -221,12 +229,53 @@ public class LargeSliceAdapter extends RecyclerView.Adapter<LargeSliceAdapter.Sl
     /**
      * A {@link RecyclerView.ViewHolder} for presenting slices in {@link LargeSliceAdapter}.
      */
-    public static class SliceViewHolder extends RecyclerView.ViewHolder {
-        public final SliceChildView mSliceView;
+    public class SliceViewHolder extends RecyclerView.ViewHolder implements View.OnTouchListener,
+            View.OnClickListener {
+        public final SliceChildView mSliceChildView;
 
         public SliceViewHolder(View itemView) {
             super(itemView);
-            mSliceView = itemView instanceof SliceChildView ? (SliceChildView) itemView : null;
+            mSliceChildView = itemView instanceof SliceChildView ? (SliceChildView) itemView : null;
+        }
+
+        void bind(SliceItem item, int position) {
+            if (mSliceChildView == null || item == null) {
+                return;
+            }
+            // Click listener used to pipe click events to parent
+            mSliceChildView.setOnClickListener(this);
+            // Touch listener used to pipe events to touch feedback drawable
+            mSliceChildView.setOnTouchListener(this);
+
+            final boolean isHeader = position == HEADER_INDEX;
+            mSliceChildView.setTint(mColor);
+            mSliceChildView.setStyle(mAttrs, mDefStyleAttr, mDefStyleRes);
+            mSliceChildView.setSliceItem(item, isHeader, position, mSliceObserver);
+            if (isHeader && mSliceChildView instanceof RowView) {
+                mSliceChildView.setSliceActions(mSliceActions);
+                mSliceChildView.setLastUpdated(mLastUpdated);
+                mSliceChildView.setShowLastUpdated(mShowLastUpdated);
+            }
+            int[] info = new int[2];
+            info[0] = ListContent.getRowType(mContext, item, isHeader, mSliceActions);
+            info[1] = position;
+            mSliceChildView.setTag(info);
+        }
+
+        @Override
+        public void onClick(View v) {
+            if (mParent != null) {
+                mParent.setClickInfo((int[]) v.getTag());
+                mParent.performClick();
+            }
+        }
+
+        @Override
+        public boolean onTouch(View v, MotionEvent event) {
+            if (mTemplateView != null) {
+                mTemplateView.onForegroundActivated(event);
+            }
+            return false;
         }
     }
 
@@ -253,12 +302,8 @@ public class LargeSliceAdapter extends RecyclerView.Adapter<LargeSliceAdapter.Sl
             while (items.hasNext()) {
                 SliceItem i = items.next();
                 builder.append(i.getFormat());
-                //i.removeHint(Slice.HINT_SELECTED);
                 builder.append(i.getHints());
                 switch (i.getFormat()) {
-                    case FORMAT_IMAGE:
-                        builder.append(i.getIcon());
-                        break;
                     case FORMAT_TEXT:
                         builder.append(i.getText());
                         break;
